@@ -63,7 +63,7 @@ Every identifier is validated against DuckDB metadata and quoted. Values are bou
 ### Category values API
 `GET /api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values`
 
-For text columns, returns every distinct non-null value with its row count, ordered by count descending then value. The frontend uses this for searchable single/multi-select category filters.
+For text columns, returns a bounded page of distinct non-null values with row counts, ordered by count descending then value. Query parameters are `search` (case-insensitive, default empty), `offset` (default 0), and `limit` (default 200, maximum 500). The response is `{values, total, offset, limit, has_more}` for the filtered distinct set, so every category remains discoverable through server search and paging without one giant payload.
 
 ### Statistics API
 `GET /api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats`
@@ -77,7 +77,7 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 - Table: sticky first row, sticky first column, horizontal/vertical scrolling, compact cells, null token styling.
 - Column header: name, type, ordered sort marker, filter action, nullity gauge.
 - Filter bar: removable condition chips; per-column operator/value editor; supports repeated conditions.
-- Text/category columns load all distinct non-null values into a searchable dropdown with checkboxes. Selecting one value applies a single-value category filter; selecting multiple values applies one OR-within-column filter. Separate filter chips still combine with AND.
+- Text/category columns load bounded pages of distinct non-null values into a server-searchable dropdown with checkboxes and “Load more.” Selecting one value applies a single-value category filter; selecting multiple values applies one OR-within-column filter. Separate filter chips still combine with AND.
 - Sort bar: ordered removable sort chips; clicking a header cycles asc → desc → off while preserving order of other sorts.
 - Numeric header click opens a modal/panel with summary cards and lightweight CSS/SVG histogram.
 - Loading, empty, and API error states are explicit. Keyboard focus and button labels remain accessible.

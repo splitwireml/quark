@@ -1,4 +1,4 @@
-import type { CategoryValue, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse } from './types';
+import type { CategoryValuesResponse, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -45,6 +45,16 @@ export function getColumnStats(nodeId: string, dataset: string, column: string):
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/stats`);
 }
 
-export function getCategoryValues(nodeId: string, dataset: string, column: string): Promise<{ values: CategoryValue[] }> {
-  return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/values`);
+export function getCategoryValues(
+  nodeId: string,
+  dataset: string,
+  column: string,
+  params: { search?: string; offset?: number; limit?: number } = {}
+): Promise<CategoryValuesResponse> {
+  const query = new URLSearchParams();
+  if (params.search) query.set('search', params.search);
+  if (params.offset !== undefined) query.set('offset', String(params.offset));
+  if (params.limit !== undefined) query.set('limit', String(params.limit));
+  const suffix = query.size ? `?${query}` : '';
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/values${suffix}`);
 }

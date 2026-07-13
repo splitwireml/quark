@@ -184,6 +184,40 @@ def test_filter_operators_and_bound_values(client):
     assert client.post(f"/api/nodes/{node['id']}/datasets/missing/query", json={}).status_code == 404
 
 
+def test_query_preserves_large_integers_and_filters_exactly(client, tmp_path):
+    db = tmp_path / "integers.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("""
+            CREATE TABLE integers(signed BIGINT, unsigned UBIGINT, ordinary INTEGER);
+            INSERT INTO integers VALUES
+              (9007199254740993, 18446744073709551615, 42),
+              (9007199254740992, 18446744073709551614, 43)
+        """)
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'integers')['id']}/query"
+
+    response = client.post(url, json={"sorts": [{"column": "ordinary", "direction": "asc"}]})
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"][0] == {
+        "signed": "9007199254740993",
+        "unsigned": "18446744073709551615",
+        "ordinary": 42,
+    }
+
+    for condition in (
+        {"column": "signed", "operator": "=", "value": "9007199254740993"},
+        {"column": "unsigned", "operator": "in", "value": ["18446744073709551615"]},
+    ):
+        filtered = client.post(url, json={"filters": [condition]})
+        assert filtered.status_code == 200, filtered.text
+        assert filtered.json()["total_rows"] == 1
+        assert filtered.json()["rows"][0]["ordinary"] == 42
+
+    stats = client.get(url.removesuffix("/query") + "/columns/signed/stats")
+    assert stats.status_code == 200, stats.text
+    assert (stats.json()["min"], stats.json()["max"]) == ("9007199254740992", "9007199254740993")
+
+
 def test_category_values_are_distinct_counted_safe_and_text_only(client, tmp_path):
     db = tmp_path / "categories.duckdb"
     with duckdb.connect(str(db)) as con:
@@ -198,14 +232,57 @@ def test_category_values_are_distinct_counted_safe_and_text_only(client, tmp_pat
 
     response = client.get(base + "/columns/category/values")
     assert response.status_code == 200, response.text
-    assert response.json() == {"values": [
-        {"value": "beta", "count": 2},
-        {"value": "' OR true --", "count": 1},
-        {"value": "O'Reilly", "count": 1},
-    ]}
+    assert response.json() == {
+        "values": [
+            {"value": "beta", "count": 2},
+            {"value": "' OR true --", "count": 1},
+            {"value": "O'Reilly", "count": 1},
+        ],
+        "total": 3,
+        "offset": 0,
+        "limit": 200,
+        "has_more": False,
+    }
+    assert client.get(base + "/columns/category/values", params={"search": "' OR true --"}).json()["values"] == [
+        {"value": "' OR true --", "count": 1}
+    ]
     assert client.get(base + "/columns/amount/values").status_code == 422
     assert client.get(base + "/columns/missing/values").status_code == 404
     assert client.get(f"/api/nodes/{node['id']}/datasets/missing/columns/category/values").status_code == 404
+
+
+def test_category_values_are_paged_and_searchable(client, tmp_path):
+    db = tmp_path / "many-categories.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE items AS SELECT printf('value-%03d', i) AS category FROM range(601) t(i)")
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'items')['id']}/columns/category/values"
+
+    first = client.get(url).json()
+    assert len(first["values"]) == 200
+    assert first == {
+        "values": [{"value": f"value-{i:03d}", "count": 1} for i in range(200)],
+        "total": 601,
+        "offset": 0,
+        "limit": 200,
+        "has_more": True,
+    }
+    second = client.get(url, params={"offset": 200}).json()
+    assert second["values"][0]["value"] == "value-200"
+    assert second["values"][-1]["value"] == "value-399"
+    assert (second["total"], second["offset"], second["limit"], second["has_more"]) == (601, 200, 200, True)
+
+    searched = client.get(url, params={"search": "VALUE-59", "limit": 3}).json()
+    assert searched == {
+        "values": [{"value": f"value-{i}", "count": 1} for i in range(590, 593)],
+        "total": 10,
+        "offset": 0,
+        "limit": 3,
+        "has_more": True,
+    }
+    assert client.get(url, params={"offset": -1}).status_code == 422
+    assert client.get(url, params={"limit": 0}).status_code == 422
+    assert client.get(url, params={"limit": 501}).status_code == 422
 
 
 def test_in_filter_single_multi_and_validation(client):

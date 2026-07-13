@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import duckdb
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query as QueryParam, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +53,8 @@ def quote(value: str) -> str:
 
 
 def safe(value: Any) -> Any:
+    if isinstance(value, int) and not -(2**53 - 1) <= value <= 2**53 - 1:
+        return str(value)
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, Decimal):
@@ -280,7 +282,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         }
 
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values")
-    def category_values(node_id: str, dataset: str, column: str):
+    def category_values(
+        node_id: str,
+        dataset: str,
+        column: str,
+        search: str = "",
+        offset: int = QueryParam(0, ge=0),
+        limit: int = QueryParam(200, ge=1, le=500),
+    ):
         con = get_connection(node_id)
         table, metadata_columns = metadata(con, dataset)
         columns = dict(metadata_columns)
@@ -289,12 +298,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if not columns[column].upper().startswith(TEXT):
             raise HTTPException(422, "Column is not text")
         field = quote(column)
+        where = f"{field} IS NOT NULL AND contains(lower({field}), lower(?))"
+        total = con.execute(f"SELECT count(DISTINCT {field}) FROM {table} WHERE {where}", [search]).fetchone()[0]
         rows = con.execute(f"""
             SELECT {field}, count(*) AS count
-            FROM {table} WHERE {field} IS NOT NULL
+            FROM {table} WHERE {where}
             GROUP BY {field} ORDER BY count DESC, {field}
-        """).fetchall()
-        return {"values": [{"value": safe(value), "count": count} for value, count in rows]}
+            LIMIT ? OFFSET ?
+        """, [search, limit, offset]).fetchall()
+        return {
+            "values": [{"value": safe(value), "count": count} for value, count in rows],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total,
+        }
 
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
     def stats(node_id: str, dataset: str, column: str):
@@ -321,7 +339,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         """).fetchone()
         row_count, non_null, null_count, finite_count, minimum, maximum, mean, stddev, p25, median, p75 = row
         histogram = []
-        finite_min, finite_max = safe(minimum), safe(maximum)
+        finite_min = float(minimum) if isinstance(minimum, Decimal) else minimum
+        finite_max = float(maximum) if isinstance(maximum, Decimal) else maximum
         if finite_count and finite_min is not None and finite_max is not None:
             bin_count = min(20, max(1, math.ceil(math.sqrt(finite_count))))
             if finite_min == finite_max:

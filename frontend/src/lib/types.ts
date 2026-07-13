@@ -20,6 +20,14 @@ export interface CategoryValue {
   count: number;
 }
 
+export interface CategoryValuesResponse {
+  values: CategoryValue[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 export interface ColumnInfo {
   name: string;
   type: string;

@@ -35,6 +35,8 @@
   let filterValue = $state('');
   let categoryValues = $state.raw<CategoryValue[]>([]);
   let categorySearch = $state('');
+  let categoryTotal = $state(0);
+  let categoryHasMore = $state(false);
   let selectedCategories = $state<string[]>([]);
   let categoriesLoading = $state(false);
   let categoriesError = $state('');
@@ -44,6 +46,7 @@
   let statsError = $state('');
   let statsDialog = $state<HTMLDialogElement>(null!);
   let requestId = 0;
+  let datasetRequestId = 0;
   let categoryRequestId = 0;
 
   let selectedNode = $derived(nodes.find((node) => node.id === selectedNodeId));
@@ -53,7 +56,6 @@
     ...(!filterColumn.numeric && isTextType(filterColumn.type) ? textOperators : []),
     ...(filterColumn.numeric || isOrderedType(filterColumn.type) ? orderedOperators : [])
   ] : baseOperators);
-  let visibleCategoryValues = $derived(categoryValues.filter((item) => item.value.toLocaleLowerCase().includes(categorySearch.trim().toLocaleLowerCase())));
   let maxBin = $derived(stats?.histogram.length ? Math.max(...stats.histogram.map((bin) => bin.count), 1) : 1);
 
   onMount(loadNodes);
@@ -77,6 +79,8 @@
     filterValue = '';
     categoryValues = [];
     categorySearch = '';
+    categoryTotal = 0;
+    categoryHasMore = false;
     selectedCategories = [];
     categoriesLoading = false;
     categoriesError = '';
@@ -96,6 +100,8 @@
   }
 
   async function selectNode(id: string) {
+    const datasetId = ++datasetRequestId;
+    requestId++;
     closeFilter();
     selectedNodeId = id;
     selectedDataset = '';
@@ -105,10 +111,12 @@
     sorts = [];
     error = '';
     try {
-      datasets = await api.listDatasets(id);
-      if (datasets.length) await selectDataset(datasets[0].id);
+      const next = await api.listDatasets(id);
+      if (datasetId !== datasetRequestId) return;
+      datasets = next;
+      if (next.length) await selectDataset(next[0].id);
     } catch (reason) {
-      error = message(reason);
+      if (datasetId === datasetRequestId) error = message(reason);
     }
   }
 
@@ -178,12 +186,28 @@
   async function openFilter(column: ColumnInfo) {
     closeFilter();
     filterColumn = column;
-    if (!isTextType(column.type)) return;
+    if (isTextType(column.type)) await loadCategoryValues(true);
+  }
+
+  async function loadCategoryValues(reset: boolean) {
+    if (!filterColumn) return;
     const id = ++categoryRequestId;
+    const offset = reset ? 0 : categoryValues.length;
+    if (reset) {
+      categoryValues = [];
+      categoryTotal = 0;
+      categoryHasMore = false;
+    }
     categoriesLoading = true;
+    categoriesError = '';
     try {
-      const response = await api.getCategoryValues(selectedNodeId, selectedDataset, column.name);
-      if (id === categoryRequestId) categoryValues = response.values;
+      const response = await api.getCategoryValues(selectedNodeId, selectedDataset, filterColumn.name, {
+        search: categorySearch.trim(), offset
+      });
+      if (id !== categoryRequestId) return;
+      categoryValues = reset ? response.values : [...categoryValues, ...response.values];
+      categoryTotal = response.total;
+      categoryHasMore = response.has_more;
     } catch (reason) {
       if (id === categoryRequestId) categoriesError = message(reason);
     } finally {
@@ -196,7 +220,7 @@
   }
 
   function selectVisibleCategories() {
-    selectedCategories = [...new Set([...selectedCategories, ...visibleCategoryValues.map((item) => item.value)])];
+    selectedCategories = [...new Set([...selectedCategories, ...categoryValues.map((item) => item.value)])];
   }
 
   async function addCategoryFilter() {
@@ -211,7 +235,7 @@
     if (!filterColumn) return;
     const noValue = filterOperator === 'is_null' || filterOperator === 'not_null';
     if (!noValue && filterValue === '') return;
-    const value = noValue ? undefined : filterColumn.numeric ? Number(filterValue) : filterValue;
+    const value = noValue ? undefined : filterValue;
     filters = [...filters, { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }) }];
     closeFilter();
     page = 1;
@@ -401,36 +425,42 @@
           </div>
 
           {#if filterColumn}
-            <form class="filter-editor" onsubmit={(event) => { event.preventDefault(); addFilter(); }}>
+            <div class="filter-editor">
               <strong>Filter <span>{filterColumn.name}</span></strong>
               {#if isTextType(filterColumn.type)}
                 <section class="category-picker" aria-label={`Categories for ${filterColumn.name}`}>
-                  <label>Search categories<input type="search" bind:value={categorySearch} placeholder="Search…" /></label>
+                  <form class="category-search" onsubmit={(event) => { event.preventDefault(); loadCategoryValues(true); }}>
+                    <label>Search categories<input type="search" bind:value={categorySearch} placeholder="Search…" /></label>
+                    <button type="submit" disabled={categoriesLoading}>Search</button>
+                  </form>
                   <div class="category-actions">
-                    <button type="button" onclick={selectVisibleCategories} disabled={categoriesLoading || visibleCategoryValues.length === 0}>Select all visible</button>
+                    <button type="button" onclick={selectVisibleCategories} disabled={categoriesLoading || categoryValues.length === 0}>Select all visible</button>
                     <button type="button" onclick={() => selectedCategories = []} disabled={selectedCategories.length === 0}>Clear</button>
                     <span>{selectedCategories.length} selected</span>
                   </div>
-                  {#if categoriesLoading}<p class="category-state"><span class="spinner"></span>Loading values…</p>
+                  {#if categoriesLoading && categoryValues.length === 0}<p class="category-state"><span class="spinner"></span>Loading values…</p>
                   {:else if categoriesError}<p class="category-state error-text" role="alert">{categoriesError}</p>
-                  {:else}<div class="category-list">
-                    {#each visibleCategoryValues as item (item.value)}
-                      <label><input type="checkbox" checked={selectedCategories.includes(item.value)} onchange={(event) => toggleCategory(item.value, event.currentTarget.checked)} /><span title={item.value}>{item.value}</span><small>{item.count.toLocaleString()}</small></label>
-                    {:else}<p class="category-state">No matching values.</p>{/each}
-                  </div>{/if}
+                  {:else}
+                    <div class="category-list">
+                      {#each categoryValues as item (item.value)}
+                        <label><input type="checkbox" checked={selectedCategories.includes(item.value)} onchange={(event) => toggleCategory(item.value, event.currentTarget.checked)} /><span title={item.value}>{item.value}</span><small>{item.count.toLocaleString()}</small></label>
+                      {:else}<p class="category-state">No matching values.</p>{/each}
+                    </div>
+                    <div class="category-page"><span>{categoryValues.length.toLocaleString()} / {categoryTotal.toLocaleString()}</span>{#if categoryHasMore}<button type="button" onclick={() => loadCategoryValues(false)} disabled={categoriesLoading}>{categoriesLoading ? 'Loading…' : 'Load more'}</button>{/if}</div>
+                  {/if}
                   <button class="primary-button" type="button" onclick={addCategoryFilter} disabled={selectedCategories.length === 0}>Apply categories</button>
                 </section>
               {/if}
-              <section class="advanced-filter" aria-label="Advanced filter">
+              <form class="advanced-filter" aria-label="Advanced filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}>
                 {#if isTextType(filterColumn.type)}<span>Advanced</span>{/if}
                 <label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>
                 {#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}
                   <label>Value<input type={filterColumn.numeric ? 'number' : 'text'} step="any" bind:value={filterValue} /></label>
                 {/if}
                 <button class="primary-button" type="submit" disabled={filterOperator !== 'is_null' && filterOperator !== 'not_null' && filterValue === ''}>Apply filter</button>
-              </section>
+              </form>
               <button class="cancel-filter" type="button" onclick={closeFilter}>Cancel</button>
-            </form>
+            </div>
           {/if}
 
           <div class="table-card" aria-busy={loadingData}>
