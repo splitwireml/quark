@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 SUPPORTED = {".csv", ".tsv", ".parquet", ".json", ".ndjson", ".duckdb", ".db"}
 NUMERIC = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "REAL", "DOUBLE", "DECIMAL")
+INTEGER = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT")
 TEXT = ("VARCHAR", "CHAR", "TEXT")
 OPERATORS = {"=", "!=", "in", "is_null", "not_null", "contains", "starts_with", "ends_with", ">", ">=", "<", "<="}
 
@@ -343,7 +344,20 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         finite_max = float(maximum) if isinstance(maximum, Decimal) else maximum
         if finite_count and finite_min is not None and finite_max is not None:
             bin_count = min(20, max(1, math.ceil(math.sqrt(finite_count))))
-            if finite_min == finite_max:
+            unsafe_integer = type_.upper().startswith(INTEGER) and (
+                abs(int(minimum)) > 2**53 - 1 or abs(int(maximum)) > 2**53 - 1
+            )
+            if unsafe_integer:
+                bins = con.execute(f"""
+                    WITH ranked AS (
+                        SELECT {field}, ntile(?) OVER (ORDER BY {field}) AS bin
+                        FROM {table} WHERE {field} IS NOT NULL
+                    )
+                    SELECT min({field}), max({field}), count(*)
+                    FROM ranked GROUP BY bin ORDER BY bin
+                """, [bin_count]).fetchall()
+                histogram = [{"lower": safe(lower), "upper": safe(upper), "count": count} for lower, upper, count in bins]
+            elif finite_min == finite_max:
                 histogram = [{"lower": finite_min, "upper": finite_max, "count": finite_count}]
             else:
                 width = (finite_max - finite_min) / bin_count

@@ -323,8 +323,9 @@
     return sorts.find((sort) => sort.column === column);
   }
 
-  function compact(value: number | null | undefined): string {
+  function compact(value: number | string | null | undefined): string {
     if (value == null) return '—';
+    if (typeof value === 'string') return value;
     return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value);
   }
 

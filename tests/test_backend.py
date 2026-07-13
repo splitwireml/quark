@@ -191,7 +191,8 @@ def test_query_preserves_large_integers_and_filters_exactly(client, tmp_path):
             CREATE TABLE integers(signed BIGINT, unsigned UBIGINT, ordinary INTEGER);
             INSERT INTO integers VALUES
               (9007199254740993, 18446744073709551615, 42),
-              (9007199254740992, 18446744073709551614, 43)
+              (9007199254740992, 18446744073709551614, 43),
+              (9007199254740994, 18446744073709551613, 44)
         """)
     node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
     url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'integers')['id']}/query"
@@ -215,7 +216,12 @@ def test_query_preserves_large_integers_and_filters_exactly(client, tmp_path):
 
     stats = client.get(url.removesuffix("/query") + "/columns/signed/stats")
     assert stats.status_code == 200, stats.text
-    assert (stats.json()["min"], stats.json()["max"]) == ("9007199254740992", "9007199254740993")
+    body = stats.json()
+    assert (body["min"], body["max"]) == ("9007199254740992", "9007199254740994")
+    assert body["histogram"] == [
+        {"lower": "9007199254740992", "upper": "9007199254740993", "count": 2},
+        {"lower": "9007199254740994", "upper": "9007199254740994", "count": 1},
+    ]
 
 
 def test_category_values_are_distinct_counted_safe_and_text_only(client, tmp_path):

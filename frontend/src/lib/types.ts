@@ -63,9 +63,11 @@ export interface QueryResponse {
   elapsed_ms: number;
 }
 
+export type NumericValue = number | string;
+
 export interface HistogramBin {
-  lower: number;
-  upper: number;
+  lower: NumericValue;
+  upper: NumericValue;
   count: number;
 }
 
@@ -75,12 +77,12 @@ export interface ColumnStats {
   non_null_count: number;
   null_count: number;
   null_fraction: number;
-  min: number | null;
-  max: number | null;
-  mean: number | null;
-  stddev: number | null;
-  p25: number | null;
-  median: number | null;
-  p75: number | null;
+  min: NumericValue | null;
+  max: NumericValue | null;
+  mean: NumericValue | null;
+  stddev: NumericValue | null;
+  p25: NumericValue | null;
+  median: NumericValue | null;
+  p75: NumericValue | null;
   histogram: HistogramBin[];
 }
