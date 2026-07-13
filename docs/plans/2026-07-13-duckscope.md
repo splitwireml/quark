@@ -1,0 +1,54 @@
+# DuckScope Implementation Plan
+
+> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
+
+**Goal:** Ship a tested local FastAPI + Svelte 5 data viewer backed by DuckDB.
+
+**Architecture:** One FastAPI process manages a persisted registry of isolated DuckDB connections and exposes metadata, paged query, filtering, sorting, and statistics endpoints. One Vite/Svelte 5 SPA consumes the fixed JSON API. Production serves the built SPA from FastAPI.
+
+**Tech Stack:** Python 3.11+, FastAPI, DuckDB, Pydantic, pytest; Svelte 5, TypeScript, Vite, Vitest.
+
+---
+
+### Task 1: Project scaffold and API contract
+
+**Files:** create `pyproject.toml`, `backend/__init__.py`, `frontend/package.json`, `frontend/vite.config.ts`, `frontend/tsconfig.json`, `.gitignore`, `README.md`.
+
+1. Define minimal runtime/dev dependencies and scripts.
+2. Keep API contract exactly aligned with `docs/SPEC.md`.
+3. Verify dependency install/import and frontend install.
+
+### Task 2: Backend query engine (TDD)
+
+**Files:** create `backend/app.py`, `backend/nodes.py`, `tests/test_api.py`.
+
+1. Write failing API tests for upload/list/datasets/query/filter/multi-sort/stats/attach validation.
+2. Run tests and verify expected failures.
+3. Implement the smallest safe registry and query compiler.
+4. Bind filter values; metadata-validate and quote identifiers.
+5. Re-run focused and full backend tests.
+
+### Task 3: Svelte 5 frontend (TDD where useful)
+
+**Files:** create `frontend/src/lib/api.ts`, `frontend/src/lib/types.ts`, `frontend/src/App.svelte`, `frontend/src/main.ts`, `frontend/src/app.css`, `frontend/index.html` and focused tests if logic is extracted.
+
+1. Build Svelte 5 runes-mode SPA against the spec contract.
+2. Implement upload/attach, running node list, node/dataset tabs.
+3. Implement server paging, page jump/size, scroll container, repeated filter conditions, ordered sort chips.
+4. Render nullity gauges and on-demand numeric stats modal with histogram.
+5. Run `npm run check`, tests, and production build.
+
+### Task 4: Integration and packaging
+
+**Files:** modify `backend/app.py`, `README.md`; create `Makefile` only if it shortens commands.
+
+1. Serve `frontend/dist` from FastAPI when present without shadowing `/api`.
+2. Install dependencies in `.venv`, build frontend, run all tests.
+3. Start the app and perform a real CSV upload/query/stats HTTP smoke test.
+4. Verify SPA loads and document one-command development and production launch.
+
+### Task 5: Final review
+
+1. Spec review: no missing requested behavior; no invented distributed protocol.
+2. Quality review: security boundaries, error states, Svelte 5 correctness, no unnecessary abstractions/dependencies.
+3. Run final backend tests, frontend check/build, and smoke test.
