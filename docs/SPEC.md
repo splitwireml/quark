@@ -53,11 +53,17 @@ Response:
 ```
 
 Filter operators:
-- all types: `=`, `!=`, `is_null`, `not_null`
+- all types: `=`, `!=`, `in`, `is_null`, `not_null`
+- `in` accepts a non-empty value array and ORs those values within one column
 - text: `contains`, `starts_with`, `ends_with`
 - ordered values: `>`, `>=`, `<`, `<=`
 
 Every identifier is validated against DuckDB metadata and quoted. Values are bound parameters. Maximum page size: 1000.
+
+### Category values API
+`GET /api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values`
+
+For text columns, returns every distinct non-null value with its row count, ordered by count descending then value. The frontend uses this for searchable single/multi-select category filters.
 
 ### Statistics API
 `GET /api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats`
@@ -71,6 +77,7 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 - Table: sticky first row, sticky first column, horizontal/vertical scrolling, compact cells, null token styling.
 - Column header: name, type, ordered sort marker, filter action, nullity gauge.
 - Filter bar: removable condition chips; per-column operator/value editor; supports repeated conditions.
+- Text/category columns load all distinct non-null values into a searchable dropdown with checkboxes. Selecting one value applies a single-value category filter; selecting multiple values applies one OR-within-column filter. Separate filter chips still combine with AND.
 - Sort bar: ordered removable sort chips; clicking a header cycles asc → desc → off while preserving order of other sorts.
 - Numeric header click opens a modal/panel with summary cards and lightweight CSS/SVG histogram.
 - Loading, empty, and API error states are explicit. Keyboard focus and button labels remain accessible.
