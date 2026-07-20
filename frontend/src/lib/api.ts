@@ -1,4 +1,4 @@
-import type { CategoryValuesResponse, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse, WorkbookPreview } from './types';
+import type { CategoryValuesResponse, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse, SqlQueryRequest, WorkbookPreview } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -47,6 +47,10 @@ export function listDatasets(nodeId: string): Promise<DatasetInfo[]> {
 
 export function queryDataset(nodeId: string, dataset: string, body: QueryRequest): Promise<QueryResponse> {
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/query`, json(body));
+}
+
+export function querySql(nodeId: string, body: SqlQueryRequest): Promise<QueryResponse> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, json(body));
 }
 
 export function getColumnStats(nodeId: string, dataset: string, column: string, body: QueryRequest): Promise<ColumnStats> {

@@ -1,5 +1,5 @@
 [project]
-name = "duckscope"
+name = "quark"
 version = "0.1.0"
 description = "Local-first DuckDB data viewer"
 requires-python = ">=3.11"

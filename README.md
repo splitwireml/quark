@@ -1,6 +1,6 @@
-# DuckScope
+# Quark
 
-Local-first DuckDB data viewer: FastAPI backend, Svelte 5 frontend, server-side paging/filtering/sorting/deduplication, nullity gauges, and on-demand numeric, categorical, and date profiles.
+Local-first DuckDB data viewer: FastAPI backend, Svelte 5 frontend, server-side paging/filtering/sorting/deduplication, read-only SQL queries, nullity gauges, and on-demand numeric, categorical, and date profiles.
 
 ## Run for development
 
@@ -33,12 +33,12 @@ Open `http://127.0.0.1:8000`. FastAPI serves `frontend/dist` when built.
 By default uploads and the node registry live in `./data`. Override with:
 
 ```bash
-DUCKSCOPE_DATA_DIR=/absolute/path uv run uvicorn backend.app:app --host 0.0.0.0
+QUARK_DATA_DIR=/absolute/path uv run uvicorn backend.app:app --host 0.0.0.0
 ```
 
-Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become datasets), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. First run: add a source, choose its dataset, then filter, profile, hide columns, or dedupe by selected keys.
+Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become datasets), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. First run: add a source, choose its dataset, then filter, profile, hide columns, dedupe by selected keys, or run a read-only `SELECT` in the SQL editor.
 
-An attached DuckDB path is opened read-only. Only attach paths you trust; DuckScope is an intentionally local, single-user tool.
+An attached DuckDB path is opened read-only. Only attach paths you trust; Quark is an intentionally local, single-user tool.
 
 ## Checks
 

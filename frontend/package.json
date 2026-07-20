@@ -1,5 +1,5 @@
 {
-  "name": "duckscope-ui",
+  "name": "quark-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -13,7 +13,11 @@
     "@tsconfig/svelte": "latest",
     "svelte": "latest",
     "svelte-check": "latest",
-    "typescript": "latest",
+    "typescript": "6.0.3",
     "vite": "latest"
+  },
+  "dependencies": {
+    "@codemirror/lang-sql": "^6.10.0",
+    "codemirror": "^6.0.2"
   }
 }

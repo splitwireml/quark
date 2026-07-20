@@ -43,3 +43,27 @@ main, .workspace { min-width: 0; min-height: 0; display: flex; flex-direction: c
 .profile-values span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workbook-dialog { width: min(100%, 420px); } dialog { border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); background: var(--surface); box-shadow: 0 16px 48px color-mix(in oklch, var(--ink) 30%, transparent); } dialog::backdrop { background: color-mix(in oklch, var(--ink) 28%, transparent); } .workbook-dialog h2 { margin: 0; font-size: 18px; } .workbook-dialog > p { color: var(--muted); line-height: 1.45; } .workbook-sheet-list { max-height: 240px; overflow: auto; border: 1px solid var(--line); } .workbook-sheet-list label { min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); } .workbook-sheet-list label:last-child { border-bottom: 0; } .workbook-sheet-list input { min-height: 16px; accent-color: var(--action); } .workbook-count { font: 12px var(--mono); } .workbook-dialog footer { display: flex; justify-content: end; gap: 8px; margin-top: 16px; }
 @media (max-width: 760px) { .query-details { max-width: calc(50% - 4px); } .query-details summary { min-height: 44px; } .query-details > p, .detail-list { width: min(280px, calc(100vw - 24px)); } }
+
+.queries-pane { min-height: 0; flex: 1; overflow: auto; padding: 20px; }
+.queries-pane article { display: flex; align-items: center; gap: 16px; max-width: 900px; margin: 0 auto 10px; padding: 14px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.queries-pane article > div { min-width: 0; flex: 1; }
+.queries-pane h2 { margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.queries-pane pre { margin: 0; overflow: hidden; color: var(--muted); font: 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.queries-pane article footer { display: flex; gap: 6px; }
+.secondary-button.active { border-color: var(--action); background: var(--action-tint); }
+.query-error { color: var(--error); font-size: 12px; }
+.sql-panel { position: fixed; right: 20px; bottom: 20px; z-index: 7; width: min(620px, calc(100vw - 40px)); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); box-shadow: 0 14px 42px color-mix(in oklch, var(--ink) 25%, transparent); }
+.sql-panel > header, .sql-panel > footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; }
+.sql-panel > header { border-bottom: 1px solid var(--line); }
+.sql-panel > header div { display: grid; gap: 2px; }
+.sql-panel > header span { color: var(--muted); font: 11px var(--mono); }
+.sql-panel > footer { justify-content: flex-end; border-top: 1px solid var(--line); }
+.sql-editor { font: 13px/1.45 var(--mono); }
+.sql-editor .cm-editor { background: var(--surface); }
+.sql-editor .cm-scroller { max-height: min(34vh, 280px); overflow: auto; }
+.sql-editor .cm-content { min-height: calc(5 * 1.45em); padding: 10px 0; }
+.sql-editor .cm-gutters { border-right-color: var(--line); background: var(--surface-2); color: var(--muted); }
+.sql-editor .cm-focused { outline: 2px solid var(--action); outline-offset: -2px; }
+.sql-editor.error .cm-editor { outline: 2px solid var(--error); outline-offset: -2px; }
+.sql-error { margin: 0; padding: 8px 12px; border-top: 1px solid color-mix(in oklch, var(--error) 35%, var(--line)); color: var(--error); background: color-mix(in oklch, var(--error) 7%, var(--surface)); font-size: 12px; }
+@media (max-width: 760px) { .queries-pane { padding: 12px; } .queries-pane article { align-items: stretch; flex-direction: column; } .queries-pane article footer button { min-height: 44px; } .sql-panel { right: 12px; bottom: 12px; width: calc(100vw - 24px); } .sql-editor .cm-scroller { max-height: 32vh; } }

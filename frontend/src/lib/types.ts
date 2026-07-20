@@ -22,6 +22,7 @@ export interface DatasetInfo {
   name: string;
   schema: string;
   type: string;
+  columns: string[];
 }
 
 export interface CategoryValue {
@@ -77,6 +78,13 @@ export interface QueryResponse {
   total_rows: AggregateCount;
   total_pages: AggregateCount;
   elapsed_ms: number;
+  sql: string;
+}
+
+export interface SqlQueryRequest {
+  sql: string;
+  page: number;
+  page_size: number;
 }
 
 export type NumericValue = number | string;

@@ -40,7 +40,10 @@ def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
         assert node["kind"] == "upload"
         assert client.get("/api/nodes").json() == [node]
         datasets = client.get(f"/api/nodes/{node['id']}/datasets").json()
-        assert datasets == [{"id": datasets[0]["id"], "name": "data", "schema": "main", "type": "VIEW"}]
+        assert datasets == [{
+            "id": datasets[0]["id"], "name": "data", "schema": "main", "type": "VIEW",
+            "columns": ["name", "age"],
+        }]
 
     registry = json.loads((tmp_path / "registry.json").read_text())
     assert registry == [node]
@@ -154,11 +157,39 @@ def test_attach_is_read_only_and_missing_paths_fail(client, tmp_path):
     node = response.json()
     assert node["kind"] == "attached"
     datasets = client.get(f"/api/nodes/{node['id']}/datasets").json()
-    assert datasets == [{"id": datasets[0]["id"], "name": "numbers", "schema": "main", "type": "TABLE"}]
+    assert datasets == [{
+        "id": datasets[0]["id"], "name": "numbers", "schema": "main", "type": "TABLE", "columns": ["n"],
+    }]
     assert client.post("/api/nodes/attach", json={"path": str(tmp_path / 'missing.db')}).status_code == 404
     assert client.post("/api/nodes/attach", json={"path": str(tmp_path / 'bad.csv')}).status_code == 400
     assert client.delete(f"/api/nodes/{node['id']}").status_code == 204
     assert db.exists()
+
+
+def test_uploaded_sql_blocks_external_files_but_queries_registered_view(client, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+    node = upload(client, "items.csv", b"name\nAda\n")
+    url = f"/api/nodes/{node['id']}/sql"
+
+    assert client.post(url, json={"sql": "SELECT * FROM main.data"}).status_code == 200
+    assert client.post(url, json={"sql": "SELECT content FROM read_text('/etc/hosts')"}).status_code == 422
+    assert client.post(url, json={"sql": f"SELECT * FROM glob('{secret}')"}).status_code == 422
+
+
+def test_attached_sql_blocks_external_files_but_queries_database_table(client, tmp_path):
+    db = tmp_path / "existing.duckdb"
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE numbers AS SELECT 1 AS n")
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    url = f"/api/nodes/{node['id']}/sql"
+
+    response = client.post(url, json={"sql": "SELECT * FROM numbers"})
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [{"n": 1}]
+    assert client.post(url, json={"sql": f"SELECT content FROM read_text('{secret}')"}).status_code == 422
 
 
 def test_dataset_ids_distinguish_schemas_and_slashes(client, tmp_path):
@@ -181,6 +212,27 @@ def test_dataset_ids_distinguish_schemas_and_slashes(client, tmp_path):
         )
         assert response.status_code == 200, response.text
         assert response.json()["rows"] == [{"source": expected}]
+
+
+def test_dataset_list_includes_columns_for_every_table(client, tmp_path):
+    db = tmp_path / "columns.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute('CREATE TABLE another(id BIGINT, active BOOLEAN, note VARCHAR)')
+        con.execute('CREATE TABLE "odd table"("first field" INTEGER, second VARCHAR)')
+
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    datasets = client.get(f"/api/nodes/{node['id']}/datasets").json()
+
+    assert datasets == [
+        {
+            "id": datasets[0]["id"], "name": "another", "schema": "main", "type": "TABLE",
+            "columns": ["id", "active", "note"],
+        },
+        {
+            "id": datasets[1]["id"], "name": "odd table", "schema": "main", "type": "TABLE",
+            "columns": ["first field", "second"],
+        },
+    ]
 
 
 def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client):
@@ -213,6 +265,62 @@ def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client
     assert columns["price"]["numeric"] is True
     assert columns["name"]["numeric"] is False
     assert columns["price"]["null_fraction"] == 0.0
+
+
+def test_sql_query_pages_with_metadata_and_safe_values(client):
+    node = upload(
+        client,
+        "items.csv",
+        b"name,value,day\nalpha,9007199254740993,2025-01-02\nbeta,,\n",
+    )
+    response = client.post(f"/api/nodes/{node['id']}/sql", json={
+        "sql": 'SELECT name, value, day FROM "main"."data" ORDER BY name;',
+        "page": 1,
+        "page_size": 1,
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sql"] == 'SELECT name, value, day FROM "main"."data" ORDER BY name;'
+    assert body["rows"] == [{"name": "alpha", "value": "9007199254740993", "day": "2025-01-02"}]
+    assert (body["page"], body["page_size"], body["total_rows"], body["total_pages"]) == (1, 1, 2, 2)
+    columns = {column["name"]: column for column in body["columns"]}
+    assert columns["name"] == {
+        "name": "name", "type": "VARCHAR", "numeric": False,
+        "profile_kind": "categorical", "null_fraction": 0.0,
+    }
+    assert columns["value"]["numeric"] is True
+    assert columns["value"]["profile_kind"] == "numeric"
+    assert columns["value"]["null_fraction"] == 0.5
+    assert columns["day"]["profile_kind"] == "date"
+    assert body["elapsed_ms"] >= 0
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 1 AS value -- trailing",
+    "SELECT 1 AS value; -- trailing",
+    "SELECT 1 AS value /* trailing */",
+    "SELECT 1 AS value; /* trailing */",
+])
+def test_sql_query_accepts_trailing_comments(client, sql):
+    node = upload(client, "items.csv", b"name\nAda\n")
+    response = client.post(f"/api/nodes/{node['id']}/sql", json={"sql": f"  {sql}  "})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [{"value": 1}]
+    assert response.json()["sql"] == sql
+
+
+@pytest.mark.parametrize("sql", [
+    "", "   ", "UPDATE data SET name = 'x'", "CREATE TABLE x(i INTEGER)",
+    "DELETE FROM data", "INSERT INTO data VALUES ('x', 1, NULL)",
+    "COPY data TO '/tmp/items.csv'", "ATTACH '/tmp/items.duckdb'", "PRAGMA version",
+    "SELECT 1; SELECT 2",
+])
+def test_sql_query_rejects_non_select_blank_and_multiple_statements(client, sql):
+    node = upload(client, "items.csv", b"name,value\na,1\n")
+    response = client.post(f"/api/nodes/{node['id']}/sql", json={"sql": sql})
+    assert response.status_code == 422
+    assert "only one read-only SELECT" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("payload", [
@@ -509,6 +617,29 @@ def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
     assert (response.json()["total_rows"], response.json()["total_pages"]) == (3, 1)
     assert client.post(url, json={"dedupe_columns": ["group", "group"]}).status_code == 422
     assert client.post(url, json={"dedupe_columns": ["missing"]}).status_code == 422
+
+
+def test_builder_query_returns_equivalent_executable_sql(client):
+    node = upload(
+        client,
+        "dedupe.csv",
+        b"group,kind,score,label\na,O'Reilly,1,first\na,O'Reilly,3,second\na,x,2,third\nb,O'Reilly,4,fourth\n",
+    )
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    built = client.post(url, json={
+        "filters": [{"column": "kind", "operator": "=", "value": "O'Reilly"}],
+        "dedupe_columns": ["group", "kind"],
+        "sorts": [{"column": "score", "direction": "desc"}],
+        "page_size": 10,
+    })
+    assert built.status_code == 200, built.text
+    body = built.json()
+    assert "?" not in body["sql"]
+
+    executed = client.post(f"/api/nodes/{node['id']}/sql", json={"sql": body["sql"], "page_size": 10})
+    assert executed.status_code == 200, executed.text
+    assert executed.json()["rows"] == body["rows"]
+    assert executed.json()["total_rows"] == body["total_rows"]
 
 
 def test_filtered_deduped_query_metadata_and_stats_share_rows(client):

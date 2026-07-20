@@ -1,10 +1,10 @@
-# DuckScope Product Specification
+# Quark Product Specification
 
 ## Goal
 A local-first data viewer for large CSV, Parquet, JSON/NDJSON/JSONL, XLSX, and DuckDB files. FastAPI owns DuckDB connections and query safety; a Svelte 5 SPA renders fast server-paged tables.
 
 ## User flow
-1. Open DuckScope and see active nodes.
+1. Open Quark and see active nodes.
 2. Upload a supported file or attach a local DuckDB database path.
 3. The source appears as a node tab; each table/view appears as a dataset tab.
 4. Browse rows with sticky headers, horizontal/vertical scrolling, page-size control, next/previous, and direct page jump.
@@ -12,6 +12,7 @@ A local-first data viewer for large CSV, Parquet, JSON/NDJSON/JSONL, XLSX, and D
 6. Apply ordered multi-column sorting.
 7. See null percentage as a faint gauge under every column title.
 8. Click a numeric column header to inspect count/nulls/min/max/mean/stddev/quantiles and a histogram.
+9. Run and save read-only SQL `SELECT` queries with table/field autocomplete.
 
 ## MVP semantics
 
@@ -61,6 +62,8 @@ Filter operators:
 
 Every identifier is validated against DuckDB metadata and quoted. Values are bound parameters. Maximum page size: 1000.
 
+`POST /api/nodes/{node_id}/sql` accepts one read-only `SELECT` plus `page` and `page_size`, and returns the same paged row shape. Multiple statements and mutating/DDL commands are rejected with HTTP 422. Query-builder responses include their executable SQL equivalent so filters, sorts, and dedupe queries can be saved and re-run.
+
 ### Category values API
 `GET /api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values`
 
@@ -82,10 +85,11 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 - Sort bar: ordered removable sort chips; clicking a header cycles asc → desc → off while preserving order of other sorts.
 - Numeric header click opens a modal/panel with summary cards and lightweight CSS/SVG histogram.
 - Loading, empty, and API error states are explicit. Keyboard focus and button labels remain accessible.
+- A floating SQL editor provides syntax highlighting, table/field completion, inline errors, and saved-query re-execution through a Queries tab.
 
 ## Non-goals
 - Editing data.
-- Arbitrary SQL console.
+- Mutating SQL, DDL, multiple statements, or uploaded `.sql` scripts.
 - Authentication/multi-user hosting.
 - Remote DuckDB wire protocol.
 - WebSocket push or distributed node orchestration.

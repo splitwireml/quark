@@ -58,8 +58,37 @@ class Query(BaseModel):
     dedupe_columns: list[str] = []
 
 
+class SQLQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sql: str
+    page: int = Field(1, ge=1)
+    page_size: int = Field(100, ge=1, le=1000)
+
+
 def quote(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return str(value).upper()
+    if isinstance(value, (int, Decimal)):
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "'NaN'::DOUBLE"
+        if math.isinf(value):
+            return f"'{'-' if value < 0 else ''}Infinity'::DOUBLE"
+        return repr(value)
+    if isinstance(value, dt.datetime):
+        return "TIMESTAMP '" + value.isoformat(sep=" ").replace("'", "''") + "'"
+    if isinstance(value, dt.date):
+        return f"DATE '{value.isoformat()}'"
+    if isinstance(value, dt.time):
+        return f"TIME '{value.isoformat()}'"
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def workbook_sheets(path: Path) -> list[str]:
@@ -106,7 +135,7 @@ def page_count(rows: int, page_size: int) -> int:
 
 
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
-    root = Path(data_dir or os.getenv("DUCKSCOPE_DATA_DIR", "data")).expanduser().resolve()
+    root = Path(data_dir or os.getenv("QUARK_DATA_DIR", "data")).expanduser().resolve()
     registry_path = root / "registry.json"
     uploads = root / "uploads"
     nodes: dict[str, dict[str, Any]] = {}
@@ -126,7 +155,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         source = Path(node["source"])
         suffix = source.suffix.lower()
         if suffix in {".duckdb", ".db"}:
-            return duckdb.connect(str(source), read_only=True)
+            con = duckdb.connect(str(source), read_only=True)
+            con.execute("SET enable_external_access = ?", [False])
+            return con
         con = duckdb.connect()
         source_sql = str(source).replace("'", "''")
         if suffix == ".xlsx":
@@ -134,15 +165,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             for sheet in node["sheets"] if "sheets" in node else workbook_sheets(source):
                 sheet_sql = sheet.replace("'", "''")
                 con.execute(f"CREATE VIEW {quote(sheet)} AS SELECT * FROM read_xlsx('{source_sql}', sheet = '{sheet_sql}')")
-            return con
-        if suffix in {".csv", ".tsv"}:
-            delimiter = "\\t" if suffix == ".tsv" else ","
-            scan = f"read_csv_auto('{source_sql}', delim='{delimiter}')"
-        elif suffix == ".parquet":
-            scan = f"read_parquet('{source_sql}')"
         else:
-            scan = f"read_json_auto('{source_sql}')"
-        con.execute(f"CREATE VIEW data AS SELECT * FROM {scan}")
+            if suffix in {".csv", ".tsv"}:
+                delimiter = "\\t" if suffix == ".tsv" else ","
+                scan = f"read_csv_auto('{source_sql}', delim='{delimiter}')"
+            elif suffix == ".parquet":
+                scan = f"read_parquet('{source_sql}')"
+            else:
+                scan = f"read_json_auto('{source_sql}')"
+            con.execute(f"CREATE VIEW data AS SELECT * FROM {scan}")
+        con.execute("SET allowed_directories = ?", [[str(source.parent)]])
+        con.execute("SET enable_external_access = ?", [False])
         return con
 
     def add(node: dict[str, Any]) -> dict[str, str]:
@@ -161,7 +194,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(404, "Node not found")
         return connections[node_id]
 
-    def datasets_for(con: duckdb.DuckDBPyConnection) -> list[dict[str, str]]:
+    def datasets_for(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
         rows = con.execute("""
             SELECT schema_name, table_name, 'TABLE' FROM duckdb_tables()
             WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog')
@@ -185,9 +218,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         columns = [(row[0], row[1]) for row in con.execute(f"DESCRIBE SELECT * FROM {table}").fetchall()]
         return table, columns
 
-    def filtered_relation(table: str, columns: list[tuple[str, str]], request: Query) -> tuple[str, list[Any]]:
+    def filtered_relation(table: str, columns: list[tuple[str, str]], request: Query) -> tuple[str, list[Any], str]:
         column_types = dict(columns)
         clauses: list[str] = []
+        display_clauses: list[str] = []
         values: list[Any] = []
         for condition in request.filters:
             if condition.column not in column_types or condition.operator not in OPERATORS:
@@ -201,22 +235,66 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             column = quote(condition.column)
             if condition.operator in {"is_null", "not_null"}:
                 clauses.append(f"{column} IS {'NOT ' if condition.operator == 'not_null' else ''}NULL")
+                display_clauses.append(clauses[-1])
             elif condition.operator == "in":
                 clauses.append(f"{column} IN ({', '.join('?' for _ in condition.value)})")
+                display_clauses.append(f"{column} IN ({', '.join(literal(value) for value in condition.value)})")
                 values.extend(condition.value)
             elif condition.operator in {"contains", "starts_with", "ends_with"}:
                 clauses.append(f"{condition.operator}({column}, ?)")
+                display_clauses.append(f"{condition.operator}({column}, {literal(str(condition.value))})")
                 values.append(str(condition.value))
             else:
                 clauses.append(f"{column} {condition.operator} ?")
+                display_clauses.append(f"{column} {condition.operator} {literal(condition.value)}")
                 values.append(condition.value)
         if len(set(request.dedupe_columns)) != len(request.dedupe_columns) or any(column not in column_types for column in request.dedupe_columns):
             raise HTTPException(422, "Invalid dedupe column")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        display_where = " WHERE " + " AND ".join(display_clauses) if display_clauses else ""
         if request.dedupe_columns:
             keys = ", ".join(quote(column) for column in request.dedupe_columns)
-            return f"(SELECT * FROM {table}{where} QUALIFY row_number() OVER (PARTITION BY {keys}) = 1)", values
-        return f"(SELECT * FROM {table}{where})", values
+            qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}) = 1"
+            return f"(SELECT * FROM {table}{where}{qualify})", values, f"(SELECT * FROM {table}{display_where}{qualify})"
+        return f"(SELECT * FROM {table}{where})", values, f"(SELECT * FROM {table}{display_where})"
+
+    def query_response(
+        con: duckdb.DuckDBPyConnection,
+        sql: str,
+        values: list[Any],
+        page: int,
+        page_size: int,
+        started: float,
+        response_sql: str,
+    ) -> dict[str, Any]:
+        source = f"({sql}) AS result"
+        total_rows = con.execute(f"SELECT count(*) FROM {source}", values).fetchone()[0]
+        result = con.execute(
+            f"SELECT * FROM {source} LIMIT ? OFFSET ?",
+            values + [page_size, (page - 1) * page_size],
+        )
+        columns = [(item[0], str(item[1])) for item in result.description]
+        rows = [{name: safe(value) for (name, _), value in zip(columns, row)} for row in result.fetchall()]
+        null_select = ", ".join(
+            f"avg(CASE WHEN {quote(name)} IS NULL THEN 1.0 ELSE 0.0 END)" for name, _ in columns
+        )
+        fractions = con.execute(f"SELECT {null_select} FROM {source}", values).fetchone() if columns else []
+        return {
+            "columns": [{
+                "name": name,
+                "type": type_,
+                "numeric": type_.upper().startswith(NUMERIC),
+                "profile_kind": profile_kind(type_),
+                "null_fraction": safe(fraction) or 0.0,
+            } for (name, type_), fraction in zip(columns, fractions)],
+            "rows": rows,
+            "page": page,
+            "page_size": page_size,
+            "total_rows": safe(total_rows),
+            "total_pages": safe(page_count(total_rows, page_size)),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            "sql": response_sql,
+        }
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -245,7 +323,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         for con in connections.values():
             con.close()
 
-    api = FastAPI(title="DuckScope", lifespan=lifespan)
+    api = FastAPI(title="Quark", lifespan=lifespan)
 
     @api.exception_handler(duckdb.Error)
     def duckdb_error(_: Any, exc: duckdb.Error):
@@ -319,7 +397,33 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @api.get("/api/nodes/{node_id}/datasets")
     def list_datasets(node_id: str):
-        return datasets_for(get_connection(node_id))
+        con = get_connection(node_id)
+        datasets = datasets_for(con)
+        for dataset in datasets:
+            table = f'{quote(dataset["schema"])}.{quote(dataset["name"])}'
+            dataset["columns"] = [row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {table}").fetchall()]
+        return datasets
+
+    @api.post("/api/nodes/{node_id}/sql")
+    def sql_query(node_id: str, request: SQLQuery):
+        started = time.perf_counter()
+        con = get_connection(node_id)
+        try:
+            statements = con.extract_statements(request.sql)
+        except duckdb.Error as exc:
+            raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+        if (
+            len(statements) != 1
+            or statements[0].type != duckdb.StatementType.SELECT
+        ):
+            raise HTTPException(422, "SQL accepts only one read-only SELECT query")
+        sql = request.sql.strip()
+        try:
+            return query_response(con, "SELECT * FROM query(?)", [sql], request.page, request.page_size, started, sql)
+        except duckdb.ParserException as exc:
+            raise HTTPException(422, "SQL accepts only one read-only SELECT query") from exc
+        except duckdb.Error as exc:
+            raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
 
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/query")
     def query(node_id: str, dataset: str, request: Query):
@@ -327,41 +431,25 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
         column_names = {name for name, _ in columns}
-        source, values = filtered_relation(table, columns, request)
+        source, values, display_source = filtered_relation(table, columns, request)
         for sort in request.sorts:
             if sort.column not in column_names:
                 raise HTTPException(422, "Invalid sort column")
+        order = ""
+        if request.sorts:
+            order = " ORDER BY " + ", ".join(f"{quote(sort.column)} {sort.direction.upper()}" for sort in request.sorts)
         try:
-            total_rows = con.execute(f"SELECT count(*) FROM {source}", values).fetchone()[0]
-            order = ""
-            if request.sorts:
-                order = " ORDER BY " + ", ".join(f"{quote(sort.column)} {sort.direction.upper()}" for sort in request.sorts)
-            result = con.execute(
-                f"SELECT * FROM {source}{order} LIMIT ? OFFSET ?",
-                values + [request.page_size, (request.page - 1) * request.page_size],
+            return query_response(
+                con,
+                f"SELECT * FROM {source}{order}",
+                values,
+                request.page,
+                request.page_size,
+                started,
+                f"SELECT * FROM {display_source}{order}",
             )
-            result_names = [item[0] for item in result.description]
-            rows = [{name: safe(value) for name, value in zip(result_names, row)} for row in result.fetchall()]
-            null_select = ", ".join(f"avg(CASE WHEN {quote(name)} IS NULL THEN 1.0 ELSE 0.0 END)" for name, _ in columns)
-            fractions = con.execute(f"SELECT {null_select} FROM {source}", values).fetchone() if columns else []
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid filter value: {exc}") from exc
-        response_columns = [{
-            "name": name,
-            "type": type_,
-            "numeric": type_.upper().startswith(NUMERIC),
-            "profile_kind": profile_kind(type_),
-            "null_fraction": safe(fraction) or 0.0,
-        } for (name, type_), fraction in zip(columns, fractions)]
-        return {
-            "columns": response_columns,
-            "rows": rows,
-            "page": request.page,
-            "page_size": request.page_size,
-            "total_rows": safe(total_rows),
-            "total_pages": safe(page_count(total_rows, request.page_size)),
-            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
-        }
 
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values")
     def category_values(
@@ -401,7 +489,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def stats(node_id: str, dataset: str, column: str, request: Query | None = None):
         con = get_connection(node_id)
         table, metadata_columns = metadata(con, dataset)
-        source, values = filtered_relation(table, metadata_columns, request or Query(page=1, page_size=100))
+        source, values, _ = filtered_relation(table, metadata_columns, request or Query(page=1, page_size=100))
         columns = dict(metadata_columns)
         if column not in columns:
             raise HTTPException(404, "Column not found")
