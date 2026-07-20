@@ -1,11 +1,20 @@
 export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=';
 export type SortDirection = 'asc' | 'desc';
+export type ProfileKind = 'numeric' | 'categorical' | 'date';
+export type AggregateCount = number | string;
 
 export interface NodeInfo {
   id: string;
   name: string;
   source: string;
   kind: string;
+}
+
+export interface WorkbookPreview {
+  id: string;
+  name: string;
+  kind: 'workbook';
+  sheets: string[];
 }
 
 export interface DatasetInfo {
@@ -17,12 +26,17 @@ export interface DatasetInfo {
 
 export interface CategoryValue {
   value: string;
-  count: number;
+  count: AggregateCount;
+}
+
+export interface ProfileValue {
+  value: string | boolean;
+  count: AggregateCount;
 }
 
 export interface CategoryValuesResponse {
   values: CategoryValue[];
-  total: number;
+  total: AggregateCount;
   offset: number;
   limit: number;
   has_more: boolean;
@@ -33,6 +47,7 @@ export interface ColumnInfo {
   type: string;
   numeric: boolean;
   null_fraction: number;
+  profile_kind: ProfileKind | null;
 }
 
 export interface FilterCondition {
@@ -51,6 +66,7 @@ export interface QueryRequest {
   page_size: number;
   filters: FilterCondition[];
   sorts: SortCondition[];
+  dedupe_columns: string[];
 }
 
 export interface QueryResponse {
@@ -58,8 +74,8 @@ export interface QueryResponse {
   rows: Record<string, unknown>[];
   page: number;
   page_size: number;
-  total_rows: number;
-  total_pages: number;
+  total_rows: AggregateCount;
+  total_pages: AggregateCount;
   elapsed_ms: number;
 }
 
@@ -68,15 +84,20 @@ export type NumericValue = number | string;
 export interface HistogramBin {
   lower: NumericValue;
   upper: NumericValue;
-  count: number;
+  count: AggregateCount;
 }
 
-export interface ColumnStats {
+interface ColumnStatsBase {
   type: string;
-  row_count: number;
-  non_null_count: number;
-  null_count: number;
+  kind: ProfileKind;
+  row_count: AggregateCount;
+  non_null_count: AggregateCount;
+  null_count: AggregateCount;
   null_fraction: number;
+}
+
+export interface NumericColumnStats extends ColumnStatsBase {
+  kind: 'numeric';
   min: NumericValue | null;
   max: NumericValue | null;
   mean: NumericValue | null;
@@ -86,3 +107,19 @@ export interface ColumnStats {
   p75: NumericValue | null;
   histogram: HistogramBin[];
 }
+
+export interface CategoricalColumnStats extends ColumnStatsBase {
+  kind: 'categorical';
+  distinct_count: AggregateCount;
+  top_values: ProfileValue[];
+}
+
+export interface DateColumnStats extends ColumnStatsBase {
+  kind: 'date';
+  min: string | null;
+  max: string | null;
+  distinct_count: AggregateCount;
+  histogram: HistogramBin[];
+}
+
+export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColumnStats;

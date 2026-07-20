@@ -1,4 +1,4 @@
-import type { CategoryValuesResponse, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse } from './types';
+import type { CategoryValuesResponse, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse, WorkbookPreview } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -10,7 +10,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     } catch { /* use HTTP status */ }
     throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
   }
-  return response.json() as Promise<T>;
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 
 const json = (body: unknown): RequestInit => ({
@@ -23,10 +23,18 @@ export function listNodes(): Promise<NodeInfo[]> {
   return request('/api/nodes');
 }
 
-export function uploadNode(file: File): Promise<NodeInfo> {
+export function uploadNode(file: File): Promise<NodeInfo | WorkbookPreview> {
   const body = new FormData();
   body.append('file', file);
   return request('/api/nodes/upload', { method: 'POST', body });
+}
+
+export function confirmWorkbook(id: string, sheets: string[]): Promise<NodeInfo> {
+  return request(`/api/nodes/upload/${encodeURIComponent(id)}/confirm`, json({ sheets }));
+}
+
+export function discardWorkbook(id: string): Promise<void> {
+  return request(`/api/nodes/upload/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function attachNode(path: string): Promise<NodeInfo> {
@@ -41,8 +49,8 @@ export function queryDataset(nodeId: string, dataset: string, body: QueryRequest
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/query`, json(body));
 }
 
-export function getColumnStats(nodeId: string, dataset: string, column: string): Promise<ColumnStats> {
-  return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/stats`);
+export function getColumnStats(nodeId: string, dataset: string, column: string, body: QueryRequest): Promise<ColumnStats> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/stats`, json(body));
 }
 
 export function getCategoryValues(

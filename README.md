@@ -1,13 +1,13 @@
 # DuckScope
 
-Local-first DuckDB data viewer: FastAPI backend, Svelte 5 frontend, server-side paging/filtering/sorting, nullity gauges, and numeric distributions.
+Local-first DuckDB data viewer: FastAPI backend, Svelte 5 frontend, server-side paging/filtering/sorting/deduplication, nullity gauges, and on-demand numeric, categorical, and date profiles.
 
 ## Run for development
 
 ```bash
 uv sync
 (cd frontend && npm install)
-uv run uvicorn backend.app:app --reload
+uv run uvicorn backend.app:app --host 0.0.0.0 --reload
 ```
 
 In another terminal:
@@ -23,7 +23,7 @@ Open `http://localhost:5173`.
 
 ```bash
 cd frontend && npm run build && cd ..
-uv run uvicorn backend.app:app --host 127.0.0.1 --port 8000
+uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000
 ```
 
 Open `http://127.0.0.1:8000`. FastAPI serves `frontend/dist` when built.
@@ -33,10 +33,10 @@ Open `http://127.0.0.1:8000`. FastAPI serves `frontend/dist` when built.
 By default uploads and the node registry live in `./data`. Override with:
 
 ```bash
-DUCKSCOPE_DATA_DIR=/absolute/path uv run uvicorn backend.app:app
+DUCKSCOPE_DATA_DIR=/absolute/path uv run uvicorn backend.app:app --host 0.0.0.0
 ```
 
-Supported: CSV, TSV, Parquet, JSON, NDJSON, DuckDB/DB.
+Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become datasets), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. First run: add a source, choose its dataset, then filter, profile, hide columns, or dedupe by selected keys.
 
 An attached DuckDB path is opened read-only. Only attach paths you trust; DuckScope is an intentionally local, single-user tool.
 

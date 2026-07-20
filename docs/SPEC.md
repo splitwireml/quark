@@ -1,7 +1,7 @@
 # DuckScope Product Specification
 
 ## Goal
-A local-first data viewer for large CSV, Parquet, JSON/NDJSON, and DuckDB files. FastAPI owns DuckDB connections and query safety; a Svelte 5 SPA renders fast server-paged tables.
+A local-first data viewer for large CSV, Parquet, JSON/NDJSON/JSONL, XLSX, and DuckDB files. FastAPI owns DuckDB connections and query safety; a Svelte 5 SPA renders fast server-paged tables.
 
 ## User flow
 1. Open DuckScope and see active nodes.
@@ -17,14 +17,15 @@ A local-first data viewer for large CSV, Parquet, JSON/NDJSON, and DuckDB files.
 
 ### Nodes
 A node is an isolated DuckDB connection managed by this FastAPI process.
-- Upload: saves the file under the app data directory and creates a DuckDB database containing a view named `data` over it.
+- Upload: saves a supported non-XLSX file under the app data directory and creates a DuckDB database containing a view named `data` over it.
+- XLSX upload: saves the workbook under the app data directory, then asks which worksheets to open; only confirmed worksheets become datasets/views.
 - DuckDB upload: opens the uploaded database directly.
 - Attach path: opens an existing local `.duckdb`/`.db` file read-only.
 - Active nodes are persisted in a small JSON registry and reopened after restart when their source still exists.
 - “Running” means registered and connectable by this backend. Cross-process DuckDB connection discovery is not portable; no process scanning or remote SQL protocol is invented.
 
 ### Supported files
-`.csv`, `.tsv`, `.parquet`, `.json`, `.ndjson`, `.duckdb`, `.db`.
+`.csv`, `.tsv`, `.parquet`, `.json`, `.ndjson`, `.jsonl`, `.xlsx`, `.duckdb`, `.db`.
 
 ### Query API
 `POST /api/nodes/{node_id}/datasets/{dataset}/query`
@@ -87,7 +88,6 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 - Arbitrary SQL console.
 - Authentication/multi-user hosting.
 - Remote DuckDB wire protocol.
-- Spreadsheet formats requiring optional extensions.
 - WebSocket push or distributed node orchestration.
 
 ## Acceptance criteria

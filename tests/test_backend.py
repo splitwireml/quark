@@ -1,6 +1,7 @@
 import json
 import sys
 import warnings
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -11,7 +12,7 @@ import pytest
 warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient` is deprecated.*")
 from fastapi.testclient import TestClient
 
-from backend.app import create_app
+from backend.app import create_app, page_count, safe
 
 
 @pytest.fixture
@@ -63,6 +64,7 @@ def test_upload_supported_formats_and_rejects_unsupported(client, tmp_path):
         "x.tsv": b"n\n1\n",
         "x.json": b'[{"n":1}]',
         "x.ndjson": b'{"n":1}\n',
+        "x.jsonl": b'{"n":1}\n',
         "x.parquet": parquet.read_bytes(),
         "x.duckdb": db.read_bytes(),
         "x.db": db.read_bytes(),
@@ -74,6 +76,73 @@ def test_upload_supported_formats_and_rejects_unsupported(client, tmp_path):
 
     response = client.post("/api/nodes/upload", files={"file": ("x.txt", b"no")})
     assert response.status_code == 400
+
+
+# ponytail: fixture-only workbook edit; use DuckDB append mode when available.
+def add_workbook_sheet(workbook, name):
+    with zipfile.ZipFile(workbook) as source:
+        files = {item.filename: source.read(item) for item in source.infolist()}
+    files["xl/workbook.xml"] = files["xl/workbook.xml"].replace(
+        b"</sheets>", f'<sheet name="{name}" sheetId="2" r:id="rId99"/></sheets>'.encode()
+    )
+    files["xl/_rels/workbook.xml.rels"] = files["xl/_rels/workbook.xml.rels"].replace(
+        b"</Relationships>", b'<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>'
+    )
+    files["[Content_Types].xml"] = files["[Content_Types].xml"].replace(
+        b"</Types>", b'<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'
+    )
+    files["xl/worksheets/sheet2.xml"] = files["xl/worksheets/sheet1.xml"].replace(b">1<", b">2<")
+    with zipfile.ZipFile(workbook, "w") as destination:
+        for filename, content in files.items():
+            destination.writestr(filename, content)
+
+
+def workbook_preview(client, tmp_path):
+    workbook = tmp_path / "sheets.xlsx"
+    with duckdb.connect() as con:
+        con.execute("INSTALL excel; LOAD excel")
+        con.execute("COPY (SELECT 1 AS value) TO ? (FORMAT xlsx, SHEET 'People')", [str(workbook)])
+    # ponytail: fixture-only ZIP/XML edit until DuckDB writes multiple worksheets itself.
+    add_workbook_sheet(workbook, "O'Reilly")
+    return upload(client, "sheets.xlsx", workbook.read_bytes())
+
+
+def test_upload_workbook_requires_sheet_confirmation(client, tmp_path):
+    preview = workbook_preview(client, tmp_path)
+    assert preview == {"id": preview["id"], "name": "sheets.xlsx", "kind": "workbook", "sheets": ["People", "O'Reilly"]}
+    assert client.get("/api/nodes").json() == []
+
+    node = client.post(f"/api/nodes/upload/{preview['id']}/confirm", json={"sheets": ["O'Reilly"]})
+    assert node.status_code == 200, node.text
+    node = node.json()
+    assert node["kind"] == "upload"
+    sheets = client.get(f"/api/nodes/{node['id']}/datasets").json()
+    assert [sheet["name"] for sheet in sheets] == ["O'Reilly"]
+    response = client.post(f"/api/nodes/{node['id']}/datasets/{sheets[0]['id']}/query", json={})
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [{"A1": 2.0}]
+    assert json.loads((tmp_path / "registry.json").read_text()) == [{**node, "sheets": ["O'Reilly"]}]
+
+
+def test_workbook_confirmation_validates_selection_and_cancel(client, tmp_path):
+    preview = workbook_preview(client, tmp_path)
+    confirm = f"/api/nodes/upload/{preview['id']}/confirm"
+    for sheets in ([], ["People", "People"], ["missing"]):
+        assert client.post(confirm, json={"sheets": sheets}).status_code == 422
+    assert client.delete(f"/api/nodes/upload/{preview['id']}").status_code == 204
+    assert client.post(confirm, json={"sheets": ["People"]}).status_code == 404
+    assert client.delete(f"/api/nodes/upload/{preview['id']}").status_code == 404
+
+
+def test_restart_discards_unconfirmed_workbook_upload(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        preview = workbook_preview(client, tmp_path)
+        source = tmp_path / "uploads" / f"{preview['id']}.xlsx"
+        assert source.exists()
+
+    with TestClient(create_app(tmp_path)) as restarted:
+        assert restarted.post(f"/api/nodes/upload/{preview['id']}/confirm", json={"sheets": ["People"]}).status_code == 404
+    assert source.exists() is False
 
 
 def test_attach_is_read_only_and_missing_paths_fail(client, tmp_path):
@@ -143,7 +212,7 @@ def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client
     columns = {column["name"]: column for column in body["columns"]}
     assert columns["price"]["numeric"] is True
     assert columns["name"]["numeric"] is False
-    assert columns["price"]["null_fraction"] == 0.25
+    assert columns["price"]["null_fraction"] == 0.0
 
 
 @pytest.mark.parametrize("payload", [
@@ -217,6 +286,7 @@ def test_query_preserves_large_integers_and_filters_exactly(client, tmp_path):
     stats = client.get(url.removesuffix("/query") + "/columns/signed/stats")
     assert stats.status_code == 200, stats.text
     body = stats.json()
+    assert body["kind"] == "numeric"
     assert (body["min"], body["max"]) == ("9007199254740992", "9007199254740994")
     assert body["histogram"] == [
         {"lower": "9007199254740992", "upper": "9007199254740993", "count": 2},
@@ -340,6 +410,7 @@ def test_numeric_stats_histogram_and_json_safe_values(client, tmp_path):
     stats = client.get(base + "/columns/amount/stats")
     assert stats.status_code == 200, stats.text
     body = stats.json()
+    assert body["kind"] == "numeric"
     assert body["type"].startswith("DECIMAL")
     assert body["row_count"] == 3
     assert body["non_null_count"] == 2
@@ -352,9 +423,23 @@ def test_numeric_stats_histogram_and_json_safe_values(client, tmp_path):
     assert sum(bin_["count"] for bin_ in body["histogram"]) == 2
     floating = client.get(base + "/columns/floating/stats")
     assert floating.status_code == 200
+    assert floating.json()["kind"] == "numeric"
     assert sum(bin_["count"] for bin_ in floating.json()["histogram"]) == 1
-    assert client.get(base + "/columns/day/stats").status_code == 422
+    date_stats = client.get(base + "/columns/day/stats")
+    assert date_stats.status_code == 200, date_stats.text
+    assert date_stats.json()["kind"] == "date"
+    assert date_stats.json()["histogram"] == [
+        {"lower": "2025-01-02", "upper": "2025-01-02", "count": 1},
+        {"lower": "2025-01-03", "upper": "2025-01-03", "count": 1},
+    ]
     assert client.get(base + "/columns/missing/stats").status_code == 404
+
+
+def test_safe_serializes_unsafe_aggregate_integers():
+    assert safe(2**53 - 1) == 2**53 - 1
+    assert safe(2**53) == "9007199254740992"
+    assert page_count(9007199254740993, 1) == 9007199254740993
+    assert page_count(10, 3) == 4
 
 
 def test_missing_nodes_and_stale_registry_are_not_active(tmp_path):
@@ -364,3 +449,97 @@ def test_missing_nodes_and_stale_registry_are_not_active(tmp_path):
     with TestClient(create_app(tmp_path)) as client:
         assert client.get("/api/nodes").json() == []
         assert client.get("/api/nodes/gone/datasets").status_code == 404
+
+
+def test_profile_kinds_and_categorical_and_date_stats(client, tmp_path):
+    db = tmp_path / "profiles.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("""
+            CREATE TYPE mood AS ENUM ('happy', 'sad');
+            CREATE TABLE profiles(category VARCHAR, flag BOOLEAN, mood mood, day DATE, moment TIMESTAMP, empty_day DATE, amount INTEGER);
+            INSERT INTO profiles VALUES
+              ('red', true, 'happy', DATE '2025-01-01', TIMESTAMP '2025-01-01 10:00:00', NULL, 1),
+              ('red', false, 'happy', DATE '2025-01-02', TIMESTAMP '2025-01-02 10:00:00', NULL, 2),
+              ('blue', NULL, 'sad', NULL, NULL, NULL, 3),
+              (NULL, true, NULL, DATE '2025-01-04', TIMESTAMP '2025-01-04 10:00:00', NULL, 4)
+        """)
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'profiles')['id']}"
+
+    query = client.post(base + "/query", json={}).json()
+    kinds = {column["name"]: column["profile_kind"] for column in query["columns"]}
+    assert kinds == {
+        "category": "categorical", "flag": "categorical", "mood": "categorical",
+        "day": "date", "moment": "date", "empty_day": "date", "amount": "numeric",
+    }
+
+    category = client.get(base + "/columns/category/stats")
+    assert category.status_code == 200, category.text
+    assert category.json() == {
+        "kind": "categorical", "type": "VARCHAR", "row_count": 4, "non_null_count": 3, "null_count": 1,
+        "null_fraction": 0.25, "distinct_count": 2,
+        "top_values": [{"value": "red", "count": 2}, {"value": "blue", "count": 1}],
+    }
+    day = client.get(base + "/columns/day/stats")
+    assert day.status_code == 200, day.text
+    assert day.json()["kind"] == "date"
+    assert day.json()["distinct_count"] == 3
+    assert (day.json()["min"], day.json()["max"]) == ("2025-01-01", "2025-01-04")
+    assert sum(bin_["count"] for bin_ in day.json()["histogram"]) == 3
+    empty_day = client.get(base + "/columns/empty_day/stats")
+    assert empty_day.json()["kind"] == "date"
+    assert (empty_day.json()["min"], empty_day.json()["max"], empty_day.json()["histogram"]) == (None, None, [])
+
+
+def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
+    node = upload(client, "dedupe.csv", b"group,kind,score,label\na,x,1,first\na,x,3,second\na,y,2,third\nb,x,4,fourth\n")
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    response = client.post(url, json={
+        "filters": [{"column": "group", "operator": "in", "value": ["a", "b"]}],
+        "dedupe_columns": ["group", "kind"],
+        "sorts": [{"column": "score", "direction": "desc"}],
+        "page_size": 10,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [
+        {"group": "b", "kind": "x", "score": 4, "label": "fourth"},
+        {"group": "a", "kind": "y", "score": 2, "label": "third"},
+        {"group": "a", "kind": "x", "score": 1, "label": "first"},
+    ]
+    assert (response.json()["total_rows"], response.json()["total_pages"]) == (3, 1)
+    assert client.post(url, json={"dedupe_columns": ["group", "group"]}).status_code == 422
+    assert client.post(url, json={"dedupe_columns": ["missing"]}).status_code == 422
+
+
+def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
+    node = upload(client, "scoped.csv", b"group,category,amount\nscope,alpha,1\nscope,,2\nother,beta,100\nother,beta,200\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}"
+    request = {
+        "filters": [{"column": "group", "operator": "=", "value": "scope"}],
+        "dedupe_columns": ["group"],
+    }
+
+    query = client.post(base + "/query", json=request)
+    assert query.status_code == 200, query.text
+    body = query.json()
+    assert body["total_rows"] == 1
+    assert {column["name"]: column["null_fraction"] for column in body["columns"]}["category"] == 0.0
+
+    stats = client.post(base + "/columns/category/stats", json=request)
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["row_count"] == 1
+    assert stats.json()["null_count"] == 0
+    assert stats.json()["top_values"] == [{"value": "alpha", "count": 1}]
+    amount = client.post(base + "/columns/amount/stats", json=request)
+    assert amount.status_code == 200, amount.text
+    assert (amount.json()["min"], amount.json()["max"]) == (1, 1)
+
+
+def test_stats_invalid_filter_value_returns_422(tmp_path):
+    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as stats_client:
+        node = upload(stats_client, "values.csv", b"value\n1\n2\n")
+        base = f"/api/nodes/{node['id']}/datasets/{dataset(stats_client, node, 'data')['id']}"
+        response = stats_client.post(base + "/columns/value/stats", json={
+            "filters": [{"column": "value", "operator": ">", "value": "not-a-number"}],
+        })
+    assert response.status_code == 422
