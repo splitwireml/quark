@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import time
 import uuid
 import zipfile
@@ -67,6 +68,11 @@ class SQLQuery(BaseModel):
 
 def quote(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def dataset_name(filename: str) -> str:
+    name = re.sub(r"[^a-z0-9]+", "_", Path(filename).stem.lower()).strip("_")
+    return f"data_{name}" if name[:1].isdigit() else name or "data"
 
 
 def literal(value: Any) -> str:
@@ -173,7 +179,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 scan = f"read_parquet('{source_sql}')"
             else:
                 scan = f"read_json_auto('{source_sql}')"
-            con.execute(f"CREATE VIEW data AS SELECT * FROM {scan}")
+            con.execute(f"CREATE VIEW {quote(node.get('dataset_name', 'data'))} AS SELECT * FROM {scan}")
         con.execute("SET allowed_directories = ?", [[str(source.parent)]])
         con.execute("SET enable_external_access = ?", [False])
         return con
@@ -349,7 +355,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 sheets = workbook_sheets(destination)
                 pending_workbooks[node_id] = {"id": node_id, "name": name, "source": str(destination), "sheets": sheets}
                 return {"id": node_id, "name": name, "kind": "workbook", "sheets": sheets}
-            return add({"id": node_id, "name": name, "kind": "upload", "source": str(destination)})
+            node = {"id": node_id, "name": name, "kind": "upload", "source": str(destination)}
+            if suffix not in {".duckdb", ".db"}:
+                node["dataset_name"] = dataset_name(name)
+            return add(node)
         except Exception:
             destination.unlink(missing_ok=True)
             raise

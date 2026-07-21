@@ -41,17 +41,60 @@ def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
         assert client.get("/api/nodes").json() == [node]
         datasets = client.get(f"/api/nodes/{node['id']}/datasets").json()
         assert datasets == [{
-            "id": datasets[0]["id"], "name": "data", "schema": "main", "type": "VIEW",
+            "id": datasets[0]["id"], "name": "people", "schema": "main", "type": "VIEW",
             "columns": ["name", "age"],
         }]
 
     registry = json.loads((tmp_path / "registry.json").read_text())
-    assert registry == [node]
+    assert registry == [{**node, "dataset_name": "people"}]
     with TestClient(create_app(tmp_path)) as restarted:
         assert restarted.get("/api/nodes").json() == [node]
         assert restarted.delete(f"/api/nodes/{node['id']}").status_code == 204
         assert restarted.get("/api/nodes").json() == []
     assert Path(node["source"]).exists() is False
+
+
+def test_flat_file_aliases_are_safe_and_persist_across_restart(tmp_path):
+    cases = [
+        ("Claims v1.csv", "claims_v1"),
+        ("sales---Q2!!!.csv", "sales_q2"),
+        ("123.csv", "data_123"),
+        ("!!!.csv", "data"),
+        ("Mixed.Case Name.csv", "mixed_case_name"),
+    ]
+    uploaded = []
+    with TestClient(create_app(tmp_path)) as client:
+        for filename, alias in cases:
+            node = upload(client, filename, b"value\n1\n")
+            uploaded.append((node, alias))
+            assert [item["name"] for item in client.get(f"/api/nodes/{node['id']}/datasets").json()] == [alias]
+            response = client.post(f"/api/nodes/{node['id']}/sql", json={"sql": f"SELECT * FROM {alias}"})
+            assert response.status_code == 200, response.text
+            assert response.json()["rows"] == [{"value": 1}]
+
+    registry = json.loads((tmp_path / "registry.json").read_text())
+    assert [node["dataset_name"] for node in registry] == [alias for _, alias in uploaded]
+    with TestClient(create_app(tmp_path)) as restarted:
+        for node, alias in uploaded:
+            assert [item["name"] for item in restarted.get(f"/api/nodes/{node['id']}/datasets").json()] == [alias]
+            response = restarted.post(f"/api/nodes/{node['id']}/sql", json={"sql": f"SELECT * FROM {alias}"})
+            assert response.status_code == 200, response.text
+            assert response.json()["rows"] == [{"value": 1}]
+
+
+def test_legacy_registry_without_dataset_name_keeps_data_view(tmp_path):
+    source = tmp_path / "uploads" / "legacy.csv"
+    source.parent.mkdir()
+    source.write_bytes(b"value\n1\n")
+    node = {"id": "legacy", "name": "Claims v1.csv", "kind": "upload", "source": str(source)}
+    (tmp_path / "registry.json").write_text(json.dumps([node]))
+
+    with TestClient(create_app(tmp_path)) as client:
+        assert [item["name"] for item in client.get("/api/nodes/legacy/datasets").json()] == ["data"]
+        response = client.post("/api/nodes/legacy/sql", json={"sql": "SELECT * FROM data"})
+        assert response.status_code == 200, response.text
+        assert response.json()["rows"] == [{"value": 1}]
+    assert json.loads((tmp_path / "registry.json").read_text()) == [node]
 
 
 def test_upload_supported_formats_and_rejects_unsupported(client, tmp_path):
@@ -75,7 +118,7 @@ def test_upload_supported_formats_and_rejects_unsupported(client, tmp_path):
     for name, content in cases.items():
         node = upload(client, name, content)
         names = [dataset["name"] for dataset in client.get(f"/api/nodes/{node['id']}/datasets").json()]
-        assert names == (["items"] if name.endswith((".duckdb", ".db")) else ["data"])
+        assert names == (["items"] if name.endswith((".duckdb", ".db")) else ["x"])
 
     response = client.post("/api/nodes/upload", files={"file": ("x.txt", b"no")})
     assert response.status_code == 400
@@ -172,7 +215,7 @@ def test_uploaded_sql_blocks_external_files_but_queries_registered_view(client, 
     node = upload(client, "items.csv", b"name\nAda\n")
     url = f"/api/nodes/{node['id']}/sql"
 
-    assert client.post(url, json={"sql": "SELECT * FROM main.data"}).status_code == 200
+    assert client.post(url, json={"sql": "SELECT * FROM main.items"}).status_code == 200
     assert client.post(url, json={"sql": "SELECT content FROM read_text('/etc/hosts')"}).status_code == 422
     assert client.post(url, json={"sql": f"SELECT * FROM glob('{secret}')"}).status_code == 422
 
@@ -241,7 +284,7 @@ def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client
         "items.csv",
         b"category,name,price,rank\nx,alpha,10,2\nx,alpine,20,1\nx,beta,,3\ny,alto,30,4\n",
     )
-    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'items')['id']}/query"
     response = client.post(url, json={
         "page": 1,
         "page_size": 1,
@@ -274,13 +317,13 @@ def test_sql_query_pages_with_metadata_and_safe_values(client):
         b"name,value,day\nalpha,9007199254740993,2025-01-02\nbeta,,\n",
     )
     response = client.post(f"/api/nodes/{node['id']}/sql", json={
-        "sql": 'SELECT name, value, day FROM "main"."data" ORDER BY name;',
+        "sql": 'SELECT name, value, day FROM "main"."items" ORDER BY name;',
         "page": 1,
         "page_size": 1,
     })
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["sql"] == 'SELECT name, value, day FROM "main"."data" ORDER BY name;'
+    assert body["sql"] == 'SELECT name, value, day FROM "main"."items" ORDER BY name;'
     assert body["rows"] == [{"name": "alpha", "value": "9007199254740993", "day": "2025-01-02"}]
     assert (body["page"], body["page_size"], body["total_rows"], body["total_pages"]) == (1, 1, 2, 2)
     columns = {column["name"]: column for column in body["columns"]}
@@ -333,13 +376,13 @@ def test_sql_query_rejects_non_select_blank_and_multiple_statements(client, sql)
 ])
 def test_query_rejects_invalid_paging_and_metadata(client, payload):
     node = upload(client, "x.csv", b'name,value\na,1\n')
-    response = client.post(f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query", json=payload)
+    response = client.post(f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'x')['id']}/query", json=payload)
     assert response.status_code == 422
 
 
 def test_filter_operators_and_bound_values(client):
     node = upload(client, "x.csv", b'name,value\nalpha,1\nalpine,2\nbeta,\n')
-    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'x')['id']}/query"
     checks = [
         ({"column": "name", "operator": "contains", "value": "ph"}, 1),
         ({"column": "name", "operator": "ends_with", "value": "a"}, 2),
@@ -471,7 +514,7 @@ def test_category_values_are_paged_and_searchable(client, tmp_path):
 
 def test_in_filter_single_multi_and_validation(client):
     node = upload(client, "items.csv", b"category,kind\na,x\nb,x\nc,y\n' OR true --,z\n")
-    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'items')['id']}/query"
 
     checks = [
         ({"column": "category", "operator": "in", "value": ["a"]}, 1),
@@ -601,7 +644,7 @@ def test_profile_kinds_and_categorical_and_date_stats(client, tmp_path):
 
 def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
     node = upload(client, "dedupe.csv", b"group,kind,score,label\na,x,1,first\na,x,3,second\na,y,2,third\nb,x,4,fourth\n")
-    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'dedupe')['id']}/query"
     response = client.post(url, json={
         "filters": [{"column": "group", "operator": "in", "value": ["a", "b"]}],
         "dedupe_columns": ["group", "kind"],
@@ -625,7 +668,7 @@ def test_builder_query_returns_equivalent_executable_sql(client):
         "dedupe.csv",
         b"group,kind,score,label\na,O'Reilly,1,first\na,O'Reilly,3,second\na,x,2,third\nb,O'Reilly,4,fourth\n",
     )
-    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}/query"
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'dedupe')['id']}/query"
     built = client.post(url, json={
         "filters": [{"column": "kind", "operator": "=", "value": "O'Reilly"}],
         "dedupe_columns": ["group", "kind"],
@@ -644,7 +687,7 @@ def test_builder_query_returns_equivalent_executable_sql(client):
 
 def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
     node = upload(client, "scoped.csv", b"group,category,amount\nscope,alpha,1\nscope,,2\nother,beta,100\nother,beta,200\n")
-    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'data')['id']}"
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'scoped')['id']}"
     request = {
         "filters": [{"column": "group", "operator": "=", "value": "scope"}],
         "dedupe_columns": ["group"],
@@ -669,7 +712,7 @@ def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
 def test_stats_invalid_filter_value_returns_422(tmp_path):
     with TestClient(create_app(tmp_path), raise_server_exceptions=False) as stats_client:
         node = upload(stats_client, "values.csv", b"value\n1\n2\n")
-        base = f"/api/nodes/{node['id']}/datasets/{dataset(stats_client, node, 'data')['id']}"
+        base = f"/api/nodes/{node['id']}/datasets/{dataset(stats_client, node, 'values')['id']}"
         response = stats_client.post(base + "/columns/value/stats", json={
             "filters": [{"column": "value", "operator": ">", "value": "not-a-number"}],
         })

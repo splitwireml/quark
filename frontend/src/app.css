@@ -64,6 +64,6 @@ main, .workspace { min-width: 0; min-height: 0; display: flex; flex-direction: c
 .sql-editor .cm-content { min-height: calc(5 * 1.45em); padding: 10px 0; }
 .sql-editor .cm-gutters { border-right-color: var(--line); background: var(--surface-2); color: var(--muted); }
 .sql-editor .cm-focused { outline: 2px solid var(--action); outline-offset: -2px; }
-.sql-editor.error .cm-editor { outline: 2px solid var(--error); outline-offset: -2px; }
+.sql-editor.has-error .cm-editor { outline: 2px solid var(--error); outline-offset: -2px; }
 .sql-error { margin: 0; padding: 8px 12px; border-top: 1px solid color-mix(in oklch, var(--error) 35%, var(--line)); color: var(--error); background: color-mix(in oklch, var(--error) 7%, var(--surface)); font-size: 12px; }
 @media (max-width: 760px) { .queries-pane { padding: 12px; } .queries-pane article { align-items: stretch; flex-direction: column; } .queries-pane article footer button { min-height: 44px; } .sql-panel { right: 12px; bottom: 12px; width: calc(100vw - 24px); } .sql-editor .cm-scroller { max-height: 32vh; } }

@@ -44,7 +44,7 @@ By default uploads and the node registry live in `./data`. Override with:
 QUARK_DATA_DIR=/absolute/path uv run uvicorn backend.app:app --host 0.0.0.0
 ```
 
-Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become datasets), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. First run: add a source, choose its dataset, then filter, profile, hide columns, dedupe by selected keys, or run a read-only `SELECT` in the SQL editor.
+Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become datasets), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. New flat-file uploads use a safe filename stem as their SQL table name (`Claims v1.csv` → `claims_v1`); existing registrations keep their current names. First run: add a source, choose its dataset, then filter, profile, hide columns, dedupe by selected keys, or run a read-only `SELECT` in the SQL editor.
 
 An attached DuckDB path is opened read-only. Only attach paths you trust; Quark is an intentionally local, single-user tool.
 

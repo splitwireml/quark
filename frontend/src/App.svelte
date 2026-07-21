@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { basicSetup, EditorView } from 'codemirror';
-  import { sql, StandardSQL, type SQLNamespace } from '@codemirror/lang-sql';
+  import { autocompletion, completionStatus, startCompletion, type CompletionSource } from '@codemirror/autocomplete';
+  import { keywordCompletionSource, schemaCompletionSource, sql, StandardSQL, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
   import * as api from './lib/api';
   import type { AggregateCount, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, FilterCondition, FilterOperator, NodeInfo, QueryResponse, SortCondition, WorkbookPreview } from './lib/types';
 
@@ -119,27 +120,51 @@
   function deleteQuery(id: string) { storeSavedQueries(savedQueries.filter((query) => query.id !== id)); }
 
   function editorSchema(): SQLNamespace {
-    const schema: Record<string, Record<string, readonly string[]>> = {};
+    const schema: Record<string, Record<string, SQLNamespace>> = {};
     for (const dataset of datasets) {
       schema[dataset.schema] ??= {};
-      schema[dataset.schema][dataset.name] = dataset.columns;
+      schema[dataset.schema][dataset.name] = {
+        self: { label: dataset.name, type: 'type', apply: quoteIdentifier(dataset.name) },
+        children: dataset.columns
+      };
     }
     return schema;
+  }
+
+  function sqlCompletionAllowed(text: string) {
+    const nodeName = StandardSQL.language.parser.parse(text).resolveInner(text.length, -1).name;
+    return nodeName !== 'String' && !nodeName.includes('Comment');
+  }
+
+  function guardCompletion(source: CompletionSource): CompletionSource {
+    return (context) => sqlCompletionAllowed(context.state.sliceDoc(0, context.pos)) ? source(context) : null;
   }
 
   function createSqlEditor() {
     editorView?.destroy();
     if (!editorHost) return;
     editorHost.replaceChildren();
+    const sqlConfig: SQLConfig = { dialect: StandardSQL, schema: editorSchema(), defaultSchema: currentDataset?.schema, defaultTable: currentDataset?.name, upperCaseKeywords: true };
     editorView = new EditorView({
       doc: sqlText,
       parent: editorHost,
       extensions: [
         basicSetup,
-        sql({ dialect: StandardSQL, schema: editorSchema(), defaultSchema: currentDataset?.schema, defaultTable: currentDataset?.name, upperCaseKeywords: true }),
+        sql(sqlConfig),
+        autocompletion({ override: [guardCompletion(schemaCompletionSource(sqlConfig)), guardCompletion(keywordCompletionSource(StandardSQL, true))] }),
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({ 'aria-label': 'SQL editor' }),
-        EditorView.updateListener.of((update) => { if (update.docChanged) sqlText = update.state.doc.toString(); })
+        EditorView.updateListener.of((update) => {
+          if (!update.docChanged) return;
+          sqlText = update.state.doc.toString();
+          const cursor = update.state.selection.main.head;
+          const beforeCursor = update.state.sliceDoc(0, cursor);
+          if (/\b(?:FROM|JOIN)\s+(?:"[^"]*"?|[\w$]+)?(?:\.(?:"[^"]*"?|[\w$]*))?$/i.test(beforeCursor) && completionStatus(update.state) !== 'active') {
+            if (sqlCompletionAllowed(beforeCursor)) queueMicrotask(() => {
+              if (editorView === update.view && completionStatus(update.view.state) !== 'active') startCompletion(update.view);
+            });
+          }
+        })
       ]
     });
   }
@@ -612,7 +637,7 @@
               <button bind:this={sqlTrigger} class="secondary-button" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={() => sqlOpen ? closeSql() : openSql()}>SQL</button>
               {#if storageError}<span class="query-error" role="alert">{storageError}</span>{/if}
             </section>
-            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={closeSql} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
+            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={closeSql} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:has-error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
             <div class="data-stage">
               <section class="table-pane" aria-label="Dataset rows" inert={!!inspectorMode}>
                 <div class="table-card" aria-busy={loadingData}>
