@@ -28,6 +28,14 @@ uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000
 
 Open `http://127.0.0.1:8000`. FastAPI serves `frontend/dist` when built.
 
+## Docker
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://127.0.0.1:8000`. Uploads persist in `./data`.
+
 ## Data
 
 By default uploads and the node registry live in `./data`. Override with:
