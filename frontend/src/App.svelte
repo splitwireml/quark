@@ -3,6 +3,7 @@
   import { basicSetup, EditorView } from 'codemirror';
   import { autocompletion, completionStatus, startCompletion, type CompletionSource } from '@codemirror/autocomplete';
   import { keywordCompletionSource, schemaCompletionSource, sql, StandardSQL, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
+  import { keymap } from '@codemirror/view';
   import * as api from './lib/api';
   import type { AggregateCount, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, FilterCondition, FilterOperator, NodeInfo, QueryResponse, SortCondition, WorkbookPreview } from './lib/types';
 
@@ -149,11 +150,20 @@
       doc: sqlText,
       parent: editorHost,
       extensions: [
+        keymap.of([{ key: 'Shift-Enter', preventDefault: true, run: () => {
+          if (!loadingData && sqlText.trim()) {
+            page = 1;
+            pageInput = '1';
+            void runSql().then(() => editorView?.focus());
+          }
+          return true;
+        } }]),
         basicSetup,
         sql(sqlConfig),
         autocompletion({ override: [guardCompletion(schemaCompletionSource(sqlConfig)), guardCompletion(keywordCompletionSource(StandardSQL, true))] }),
         EditorView.lineWrapping,
-        EditorView.contentAttributes.of({ 'aria-label': 'SQL editor' }),
+        EditorView.contentAttributes.of({ 'aria-label': 'SQL editor', 'aria-keyshortcuts': 'Shift+Enter' }),
+
         EditorView.updateListener.of((update) => {
           if (!update.docChanged) return;
           sqlText = update.state.doc.toString();
@@ -637,7 +647,7 @@
               <button bind:this={sqlTrigger} class="secondary-button" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={() => sqlOpen ? closeSql() : openSql()}>SQL</button>
               {#if storageError}<span class="query-error" role="alert">{storageError}</span>{/if}
             </section>
-            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={closeSql} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:has-error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
+            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={closeSql} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:has-error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" title="Run SQL (Shift+Enter)" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
             <div class="data-stage">
               <section class="table-pane" aria-label="Dataset rows" inert={!!inspectorMode}>
                 <div class="table-card" aria-busy={loadingData}>
