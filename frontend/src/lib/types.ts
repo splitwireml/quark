@@ -122,12 +122,18 @@ export interface CategoricalColumnStats extends ColumnStatsBase {
   top_values: ProfileValue[];
 }
 
+export interface DateYearCount {
+  year: string;
+  count: AggregateCount;
+}
+
 export interface DateColumnStats extends ColumnStatsBase {
   kind: 'date';
   min: string | null;
   max: string | null;
   distinct_count: AggregateCount;
   histogram: HistogramBin[];
+  year_counts: DateYearCount[];
 }
 
 export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColumnStats;

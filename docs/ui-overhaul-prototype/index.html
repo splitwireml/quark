@@ -1,0 +1,930 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DuckScope UI overhaul prototype</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      font-synthesis: none;
+      --canvas: oklch(97.5% 0.008 88);
+      --surface: oklch(99% 0.004 88);
+      --surface-2: oklch(95.5% 0.01 88);
+      --surface-3: oklch(92.5% 0.014 88);
+      --ink: oklch(24% 0.022 155);
+      --muted: oklch(49% 0.018 155);
+      --faint: oklch(65% 0.014 155);
+      --line: oklch(84% 0.014 88);
+      --line-strong: oklch(72% 0.022 88);
+      --action: oklch(45% 0.11 155);
+      --action-dark: oklch(34% 0.09 155);
+      --action-tint: oklch(92% 0.04 155);
+      --warning: oklch(56% 0.12 62);
+      --warning-tint: oklch(94% 0.04 62);
+      --error: oklch(48% 0.16 28);
+      --shadow: 0 16px 40px color-mix(in oklch, var(--ink) 16%, transparent);
+      --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      --rail: 252px;
+      --inspector: 344px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { min-width: 0; overflow: hidden; color: var(--ink); background: var(--canvas); }
+    button, input, select { font: inherit; color: inherit; }
+    button { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--action);
+      outline-offset: 2px;
+    }
+    button:disabled {
+      color: var(--faint);
+      background: var(--surface-2);
+      cursor: not-allowed;
+      opacity: 0.7;
+    }
+    .material-symbols-outlined {
+      font-size: 20px;
+      line-height: 1;
+      font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .appbar {
+      height: 56px;
+      display: grid;
+      grid-template-columns: var(--rail) minmax(0, 1fr) auto;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+      position: relative;
+      z-index: 20;
+    }
+    .brand {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      border-right: 1px solid var(--line);
+    }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 4px;
+      color: var(--surface);
+      background: var(--ink);
+      font: 700 15px var(--mono);
+    }
+    .brand strong { font-size: 15px; letter-spacing: -0.02em; }
+    .crumbs {
+      min-width: 0;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .crumbs b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+    .top-status {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--action); }
+    .mobile-menu { display: none; }
+
+    .shell {
+      height: calc(100% - 56px);
+      display: grid;
+      grid-template-columns: var(--rail) minmax(0, 1fr);
+    }
+    .rail {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--line);
+      background: var(--surface);
+      position: relative;
+      z-index: 15;
+    }
+    .rail-head { padding: 16px; border-bottom: 1px solid var(--line); }
+    .primary, .secondary, .quiet, .icon-button {
+      min-height: 36px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--surface);
+      cursor: pointer;
+      transition: background-color 160ms ease-out, border-color 160ms ease-out, color 160ms ease-out;
+    }
+    .primary {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-color: var(--action);
+      color: var(--surface);
+      background: var(--action);
+      font-weight: 650;
+    }
+    .primary:hover { background: var(--action-dark); border-color: var(--action-dark); }
+    .secondary { padding: 0 12px; background: var(--surface); font-weight: 600; }
+    .secondary:hover, .quiet:hover, .icon-button:hover { background: var(--surface-2); border-color: var(--line-strong); }
+    .quiet { padding: 0 10px; color: var(--muted); border-color: transparent; background: transparent; }
+    .icon-button {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+    }
+    .source-form { display: none; gap: 8px; padding-top: 10px; }
+    .source-form.open { display: grid; }
+    .source-option {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 10px;
+      text-align: left;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--ink);
+      background: var(--canvas);
+      cursor: pointer;
+    }
+    .source-option small { display: block; color: var(--muted); margin-top: 1px; }
+    .rail-section { min-height: 0; flex: 1; padding: 18px 10px; overflow: auto; }
+    .section-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 0 6px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .source-list { display: grid; gap: 4px; }
+    .source {
+      width: 100%;
+      min-height: 52px;
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      text-align: left;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+    .source:hover { background: var(--surface-2); }
+    .source.active { border-color: var(--line-strong); color: var(--ink); background: var(--action-tint); }
+    .source:disabled { cursor: default; }
+    .source.active:disabled { color: var(--ink); background: var(--action-tint); opacity: 1; }
+    .source .material-symbols-outlined { font-size: 19px; }
+    .source strong, .source small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .source strong { font-size: 13px; }
+    .source small { margin-top: 2px; color: var(--muted); font: 12px var(--mono); }
+    .source .count { color: var(--muted); font: 12px var(--mono); }
+    .rail-footer {
+      min-height: 44px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .dataset-head {
+      flex: 0 0 auto;
+      min-height: 82px;
+      padding: 14px 20px 12px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    h1 { margin: 0; font-size: 22px; line-height: 1.15; letter-spacing: -0.025em; }
+    .dataset-meta { margin: 6px 0 0; display: flex; gap: 10px; color: var(--muted); font: 12px var(--mono); }
+    .dataset-actions { display: flex; gap: 8px; }
+    .dataset-actions .secondary { display: flex; align-items: center; gap: 7px; }
+
+    .dataset-tabs {
+      min-height: 42px;
+      padding: 0 20px;
+      display: flex;
+      gap: 20px;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+      overflow-x: auto;
+    }
+    .dataset-tabs button {
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      background: transparent;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .dataset-tabs button.active { color: var(--ink); border-bottom-color: var(--action); font-weight: 650; }
+    .dataset-tabs button:disabled { background: transparent; cursor: default; }
+    .dataset-tabs button.active:disabled { opacity: 1; }
+
+    .querybar {
+      flex: 0 0 auto;
+      min-height: 52px;
+      padding: 7px 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--line);
+      background: var(--canvas);
+    }
+    .query-actions { display: flex; gap: 6px; }
+    .query-action {
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--surface);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .query-action:hover { background: var(--surface-2); }
+    .tokens { min-width: 0; flex: 1; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+    .token {
+      flex: 0 0 auto;
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 0 0 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      background: var(--surface);
+      font: 12px var(--mono);
+    }
+    .token b { font-weight: 700; }
+    .token.sort-token { background: var(--action-tint); border-color: color-mix(in oklch, var(--action) 38%, var(--line)); }
+    .token button { width: 36px; height: 36px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+    .token .material-symbols-outlined { font-size: 16px; }
+    .clear-query { flex: 0 0 auto; min-height: 32px; font-size: 12px; }
+
+    .data-stage { min-width: 0; min-height: 0; flex: 1; display: flex; position: relative; }
+    .table-pane { min-width: 0; min-height: 0; flex: 1; padding: 12px 20px 0; display: flex; flex-direction: column; }
+    .table-frame {
+      min-width: 0;
+      min-height: 0;
+      flex: 1;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px 4px 0 0;
+      background: var(--surface);
+      overflow: auto;
+      scrollbar-color: var(--line-strong) var(--surface-2);
+    }
+    table { width: 100%; min-width: 920px; border-collapse: separate; border-spacing: 0; font: 12px var(--mono); }
+    th, td { height: 36px; padding: 0 10px; text-align: left; white-space: nowrap; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    th:last-child, td:last-child { border-right: 0; }
+    th {
+      height: 58px;
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      padding: 0;
+      background: var(--surface-2);
+      box-shadow: 0 1px var(--line-strong);
+    }
+    th:first-child, td:first-child { position: sticky; left: 0; }
+    th:first-child { z-index: 4; }
+    td:first-child { z-index: 1; background: var(--surface); }
+    tbody tr:nth-child(even) td { background: color-mix(in oklch, var(--surface-2) 38%, var(--surface)); }
+    tbody tr:nth-child(even) td:first-child { background: color-mix(in oklch, var(--surface-2) 38%, var(--surface)); }
+    tbody tr:hover td, tbody tr:hover td:first-child { background: var(--action-tint); }
+    .column-head { height: 57px; display: grid; grid-template-columns: minmax(80px, 1fr) auto; align-items: center; gap: 4px; padding: 0 6px 0 10px; position: relative; }
+    .column-label { min-width: 0; overflow: hidden; }
+    .column-label strong, .column-label small { display: block; overflow: hidden; text-overflow: ellipsis; }
+    .column-label strong { font: 700 12px var(--mono); }
+    .column-label small { margin-top: 4px; color: var(--muted); font: 12px/1.3 var(--mono); letter-spacing: 0.02em; }
+    .column-actions { display: flex; gap: 2px; }
+    .column-actions button {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+    .column-actions button:hover, .column-actions button.active { border-color: var(--line-strong); color: var(--action-dark); background: var(--surface); }
+    .column-actions .material-symbols-outlined { font-size: 17px; }
+    .null-rule { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--line); }
+    .null-rule span { display: block; height: 100%; background: var(--warning); }
+    .null-value { color: var(--faint); font-style: italic; }
+    .bool { display: inline-flex; align-items: center; gap: 5px; }
+    .bool .status-dot { width: 6px; height: 6px; }
+
+    .pagination {
+      min-height: 50px;
+      padding: 7px 0;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .pagination label { display: flex; align-items: center; gap: 7px; }
+    .pagination select, .page-input {
+      min-height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--surface);
+      padding: 0 8px;
+    }
+    .range { text-align: center; font: 12px var(--mono); }
+    .pager { display: flex; align-items: center; gap: 6px; }
+    .pager .icon-button { width: 34px; height: 34px; }
+    .page-input { width: 48px; text-align: center; font-family: var(--mono); }
+
+    .inspector {
+      width: 0;
+      min-width: 0;
+      overflow: hidden;
+      border-left: 0 solid var(--line);
+      background: var(--surface);
+      transition: none;
+    }
+    .inspector.open { width: var(--inspector); min-width: var(--inspector); border-left-width: 1px; }
+    .inspector-inner { width: var(--inspector); height: 100%; display: flex; flex-direction: column; }
+    .inspector-head {
+      min-height: 64px;
+      padding: 12px 12px 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .inspector-head p { margin: 0 0 2px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+    .inspector-head h2 { margin: 0; font-size: 16px; }
+    .inspector-body { min-height: 0; flex: 1; overflow: auto; padding: 16px; }
+    .inspector-footer { padding: 12px 16px; display: flex; gap: 8px; border-top: 1px solid var(--line); }
+    .inspector-footer .primary { width: auto; flex: 1; }
+    .inspector-footer .secondary { flex: 0 0 auto; }
+    .field { display: grid; gap: 6px; margin-bottom: 14px; }
+    .field > span { color: var(--muted); font-size: 12px; font-weight: 650; }
+    .field input, .field select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      padding: 0 10px;
+      background: var(--canvas);
+    }
+    .category-tools { margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; }
+    .category-list { border-top: 1px solid var(--line); }
+    .category-list label {
+      min-height: 42px;
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+    }
+    .category-list input { width: 16px; height: 16px; accent-color: var(--action); }
+    .category-list small { color: var(--muted); font: 12px var(--mono); }
+    details { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+    summary { color: var(--action-dark); font-size: 13px; font-weight: 650; cursor: pointer; }
+    .advanced-fields { padding-top: 12px; display: grid; grid-template-columns: 1fr; }
+    .profile-summary { margin: 0; }
+    .profile-summary > div {
+      min-height: 44px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+    }
+    .profile-summary dt { color: var(--muted); font-size: 12px; }
+    .profile-summary dd { margin: 0; font: 600 13px var(--mono); }
+    .profile-scope { margin: 0 0 12px; color: var(--muted); font: 12px var(--mono); }
+    .quality-callout {
+      margin-bottom: 16px;
+      padding: 12px;
+      border: 1px solid color-mix(in oklch, var(--warning) 36%, var(--line));
+      border-radius: 4px;
+      background: var(--warning-tint);
+    }
+    .quality-callout span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .quality-callout strong { display: block; margin-top: 4px; font: 700 22px var(--mono); }
+    .histogram { margin-top: 20px; }
+    .histogram header { display: flex; justify-content: space-between; align-items: baseline; }
+    .histogram h3 { margin: 0; font-size: 13px; }
+    .histogram header span { color: var(--muted); font-size: 12px; }
+    .bars { height: 128px; margin-top: 12px; display: flex; align-items: end; gap: 3px; overflow-x: auto; border-bottom: 1px solid var(--line-strong); }
+    .bar { flex: 0 0 24px; min-width: 24px; border: 0; border-radius: 2px 2px 0 0; background: color-mix(in oklch, var(--action) 72%, var(--surface)); cursor: pointer; }
+    .bar:hover { background: var(--action-dark); }
+    .bar:focus-visible { background: var(--action-dark); outline: 2px solid var(--action-dark); outline-offset: 2px; }
+    .bin-readout { min-height: 34px; padding-top: 8px; color: var(--muted); font: 12px var(--mono); }
+    .empty-query { color: var(--muted); font-size: 12px; }
+    .backdrop { display: none; }
+
+    @media (max-width: 960px) {
+      :root { --rail: 220px; --inspector: 320px; }
+      .dataset-head, .dataset-tabs, .querybar { padding-left: 14px; padding-right: 14px; }
+      .table-pane { padding-left: 14px; padding-right: 14px; }
+      .dataset-actions .button-label { display: none; }
+      .dataset-actions .secondary { width: 36px; padding: 0; justify-content: center; }
+      .top-status .status-copy { display: none; }
+    }
+
+    @media (max-width: 960px) {
+      :root { --inspector: 100vw; }
+      body { overflow: hidden; }
+      .appbar { grid-template-columns: 48px minmax(0, 1fr) auto; }
+      .mobile-menu { display: grid; width: 44px; height: 44px; margin-left: 4px; place-items: center; border: 0; background: transparent; cursor: pointer; }
+      .brand { border: 0; padding: 0 8px; }
+      .brand-mark { width: 28px; height: 28px; }
+      .brand strong { display: none; }
+      .crumbs { padding: 0 8px; font-size: 12px; }
+      .crumbs span:nth-child(1), .crumbs span:nth-child(2) { display: none; }
+      .top-status { display: none; }
+      .shell { grid-template-columns: minmax(0, 1fr); }
+      .rail {
+        position: fixed;
+        inset: 56px auto 0 0;
+        width: min(86vw, 320px);
+        transform: translateX(-102%);
+        visibility: hidden;
+        box-shadow: var(--shadow);
+        transition: transform 180ms ease-out;
+      }
+      .rail.open { transform: translateX(0); visibility: visible; }
+      .backdrop { position: fixed; inset: 56px 0 0; z-index: 12; background: color-mix(in oklch, var(--ink) 34%, transparent); }
+      .backdrop.open { display: block; }
+      .dataset-head { min-height: 88px; padding: 12px; }
+      .dataset-meta { gap: 6px; font-size: 12px; flex-wrap: wrap; }
+      .dataset-actions { gap: 4px; }
+      .dataset-actions .secondary, .dataset-actions .icon-button { width: 44px; height: 44px; }
+      .dataset-tabs { min-height: 44px; padding: 0 12px; }
+      .dataset-tabs button { height: 44px; }
+      .querybar { min-height: 54px; padding: 6px 12px; }
+      .query-action { min-height: 44px; }
+      .query-action .button-label { display: none; }
+      .tokens { order: 2; }
+      .clear-query { min-height: 44px; }
+      .token { min-height: 44px; }
+      .token button { width: 44px; height: 44px; }
+      .table-pane { padding: 8px 0 0 12px; }
+      .table-frame { border-radius: 4px 0 0 0; }
+      th, td { height: 40px; }
+      .column-actions button { width: 38px; height: 38px; }
+      .pagination { min-height: 58px; margin-right: 12px; grid-template-columns: 1fr auto; }
+      .pagination > label { display: none; }
+      .range { text-align: left; }
+      .pager .icon-button { width: 44px; height: 44px; }
+      .page-input { height: 44px; }
+      .inspector {
+        position: fixed;
+        inset: 56px 0 0;
+        z-index: 25;
+        width: 100vw;
+        min-width: 100vw;
+        transform: translateX(102%);
+        border: 0;
+        transition: transform 180ms ease-out;
+      }
+      .inspector.open { width: 100vw; min-width: 100vw; transform: translateX(0); }
+      .inspector-inner { width: 100vw; }
+      .inspector-head { min-height: 64px; }
+      .inspector-head .icon-button { width: 44px; height: 44px; }
+      .category-list label { min-height: 48px; }
+      .inspector-footer button { min-height: 44px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="appbar">
+    <button class="mobile-menu" id="menuButton" aria-label="Open sources" aria-expanded="false">
+      <span class="material-symbols-outlined" aria-hidden="true">menu</span>
+    </button>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">D</span>
+      <strong>DuckScope</strong>
+    </div>
+    <nav class="crumbs" aria-label="Current location">
+      <span>Sources</span><span class="separator">/</span><b>smoke-100k.csv</b><span class="separator">/</span><b>data</b>
+    </nav>
+    <div class="top-status"><span class="status-dot" aria-hidden="true"></span><span class="status-copy">Local backend connected</span></div>
+  </header>
+
+  <div class="shell">
+    <aside class="rail" id="sourceRail" aria-label="Sources">
+      <div class="rail-head">
+        <button class="primary" id="addSourceButton" aria-expanded="false">
+          <span class="material-symbols-outlined" aria-hidden="true">add</span>Add source
+        </button>
+        <div class="source-form" id="sourceForm">
+          <button class="source-option" disabled title="Not interactive in this design prototype"><span class="material-symbols-outlined" aria-hidden="true">upload_file</span><span><strong>Upload a file</strong><small>CSV, Parquet, JSON, DuckDB</small></span></button>
+          <button class="source-option" disabled title="Not interactive in this design prototype"><span class="material-symbols-outlined" aria-hidden="true">folder_open</span><span><strong>Attach a local path</strong><small>Open a database read-only</small></span></button>
+        </div>
+      </div>
+      <section class="rail-section">
+        <h2 class="section-label"><span>Sources</span><span>3</span></h2>
+        <div class="source-list">
+          <button class="source active" aria-current="page" disabled>
+            <span class="material-symbols-outlined" aria-hidden="true">table_view</span>
+            <span><strong>smoke-100k.csv</strong><small>100,000 rows</small></span>
+          </button>
+          <button class="source" disabled>
+            <span class="material-symbols-outlined" aria-hidden="true">database</span>
+            <span><strong>sales.duckdb</strong><small>4 datasets</small></span>
+          </button>
+          <button class="source" disabled>
+            <span class="material-symbols-outlined" aria-hidden="true">table_view</span>
+            <span><strong>events.parquet</strong><small>1.2M rows</small></span>
+          </button>
+        </div>
+      </section>
+      <footer class="rail-footer"><span class="status-dot" aria-hidden="true"></span>3 sources available locally</footer>
+    </aside>
+
+    <main class="workspace">
+      <section class="dataset-head" aria-labelledby="dataset-title">
+        <div>
+          <h1 id="dataset-title">smoke-100k.csv</h1>
+          <p class="dataset-meta"><span>CSV source</span><span id="rowCount">28,572 rows</span><span>100 columns</span><span>102 ms</span></p>
+        </div>
+        <div class="dataset-actions">
+          <button class="secondary" id="columnsButton" title="Not interactive in this design prototype" disabled><span class="material-symbols-outlined" aria-hidden="true">view_column</span><span class="button-label">Columns</span></button>
+          <button class="icon-button" title="Not interactive in this design prototype" aria-label="Refresh data, unavailable in prototype" disabled><span class="material-symbols-outlined" aria-hidden="true">refresh</span></button>
+        </div>
+      </section>
+
+      <nav class="dataset-tabs" aria-label="Datasets">
+        <button class="active" aria-current="page" disabled>data</button>
+        <button disabled>validation_summary</button>
+      </nav>
+
+      <section class="querybar" aria-label="Query controls">
+        <div class="query-actions">
+          <button class="query-action" data-open-filter="category"><span class="material-symbols-outlined" aria-hidden="true">filter_alt</span><span class="button-label">Filter</span></button>
+          <button class="query-action" data-sort="value"><span class="material-symbols-outlined" aria-hidden="true">sort</span><span class="button-label">Sort</span></button>
+        </div>
+        <div class="tokens" id="queryTokens" aria-label="Active query conditions"></div>
+        <button class="quiet clear-query" id="clearQuery">Clear query</button>
+      </section>
+
+      <div class="data-stage">
+        <section class="table-pane" aria-label="Dataset rows">
+          <div class="table-frame" id="tableFrame">
+            <table>
+              <thead><tr id="tableHead"></tr></thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+          </div>
+          <footer class="pagination">
+            <label>Rows per page <select aria-label="Rows per page" disabled><option>50</option><option selected>100</option><option>250</option></select></label>
+            <span class="range" id="rangeLabel">1-100 of 28,572</span>
+            <div class="pager">
+              <button class="icon-button" aria-label="Previous page" disabled><span class="material-symbols-outlined" aria-hidden="true">keyboard_arrow_left</span></button>
+              <label><span class="sr-only">Page</span><input class="page-input" value="1" inputmode="numeric" aria-label="Page number" disabled></label>
+              <span>of <span id="pageCount">286</span></span>
+              <button class="icon-button" aria-label="Next page" disabled><span class="material-symbols-outlined" aria-hidden="true">keyboard_arrow_right</span></button>
+            </div>
+          </footer>
+        </section>
+
+        <aside class="inspector" id="inspector" aria-label="Context inspector" aria-hidden="true" inert>
+          <div class="inspector-inner">
+            <header class="inspector-head">
+              <div><p id="inspectorKicker">Filter column</p><h2 id="inspectorTitle" tabindex="-1">category</h2></div>
+              <button class="icon-button" id="closeInspector" aria-label="Close inspector"><span class="material-symbols-outlined" aria-hidden="true">close</span></button>
+            </header>
+            <div class="inspector-body" id="inspectorBody"></div>
+            <footer class="inspector-footer" id="inspectorFooter"></footer>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+  <button class="backdrop" id="backdrop" aria-label="Close sources"></button>
+
+  <script>
+    // ponytail: static demo data answers the design question; production keeps the existing API.
+    const columns = [
+      { name: 'id', type: 'BIGINT', numeric: true, nulls: 0 },
+      { name: 'category', type: 'VARCHAR', numeric: false, nulls: 0 },
+      { name: 'value', type: 'DOUBLE', numeric: true, nulls: 10 },
+      { name: 'note', type: 'VARCHAR', numeric: false, nulls: 2 },
+      { name: 'region', type: 'VARCHAR', numeric: false, nulls: 1 },
+      { name: 'active', type: 'BOOLEAN', numeric: false, nulls: 0 }
+    ];
+    const sourceRows = Array.from({ length: 100 }, (_, id) => ({
+      id,
+      category: `g${id % 7}`,
+      value: id % 10 === 0 ? null : id / 10,
+      note: `inspection row ${id}`,
+      region: ['North', 'West', 'Central', 'South'][id % 4],
+      active: id % 3 !== 0
+    }));
+    const categoryCounts = { g0: 14286, g1: 14286, g2: 14286, g3: 14286, g4: 14286, g5: 14285, g6: 14285 };
+    const state = { categories: new Set(['g1', 'g4']), sort: { column: 'value', direction: 'desc' }, inspector: null, column: null };
+    let lastInspectorTrigger = null;
+
+    const el = id => document.getElementById(id);
+    const icon = name => `<span class="material-symbols-outlined" aria-hidden="true">${name}</span>`;
+
+    function filteredRows() {
+      const rows = state.categories.size ? sourceRows.filter(row => state.categories.has(row.category)) : [...sourceRows];
+      if (!state.sort) return rows;
+      const { column, direction } = state.sort;
+      return rows.sort((a, b) => {
+        const av = a[column], bv = b[column];
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        const order = av > bv ? 1 : av < bv ? -1 : 0;
+        return direction === 'asc' ? order : -order;
+      });
+    }
+
+    function renderHead() {
+      el('tableHead').innerHTML = columns.map(column => {
+        const sorted = state.sort?.column === column.name;
+        const sortIcon = sorted ? (state.sort.direction === 'asc' ? 'arrow_upward' : 'arrow_downward') : 'swap_vert';
+        const nextSort = !sorted ? 'ascending' : state.sort.direction === 'asc' ? 'descending' : 'off';
+        return `<th scope="col" ${sorted ? `aria-sort="${state.sort.direction === 'asc' ? 'ascending' : 'descending'}"` : ''} style="min-width:${column.name === 'note' ? 220 : column.numeric ? 196 : 164}px">
+          <div class="column-head">
+            <div class="column-label"><strong>${column.name}</strong><small>${column.type} · ${column.nulls}% null</small></div>
+            <div class="column-actions">
+              <button data-sort="${column.name}" class="${sorted ? 'active' : ''}" aria-label="Sort ${column.name} ${nextSort}" title="Sort ${column.name} ${nextSort}">${icon(sortIcon)}</button>
+              <button data-open-filter="${column.name}" aria-label="Filter ${column.name}" title="Filter ${column.name}">${icon('filter_alt')}</button>
+              ${column.numeric ? `<button data-profile="${column.name}" aria-label="Profile ${column.name}" title="Profile ${column.name}">${icon('analytics')}</button>` : ''}
+            </div>
+            <div class="null-rule" title="${column.nulls}% null"><span style="width:${column.nulls}%"></span></div>
+          </div>
+        </th>`;
+      }).join('');
+    }
+
+    function renderRows() {
+      const rows = filteredRows();
+      el('tableBody').innerHTML = rows.map(row => `<tr>${columns.map(column => {
+        const value = row[column.name];
+        if (value == null) return '<td><span class="null-value">NULL</span></td>';
+        if (typeof value === 'boolean') return `<td><span class="bool"><span class="status-dot" style="background:${value ? 'var(--action)' : 'var(--line-strong)'}"></span>${value ? 'true' : 'false'}</span></td>`;
+        return `<td title="${String(value)}">${String(value)}</td>`;
+      }).join('')}</tr>`).join('');
+
+      const estimated = state.categories.size ? [...state.categories].reduce((sum, key) => sum + categoryCounts[key], 0) : 100000;
+      el('rowCount').textContent = `${estimated.toLocaleString()} rows`;
+      el('rangeLabel').textContent = `1-${Math.min(100, estimated).toLocaleString()} of ${estimated.toLocaleString()}`;
+      el('pageCount').textContent = Math.ceil(estimated / 100).toLocaleString();
+    }
+
+    function renderTokens() {
+      const tokens = [];
+      if (state.categories.size) {
+        tokens.push(`<span class="token"><b>category</b> in ${[...state.categories].join(', ')}<button data-remove="categories" aria-label="Remove category filter">${icon('close')}</button></span>`);
+      }
+      if (state.sort) {
+        tokens.push(`<span class="token sort-token"><b>${state.sort.column}</b> ${state.sort.direction}<button data-remove="sort" aria-label="Remove sort">${icon('close')}</button></span>`);
+      }
+      el('queryTokens').innerHTML = tokens.join('') || '<span class="empty-query">No filters or sorts applied</span>';
+      el('clearQuery').hidden = tokens.length === 0;
+    }
+
+    function renderAll() {
+      renderHead();
+      renderRows();
+      renderTokens();
+    }
+
+    function openInspector(mode, column) {
+      state.inspector = mode;
+      state.column = columns.find(item => item.name === column) || columns[0];
+      el('inspector').classList.add('open');
+      el('inspector').setAttribute('aria-hidden', 'false');
+      el('inspector').inert = false;
+      if (mode === 'profile') renderProfile(); else renderFilter();
+      setInspectorModality(true);
+      requestAnimationFrame(() => (mode === 'profile' ? el('inspectorTitle') : el('inspectorBody').querySelector('input, select, button'))?.focus());
+    }
+
+    function setInspectorModality(open) {
+      const modal = open && matchMedia('(max-width: 960px)').matches;
+      const panel = el('inspector');
+      ['.appbar', '.dataset-head', '.dataset-tabs', '.querybar', '.table-pane'].forEach(selector => document.querySelector(selector).inert = modal);
+      if (modal) {
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-modal', 'true');
+        panel.setAttribute('aria-labelledby', 'inspectorTitle');
+      } else {
+        panel.removeAttribute('role');
+        panel.removeAttribute('aria-modal');
+        panel.removeAttribute('aria-labelledby');
+      }
+    }
+
+    function closeInspector(restoreFocus = true) {
+      state.inspector = null;
+      setInspectorModality(false);
+      el('inspector').classList.remove('open');
+      el('inspector').setAttribute('aria-hidden', 'true');
+      el('inspector').inert = true;
+      if (restoreFocus && lastInspectorTrigger?.isConnected) lastInspectorTrigger.focus();
+    }
+
+    function renderFilter() {
+      const column = state.column;
+      el('inspectorKicker').textContent = 'Filter column';
+      el('inspectorTitle').textContent = column.name;
+      if (column.name === 'category') {
+        el('inspectorBody').innerHTML = `
+          <label class="field"><span>Find a category</span><input id="categorySearch" type="search" placeholder="Search values"></label>
+          <div class="category-tools"><span id="selectionCount">${state.categories.size} selected</span><button class="quiet" id="clearSelection">Clear</button></div>
+          <div class="category-list" id="categoryList">${categoryMarkup('')}</div>
+          <details><summary>Advanced condition</summary><div class="advanced-fields">
+            <label class="field"><span>Operator</span><select><option>equals</option><option>not equal</option><option>contains</option><option>starts with</option><option>is null</option></select></label>
+            <label class="field"><span>Value</span><input placeholder="Enter a value"></label>
+          </div></details>`;
+        el('inspectorFooter').innerHTML = '<button class="secondary" id="cancelFilter">Cancel</button><button class="primary" id="applyFilter">Apply categories</button>';
+        bindCategoryFilter();
+      } else {
+        el('inspectorBody').innerHTML = `
+          <label class="field"><span>Operator</span><select id="operator"><option>equals</option><option>not equal</option><option>greater than</option><option>at least</option><option>less than</option><option>at most</option><option>is null</option></select></label>
+          <label class="field"><span>Value</span><input id="filterValue" type="${column.numeric ? 'number' : 'text'}" placeholder="Enter ${column.name}"></label>`;
+        el('inspectorFooter').innerHTML = '<button class="secondary" id="cancelFilter">Cancel</button><button class="primary" id="applyGeneric" disabled title="Category filtering is the interactive prototype flow">Apply filter</button>';
+        el('cancelFilter').onclick = closeInspector;
+      }
+    }
+
+    function categoryMarkup(query) {
+      const normalized = query.toLowerCase();
+      return Object.entries(categoryCounts)
+        .filter(([name]) => name.includes(normalized))
+        .map(([name, count]) => `<label><input type="checkbox" value="${name}" ${state.categories.has(name) ? 'checked' : ''}><span>${name}</span><small>${count.toLocaleString()}</small></label>`).join('');
+    }
+
+    function bindCategoryFilter() {
+      const draft = new Set(state.categories);
+      const list = el('categoryList');
+      const updateCount = () => el('selectionCount').textContent = `${draft.size} selected`;
+      list.onchange = event => {
+        const input = event.target;
+        if (input.checked) draft.add(input.value); else draft.delete(input.value);
+        updateCount();
+      };
+      el('categorySearch').oninput = event => {
+        list.innerHTML = categoryMarkup(event.target.value);
+        list.querySelectorAll('input').forEach(input => input.checked = draft.has(input.value));
+      };
+      el('clearSelection').onclick = () => {
+        draft.clear();
+        list.querySelectorAll('input').forEach(input => input.checked = false);
+        updateCount();
+      };
+      el('cancelFilter').onclick = closeInspector;
+      el('applyFilter').onclick = () => {
+        const column = state.column.name;
+        state.categories = draft;
+        closeInspector(false);
+        renderAll();
+        requestAnimationFrame(() => document.querySelector(`[data-open-filter="${column}"]`)?.focus());
+      };
+    }
+
+    function renderProfile() {
+      const column = state.column;
+      el('inspectorKicker').textContent = 'Column profile';
+      el('inspectorTitle').textContent = column.name;
+      const bars = [64, 82, 45, 92, 75, 58, 88, 70, 96, 62, 77, 54, 86, 68, 91, 73];
+      el('inspectorBody').innerHTML = `
+        <p class="profile-scope">Entire source · 100,000 rows</p>
+        <div class="quality-callout"><span>Missing values</span><strong>${column.nulls}%</strong></div>
+        <dl class="profile-summary">
+          <div><dt>Non-null</dt><dd>${column.nulls ? '90,000' : '100,000'}</dd></div>
+          <div><dt>Minimum</dt><dd>0</dd></div>
+          <div><dt>Median</dt><dd>49,999.5</dd></div>
+          <div><dt>Maximum</dt><dd>99,999</dd></div>
+          <div><dt>Mean</dt><dd>49,999.5</dd></div>
+          <div><dt>Std. deviation</dt><dd>28,867.7</dd></div>
+        </dl>
+        <section class="histogram"><header><h3>Distribution</h3><span>16 bins</span></header>
+          <div class="bars">${bars.map((height, index) => {
+            const lower = index * 6250;
+            const upper = (index + 1) * 6250 - 1;
+            const count = height * 73;
+            return `<button class="bar" style="height:${height}%" data-lower="${lower}" data-upper="${upper}" data-count="${count}" aria-label="${lower.toLocaleString()} to ${upper.toLocaleString()}, ${count.toLocaleString()} rows"></button>`;
+          }).join('')}</div>
+          <div class="bin-readout" id="binReadout">Focus a bar for its range and count</div>
+        </section>`;
+      el('inspectorFooter').innerHTML = '<button class="primary" id="doneProfile">Done</button>';
+      el('doneProfile').onclick = closeInspector;
+      el('inspectorBody').querySelectorAll('.bar').forEach(button => {
+        const show = () => {
+          el('binReadout').textContent = `${Number(button.dataset.lower).toLocaleString()} to ${Number(button.dataset.upper).toLocaleString()} · ${Number(button.dataset.count).toLocaleString()} rows`;
+        };
+        button.onmouseenter = show;
+        button.onfocus = show;
+      });
+    }
+
+    function cycleSort(column, returnToQuery = false) {
+      if (state.sort?.column !== column) state.sort = { column, direction: 'asc' };
+      else if (state.sort.direction === 'asc') state.sort.direction = 'desc';
+      else state.sort = null;
+      renderAll();
+      const selector = returnToQuery ? `.query-action[data-sort="${column}"]` : `.column-actions [data-sort="${column}"]`;
+      requestAnimationFrame(() => document.querySelector(selector)?.focus());
+    }
+
+    document.addEventListener('click', event => {
+      const sort = event.target.closest('[data-sort]');
+      const filter = event.target.closest('[data-open-filter]');
+      const profile = event.target.closest('[data-profile]');
+      const remove = event.target.closest('[data-remove]');
+      if (sort) cycleSort(sort.dataset.sort, sort.classList.contains('query-action'));
+      if (filter) { lastInspectorTrigger = filter; openInspector('filter', filter.dataset.openFilter); }
+      if (profile) { lastInspectorTrigger = profile; openInspector('profile', profile.dataset.profile); }
+      if (remove?.dataset.remove === 'categories') { state.categories.clear(); renderAll(); requestAnimationFrame(() => document.querySelector('[data-open-filter="category"]')?.focus()); }
+      if (remove?.dataset.remove === 'sort') { const column = state.sort?.column ?? 'value'; state.sort = null; renderAll(); requestAnimationFrame(() => document.querySelector(`.query-action[data-sort="${column}"]`)?.focus()); }
+    });
+
+    el('closeInspector').onclick = closeInspector;
+    el('clearQuery').onclick = () => { state.categories.clear(); state.sort = null; renderAll(); };
+    el('addSourceButton').onclick = () => {
+      const open = el('sourceForm').classList.toggle('open');
+      el('addSourceButton').setAttribute('aria-expanded', String(open));
+    };
+    el('menuButton').onclick = () => {
+      const open = el('sourceRail').classList.toggle('open');
+      el('backdrop').classList.toggle('open', open);
+      el('menuButton').setAttribute('aria-expanded', String(open));
+    };
+    el('backdrop').onclick = () => {
+      el('sourceRail').classList.remove('open');
+      el('backdrop').classList.remove('open');
+      el('menuButton').setAttribute('aria-expanded', 'false');
+    };
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      if (state.inspector) closeInspector();
+      el('sourceRail').classList.remove('open');
+      el('backdrop').classList.remove('open');
+      el('menuButton').setAttribute('aria-expanded', 'false');
+    });
+
+    renderAll();
+  </script>
+</body>
+</html>

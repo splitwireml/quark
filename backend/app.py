@@ -157,6 +157,43 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         temporary.write_text(json.dumps(list(nodes.values()), indent=2))
         temporary.replace(registry_path)
 
+    def _xlsx_typed_view(con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str) -> None:
+        """Keep Excel's styled date cells typed while safely coercing consistent text columns."""
+        typed_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}')"
+        raw_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}', all_varchar = true)"
+        declared = {item[0]: str(item[1]).upper() for item in con.execute(f"SELECT * FROM {typed_expr} LIMIT 0").description}
+        cols = [item[0] for item in con.execute(f"SELECT * FROM {raw_expr} LIMIT 0").description]
+        selects = []
+        for c in cols:
+            cq = quote(c)
+            numeric_ratio, date_ratio, timestamp_ratio, has_time, has_fraction = con.execute(f"""
+                SELECT
+                    COUNT(*) FILTER (WHERE TRY_CAST({cq} AS DOUBLE) IS NOT NULL) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE {cq} IS NOT NULL AND TRIM({cq}) != ''), 0),
+                    COUNT(*) FILTER (WHERE TRY_CAST({cq} AS DATE) IS NOT NULL) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE {cq} IS NOT NULL AND TRIM({cq}) != ''), 0),
+                    COUNT(*) FILTER (WHERE TRY_CAST({cq} AS TIMESTAMP) IS NOT NULL) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE {cq} IS NOT NULL AND TRIM({cq}) != ''), 0),
+                    COUNT(*) FILTER (WHERE regexp_matches(TRIM({cq}), '[T ]\\d{{1,2}}:')),
+                    COUNT(*) FILTER (WHERE TRY_CAST({cq} AS DOUBLE) IS NOT NULL AND TRY_CAST({cq} AS DOUBLE) != floor(TRY_CAST({cq} AS DOUBLE)))
+                FROM {raw_expr}
+            """).fetchone()
+            # ponytail: Excel stores styled dates as serials; its schema is the only signal allowed to reinterpret them.
+            if declared.get(c) == "DATE" and has_fraction:
+                selects.append(f"TIMESTAMP '1899-12-30' + TRY_CAST({cq} AS DOUBLE) * INTERVAL 1 DAY AS {cq}")
+            elif declared.get(c) == "DATE":
+                selects.append(f"CAST(TIMESTAMP '1899-12-30' + TRY_CAST({cq} AS DOUBLE) * INTERVAL 1 DAY AS DATE) AS {cq}")
+            elif declared.get(c) == "TIMESTAMP":
+                selects.append(f"TIMESTAMP '1899-12-30' + TRY_CAST({cq} AS DOUBLE) * INTERVAL 1 DAY AS {cq}")
+            elif declared.get(c) == "TIME":
+                selects.append(f"CAST(TIMESTAMP '1899-12-30' + TRY_CAST({cq} AS DOUBLE) * INTERVAL 1 DAY AS TIME) AS {cq}")
+            elif numeric_ratio is not None and numeric_ratio >= 0.9:
+                selects.append(f"TRY_CAST({cq} AS DOUBLE) AS {cq}")
+            elif timestamp_ratio is not None and timestamp_ratio >= 0.9 and has_time:
+                selects.append(f"TRY_CAST({cq} AS TIMESTAMP) AS {cq}")
+            elif date_ratio is not None and date_ratio >= 0.9:
+                selects.append(f"TRY_CAST({cq} AS DATE) AS {cq}")
+            else:
+                selects.append(cq)
+        con.execute(f"CREATE VIEW {quote(name)} AS SELECT {', '.join(selects)} FROM {raw_expr}")
+
     def connect(node: dict[str, Any]) -> duckdb.DuckDBPyConnection:
         source = Path(node["source"])
         suffix = source.suffix.lower()
@@ -170,7 +207,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             con.execute("INSTALL excel; LOAD excel")
             for sheet in node["sheets"] if "sheets" in node else workbook_sheets(source):
                 sheet_sql = sheet.replace("'", "''")
-                con.execute(f"CREATE VIEW {quote(sheet)} AS SELECT * FROM read_xlsx('{source_sql}', sheet = '{sheet_sql}')")
+                _xlsx_typed_view(con, source_sql, sheet_sql, sheet)
         else:
             if suffix in {".csv", ".tsv"}:
                 delimiter = "\\t" if suffix == ".tsv" else ","
@@ -306,12 +343,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         root.mkdir(parents=True, exist_ok=True)
         uploads.mkdir(exist_ok=True)
+        stored: list[Any] = []
         if registry_path.exists():
             try:
-                stored = json.loads(registry_path.read_text())
+                loaded = json.loads(registry_path.read_text())
+                stored = loaded if isinstance(loaded, list) else []
             except (json.JSONDecodeError, OSError):
-                stored = []
-            for node in stored if isinstance(stored, list) else []:
+                pass
+            for node in stored:
                 if not isinstance(node, dict) or not Path(node.get("source", "")).is_file():
                     continue
                 try:
@@ -320,11 +359,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     nodes[node["id"]] = node
                 except Exception:
                     connections.pop(node.get("id", ""), None)
-        active_sources = {Path(node["source"]).resolve() for node in nodes.values()}
+        # ponytail: startup must not rewrite the registry; a temporarily unavailable bind mount must not erase sources.
+        persisted_sources = {Path(node.get("source", "")).resolve() for node in stored if isinstance(node, dict)}
         for candidate in uploads.iterdir():
-            if candidate.is_file() and candidate.resolve() not in active_sources:
+            if candidate.is_file() and candidate.resolve() not in persisted_sources:
                 candidate.unlink()
-        save_registry()
         yield
         for con in connections.values():
             con.close()
@@ -542,10 +581,16 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     FROM ranked GROUP BY bin ORDER BY bin
                 """, [bin_count, *values]).fetchall()
                 histogram = [{"lower": safe(lower), "upper": safe(upper), "count": safe(count)} for lower, upper, count in bins]
+            year_counts = [] if type_.upper().startswith("TIME") else con.execute(f"""
+                SELECT strftime({field}, '%Y'), count(*)
+                FROM {source} WHERE {field} IS NOT NULL
+                GROUP BY 1 ORDER BY 1
+            """, values).fetchall()
             return {
                 "kind": kind, "type": type_, "row_count": safe(row_count), "non_null_count": safe(non_null),
                 "null_count": safe(null_count), "null_fraction": null_count / row_count if row_count else 0.0,
                 "distinct_count": safe(distinct_count), "min": safe(minimum), "max": safe(maximum), "histogram": histogram,
+                "year_counts": [{"year": year, "count": safe(count)} for year, count in year_counts],
             }
         row = con.execute(f"""
             SELECT count(*), count({field}), count(*) - count({field}),

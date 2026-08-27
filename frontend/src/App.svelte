@@ -8,6 +8,8 @@
   import type { AggregateCount, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, FilterCondition, FilterOperator, NodeInfo, QueryResponse, SortCondition, WorkbookPreview } from './lib/types';
 
   type SavedQuery = { id: string; name: string; sql: string; nodeId: string; dataset: string };
+  type RowDensity = 'compact' | 'default' | 'comfortable';
+  type DistributionMode = 'count' | 'percent';
 
   const pageSizes = [50, 100, 250, 500, 1000];
   const savedQueriesKey = 'quark.savedQueries';
@@ -27,6 +29,8 @@
   let hiddenColumns = $state<string[]>([]);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
+  let tableExpanded = $state(false);
+  let rowDensity = $state<RowDensity>('default');
   let page = $state(1);
   let pageSize = $state(100);
   let pageInput = $state('1');
@@ -39,6 +43,8 @@
   let filterOperator = $state<FilterOperator>('=');
   let filterValue = $state('');
   let columnSearch = $state('');
+  let columnMenuSearch = $state('');
+  let nullThreshold = $state(50);
   let activeColumnMatch = $state(0);
   let selectedCell = $state<{ row: number; column: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
@@ -53,13 +59,16 @@
   let statsColumn = $state<ColumnInfo | null>(null);
   let statsLoading = $state(false);
   let statsError = $state('');
+  let distributionMode = $state<DistributionMode>('count');
+  let cumulativeDistribution = $state(false);
+  let shownColumnTypes = $state<string[]>([]);
   let inspectorMode = $state<'filter' | 'profile' | null>(null);
   let railOpen = $state(false);
   let sourceOpen = $state(false);
   let binReadout = $state('Focus a bin to read its range and count.');
   let inspectorTrigger: HTMLButtonElement | null = null;
   let inspector = $state<HTMLElement | null>(null);
-  let filterInput = $state<HTMLInputElement | null>(null);
+  let filterInput = $state<HTMLInputElement | HTMLSelectElement | null>(null);
   let requestId = 0;
   let datasetRequestId = 0;
   let categoryRequestId = 0;
@@ -85,6 +94,8 @@
   let totalPages = $derived(pageLimit(result?.total_pages ?? 0));
   let visibleColumns = $derived(result?.columns.filter((column) => !hiddenColumns.includes(column.name)) ?? []);
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
+  let columnMenuItems = $derived.by(() => { const query = columnMenuSearch.trim().toLowerCase(); return query ? (result?.columns ?? []).filter((column) => column.name.toLowerCase().includes(query)) : result?.columns ?? []; });
+  let columnTypes = $derived([...new Set((result?.columns ?? []).map((column) => column.type))]);
   let operators = $derived.by(() => filterColumn ? [...baseOperators, ...(!filterColumn.numeric && isTextType(filterColumn.type) ? textOperators : []), ...(filterColumn.numeric || isOrderedType(filterColumn.type) ? orderedOperators : [])] : baseOperators);
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
   let querySummary = $derived(result ? queryMode === 'sql' ? `${count(result.total_rows)} SQL result rows, page ${result.page} of ${count(result.total_pages)}.` : `${count(result.total_rows)} rows, page ${result.page} of ${count(result.total_pages)}, ${filters.length} filters, ${sorts.length} sorts, and ${dedupeColumns.length} dedupe keys.` : '');
@@ -94,6 +105,7 @@
   function message(reason: unknown): string { return reason instanceof Error ? reason.message : 'Something went wrong'; }
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
+  function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
   function isWorkbookPreview(node: NodeInfo | WorkbookPreview): node is WorkbookPreview { return node.kind === 'workbook' && 'sheets' in node && Array.isArray(node.sheets); }
   function toggleWorkbookSheet(sheet: string, checked: boolean) { workbookSheets = checked ? [...workbookSheets, sheet] : workbookSheets.filter((item) => item !== sheet); }
   function quoteIdentifier(value: string): string { return `"${value.replace(/"/g, '""')}"`; }
@@ -188,7 +200,8 @@
     editorView?.focus();
   }
 
-  function closeSql() { editorView?.destroy(); editorView = null; sqlOpen = false; tick().then(() => sqlTrigger?.focus()); }
+  function closeSql(restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; if (restoreFocus) tick().then(() => sqlTrigger?.focus()); }
+  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); railOpen = false; } tableExpanded = !tableExpanded; }
   function resetSql(dataset: DatasetInfo | undefined) { closeSql(); sqlText = seedSql(dataset); activeSql = ''; sqlError = ''; }
 
   async function runSavedQuery(saved: SavedQuery) {
@@ -267,6 +280,7 @@
     if (event.key === 'Escape') {
       if (inspectorMode) closeInspector();
       else if (sqlOpen) closeSql();
+      else if (tableExpanded) tableExpanded = false;
       else railOpen = false;
       return;
     }
@@ -313,6 +327,7 @@
     dedupeDraft = [];
     hiddenColumns = [];
     lastHiddenColumn = null;
+    shownColumnTypes = [];
     error = '';
     railOpen = false;
     try {
@@ -334,6 +349,7 @@
     dedupeDraft = [];
     hiddenColumns = [];
     lastHiddenColumn = null;
+    shownColumnTypes = [];
     page = 1;
     pageInput = '1';
     await loadData();
@@ -372,6 +388,7 @@
       queryMode = 'sql';
       selectedCell = null;
       hiddenColumns = [];
+      shownColumnTypes = [];
       page = next.page;
       pageInput = String(next.page);
       if (sqlOpen) { await tick(); createSqlEditor(); }
@@ -461,7 +478,7 @@
     const numericValue = filterColumn.numeric ? normalizedNumber(filterValue) : filterValue;
     if (!noValue && numericValue === null) return;
     if (filterColumn.numeric && numericValue !== null) filterValue = formattedNumber(numericValue);
-    const value = noValue ? undefined : filterColumn.numeric ? numericValue! : filterValue;
+    const value = noValue ? undefined : filterColumn.numeric ? numericValue! : isBooleanType(filterColumn.type) ? filterValue === 'true' : filterValue;
     filters = [...filters, { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }) }];
     closeInspector();
     page = 1;
@@ -482,7 +499,26 @@
   async function clearDedupe() { dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
   function isColumnProtected(column: string): boolean { return queryMode === 'builder' && [...dedupeColumns, ...dedupeDraft].includes(column); }
   function hideColumn(column: string) { if (!isColumnProtected(column) && visibleColumns.length > 1) { hiddenColumns = [...hiddenColumns, column]; lastHiddenColumn = column; } }
+  function hideColumnsAtNullFraction(fraction: number) {
+    const columns = visibleColumns.filter((column) => !isColumnProtected(column.name) && column.null_fraction >= fraction).slice(0, visibleColumns.length - 1);
+    if (columns.length) { hiddenColumns = [...hiddenColumns, ...columns.map((column) => column.name)]; lastHiddenColumn = columns[columns.length - 1].name; }
+  }
   function restoreColumn(column: string) { hiddenColumns = hiddenColumns.filter((item) => item !== column); if (lastHiddenColumn === column) lastHiddenColumn = null; }
+  function showAllColumns() { hiddenColumns = []; lastHiddenColumn = null; shownColumnTypes = []; }
+  function isTypeShown(type: string): boolean { return shownColumnTypes.length === 0 || shownColumnTypes.includes(type); }
+  function showColumnsOfTypes(types: string[]) {
+    const columns = result?.columns ?? [];
+    if (!columns.some((column) => types.includes(column.type) || isColumnProtected(column.name))) return;
+    hiddenColumns = columns.filter((column) => !types.includes(column.type) && !isColumnProtected(column.name)).map((column) => column.name);
+    lastHiddenColumn = null;
+  }
+  function toggleShownType(type: string, checked: boolean) {
+    const selected = shownColumnTypes.length ? shownColumnTypes : [...columnTypes];
+    const next = checked ? [...new Set([...selected, type])] : selected.filter((item) => item !== type);
+    if (!next.length) return;
+    shownColumnTypes = next.length === columnTypes.length ? [] : next;
+    showColumnsOfTypes(next);
+  }
   function toggleColumn(column: string, checked: boolean) { if (checked) restoreColumn(column); else hideColumn(column); }
   async function changePage(next: number) { if (next < 1 || next > totalPages || next === page) return; page = next; await loadActiveData(); }
   async function jumpPage() { const next = Math.min(Math.max(1, Number.parseInt(pageInput) || 1), Math.max(totalPages, 1)); pageInput = String(next); await changePage(next); }
@@ -490,6 +526,8 @@
 
   async function openStats(column: ColumnInfo, trigger?: HTMLButtonElement) {
     if (!column.profile_kind) return;
+    distributionMode = 'count';
+    cumulativeDistribution = false;
     closeInspector();
     const id = ++statsRequestId;
     inspectorTrigger = trigger ?? null;
@@ -569,10 +607,10 @@
     else expandCell(event as unknown as MouseEvent, row, column);
   }
   function collapseCell(row: number, column: string) { if (selectedCell?.row === row && selectedCell.column === column) selectedCell = null; }
-  function filterDisplay(value: FilterCondition['value']): string { return Array.isArray(value) ? value.join(', ') : String(value ?? ''); }
   function sortFor(column: string): SortCondition | undefined { return sorts.find((sort) => sort.column === column); }
   function compact(value: number | string | null | undefined): string { return value == null ? '—' : typeof value === 'string' ? value : new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value); }
   function count(value: AggregateCount): string { return typeof value === 'string' ? value : value.toLocaleString(); }
+  function distributionText(value: AggregateCount, values: { count: AggregateCount }[], index: number, total: AggregateCount): string { const amount = cumulativeDistribution ? values.slice(0, index + 1).reduce((sum, item) => sum + Number(item.count), 0) : value; return distributionMode === 'percent' ? `${Number(total) === 0 ? '0.0' : (Number(amount) * 100 / Number(total)).toFixed(1)}%` : count(amount); }
   // ponytail: numeric page input stops before multiplication loses integer precision; add a BigInt text pager only if a human needs deeper pages.
   function isSafeCount(value: AggregateCount): boolean { return typeof value === 'number' || value.length < 16 || (value.length === 16 && value <= String(Number.MAX_SAFE_INTEGER)); }
   function pageLimit(value: AggregateCount): number { const ceiling = Math.floor(Number.MAX_SAFE_INTEGER / pageSize); return isSafeCount(value) ? Math.min(Number(value), ceiling) : ceiling; }
@@ -584,7 +622,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 <div class:rail-collapsed={railCollapsed} class="app-shell">
-  <header class="topbar" inert={!!inspectorMode}>
+  <header class="topbar" inert={!!inspectorMode || tableExpanded}>
     <button class="menu-button" aria-label="Open sources" aria-expanded={railOpen} onclick={() => railOpen = true}>☰</button>
     <button class="rail-toggle" aria-label={railCollapsed ? 'Expand sources sidebar' : 'Collapse sources sidebar'} aria-expanded={!railCollapsed} onclick={() => railCollapsed = !railCollapsed}>☰</button>
     <div class="brand"><span aria-hidden="true">Q</span><strong>Quark</strong></div>
@@ -593,7 +631,7 @@
   </header>
 
   <div class="shell">
-    <aside class:open={railOpen} class="rail" aria-label="Sources" inert={!!inspectorMode}>
+    <aside class:open={railOpen} class="rail" aria-label="Sources" inert={!!inspectorMode || tableExpanded}>
       <div class="rail-head">
         <button class="primary-button" aria-expanded={sourceOpen} onclick={() => sourceOpen = !sourceOpen}>Add source</button>
         {#if sourceOpen}
@@ -621,35 +659,35 @@
         <section class="welcome"><div class="welcome-icon">Q</div><h1>Explore local data</h1><p>Open a local file or a read-only DuckDB database. Quark keeps the work on this machine and loads only the page you are viewing.</p><ol class="onboarding-steps"><li><b>1. Add a source</b><span>CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX, DuckDB, or DB</span></li><li><b>2. Choose a dataset</b><span>Tables and views appear after the source opens</span></li><li><b>3. Inspect the data</b><span>Filter, profile, hide columns, or dedupe by selected keys</span></li></ol>{#if error}<div class="error" role="alert"><div><strong>Could not load Quark</strong><p>{error}</p></div><button onclick={loadNodes}>Retry</button></div>{/if}<label class="primary-button">Choose a file<input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={upload} disabled={mutating} /></label><details class="onboarding-attach"><summary>Attach a local DuckDB database</summary><form onsubmit={(event) => { event.preventDefault(); attach(); }}><label for="onboarding-database-path">Database path<input id="onboarding-database-path" bind:value={attachPath} placeholder="/data/example.duckdb" disabled={mutating} /></label><button class="secondary-button" type="submit" disabled={mutating || !attachPath.trim()}>Attach read-only database</button></form></details></section>
       {:else}
         <section class="workspace">
-          <header class="dataset-head" inert={!!inspectorMode}>
+          <header class="dataset-head" inert={!!inspectorMode || tableExpanded}>
             <div><h1>{workspaceTab === 'queries' ? 'Saved queries' : currentDataset?.name ?? selectedNode?.name}</h1>{#if workspaceTab === 'data' && result}<p class="dataset-meta"><span>{count(result.total_rows)} rows</span><span>{compact(result.elapsed_ms)} ms</span></p>{/if}</div>
             {#if workspaceTab === 'data'}<button class="icon-button" onclick={loadActiveData} disabled={loadingData} aria-label="Refresh data" title="Refresh data">↻</button>{/if}
           </header>
-          <nav class="dataset-tabs" aria-label="Datasets and saved queries">{#each datasets as dataset (dataset.id)}<button class:active={workspaceTab === 'data' && dataset.id === selectedDataset} aria-current={workspaceTab === 'data' && dataset.id === selectedDataset ? 'page' : undefined} onclick={() => selectDataset(dataset.id)}>{dataset.name}</button>{/each}<button class:active={workspaceTab === 'queries'} aria-current={workspaceTab === 'queries' ? 'page' : undefined} onclick={() => { closeSql(); workspaceTab = 'queries'; }}>Queries ({savedQueries.length})</button></nav>
+          <nav class:table-expanded={tableExpanded} class="dataset-tabs" aria-label="Datasets and saved queries">{#each datasets as dataset (dataset.id)}<button class:active={workspaceTab === 'data' && dataset.id === selectedDataset} aria-current={workspaceTab === 'data' && dataset.id === selectedDataset ? 'page' : undefined} disabled={tableExpanded} onclick={() => selectDataset(dataset.id)}>{dataset.name}</button>{/each}<button class:active={workspaceTab === 'queries'} aria-current={workspaceTab === 'queries' ? 'page' : undefined} disabled={tableExpanded} onclick={() => { closeSql(); workspaceTab = 'queries'; }}>Queries ({savedQueries.length})</button><div class="table-toolbar"><div role="group" aria-label="Row density"><button class="secondary-button" aria-pressed={rowDensity === 'compact'} onclick={() => rowDensity = 'compact'}>Compact</button><button class="secondary-button" aria-pressed={rowDensity === 'default'} onclick={() => rowDensity = 'default'}>Default</button><button class="secondary-button" aria-pressed={rowDensity === 'comfortable'} onclick={() => rowDensity = 'comfortable'}>Comfortable</button></div><button class="secondary-button" aria-label={tableExpanded ? 'Exit expanded table view' : 'Expand table to fill viewport'} onclick={toggleTableExpanded}>{tableExpanded ? 'Back' : 'Expand table'}</button></div></nav>
           {#if workspaceTab === 'queries'}
             <section class="queries-pane" aria-label="Saved queries">
               {#if storageError}<p class="sql-error" role="alert">{storageError}</p>{/if}
               {#each savedQueries as saved (saved.id)}<article><div><h2>{saved.name}</h2><pre>{saved.sql}</pre></div><footer><button class="secondary-button" onclick={() => runSavedQuery(saved)}>Run</button><button class="secondary-button" aria-label={`Delete saved query ${saved.name}`} onclick={() => deleteQuery(saved.id)}>Delete</button></footer></article>{:else}<div class="empty"><strong>No saved queries</strong><p>Save a builder query or SQL statement to keep it in this browser.</p></div>{/each}
             </section>
           {:else}
-          {#if error}<div class="error" role="alert"><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => selectedDataset ? loadData() : loadNodes()}>Retry</button></div>{/if}
+          {#if error}<div class="error" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => selectedDataset ? loadData() : loadNodes()}>Retry</button></div>{/if}
           {#if datasets.length === 0 && !error}<div class="empty"><strong>No datasets found</strong><p>This source has no tables or views to browse.</p></div>
           {:else if selectedDataset}
-            <section class="querybar" aria-label="Query controls" inert={!!inspectorMode}>
-              <details class="query-details"><summary>Columns</summary><div class="detail-list">{#each result?.columns ?? [] as column (column.name)}<label><input type="checkbox" checked={!hiddenColumns.includes(column.name)} disabled={isColumnProtected(column.name) || (!hiddenColumns.includes(column.name) && visibleColumns.length <= 1)} onchange={(event) => toggleColumn(column.name, event.currentTarget.checked)} /> {column.name}</label>{/each}</div></details>
+            <section class="querybar" aria-label="Query controls" inert={!!inspectorMode || tableExpanded}>
+              <details class="query-details columns-menu"><summary>Columns</summary><div class="detail-list"><header><strong>Columns</strong><span>{visibleColumns.length} of {result?.columns.length ?? 0} shown</span></header><label class="columns-menu-search" for="column-menu-search">Search columns<input id="column-menu-search" type="search" bind:value={columnMenuSearch} placeholder="Search columns" /></label><div class="column-type-filters" role="group" aria-label="Column types">{#each columnTypes as type (type)}<label><input type="checkbox" checked={isTypeShown(type)} disabled={isTypeShown(type) && (columnTypes.length === 1 || shownColumnTypes.length === 1 && shownColumnTypes[0] === type)} onchange={(event) => toggleShownType(type, event.currentTarget.checked)} /> {type}</label>{/each}</div><div class="columns-menu-actions"><button type="button" onclick={() => hideColumnsAtNullFraction(1)}>Hide fully empty</button><label>Hide columns with at least <input type="number" min="0" max="100" step="1" bind:value={nullThreshold} aria-label="Null percentage" />% null</label><button type="button" class="secondary-button" onclick={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}>Apply threshold</button><button type="button" class="secondary-button" onclick={showAllColumns} disabled={hiddenColumns.length === 0}>Show all columns</button></div><div class="columns-menu-list">{#each columnMenuItems as column (column.name)}<label><input type="checkbox" checked={!hiddenColumns.includes(column.name)} disabled={isColumnProtected(column.name) || (!hiddenColumns.includes(column.name) && visibleColumns.length <= 1)} onchange={(event) => toggleColumn(column.name, event.currentTarget.checked)} /> <span title={column.name}>{column.name}</span><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></label>{:else}<p class="muted">No matching columns.</p>{/each}</div></div></details>
               {#if queryMode === 'builder'}
                 <details class="query-details"><summary>Dedupe{dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}</summary><div class="detail-list">{#each visibleColumns as column (column.name)}<label><input type="checkbox" checked={dedupeDraft.includes(column.name)} onchange={(event) => toggleDedupe(column.name, event.currentTarget.checked)} /> {column.name}</label>{/each}<div><button type="button" class="secondary-button" onclick={applyDedupe} disabled={dedupeDraft.length === 0}>Apply</button><button type="button" class="secondary-button" onclick={clearDedupe} disabled={dedupeColumns.length === 0 && dedupeDraft.length === 0}>Clear</button></div></div></details>
-                <div class="tokens" aria-label="Active query conditions">{#each filters as filter, index (filter)}<span class="token"><b>{filter.column}</b> {filter.operator.replace(/_/g, ' ')} <span title={filterDisplay(filter.value)}>{filterDisplay(filter.value)}</span><button aria-label={`Remove filter ${filter.column}`} onclick={() => removeFilter(index)}>×</button></span>{/each}{#each sorts as sort, index (sort.column)}<span class="token sort-token"><b>{index + 1}. {sort.column}</b> {sort.direction}<button aria-label={`Remove sort ${sort.column}`} onclick={() => removeSort(sort.column)}>×</button></span>{/each}{#if dedupeColumns.length}<span class="token"><b>Dedupe</b> <span title={dedupeColumns.join(', ')}>{dedupeColumns.join(', ')}</span><button aria-label="Clear dedupe keys" onclick={clearDedupe}>×</button></span>{/if}{#if filters.length === 0 && sorts.length === 0 && dedupeColumns.length === 0}<span class="muted">No filters, sorts, or dedupe applied</span>{/if}</div>
+                <div class="tokens" aria-label="Active query conditions">{#each filters as filter, index (filter)}<span class="token" title={result?.sql ?? ''}><b>{filter.column}</b><button aria-label={`Remove filter ${filter.column}`} onclick={() => removeFilter(index)}>×</button></span>{/each}{#each sorts as sort, index (sort.column)}<span class="token sort-token"><b>{index + 1}. {sort.column}</b> {sort.direction}<button aria-label={`Remove sort ${sort.column}`} onclick={() => removeSort(sort.column)}>×</button></span>{/each}{#if dedupeColumns.length}<span class="token"><b>Dedupe</b> <span title={dedupeColumns.join(', ')}>{dedupeColumns.join(', ')}</span><button aria-label="Clear dedupe keys" onclick={clearDedupe}>×</button></span>{/if}{#if filters.length === 0 && sorts.length === 0 && dedupeColumns.length === 0}<span class="muted">No filters, sorts, or dedupe applied</span>{/if}</div>
                 {#if filters.length || sorts.length || dedupeColumns.length}<button class="secondary-button" onclick={() => saveQuery(result?.sql ?? '')} disabled={!result?.sql}>Save query</button><button class="clear-query" onclick={clearQuery}>Clear query</button>{/if}
-              {:else}<span class="tokens muted">SQL result</span><button class="secondary-button" onclick={() => { page = 1; pageInput = '1'; loadData(); }}>Back to builder</button>{/if}
+              {:else}<div class="tokens"><span class="token" title={activeSql}>SQL</span></div><button class="secondary-button" onclick={() => { page = 1; pageInput = '1'; loadData(); }}>Back to builder</button>{/if}
               <input class="column-search" type="search" bind:value={columnSearch} oninput={findColumn} onkeydown={cycleColumnMatch} placeholder="Find column" aria-label="Find column" />
               <span class="column-search-count" aria-live="polite" aria-label={`${columnMatches.length} matching columns`}>{columnMatches.length}</span>
               <button bind:this={sqlTrigger} class="secondary-button" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={() => sqlOpen ? closeSql() : openSql()}>SQL</button>
               {#if storageError}<span class="query-error" role="alert">{storageError}</span>{/if}
             </section>
-            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={closeSql} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:has-error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" title="Run SQL (Shift+Enter)" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
-            <div class="data-stage">
-              <section class="table-pane" aria-label="Dataset rows" inert={!!inspectorMode}>
+            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={() => closeSql()} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:has-error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" title="Run SQL (Shift+Enter)" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
+            <div class:expanded={tableExpanded} class="data-stage">
+              <section class="table-pane {rowDensity}" aria-label="Dataset rows" inert={!!inspectorMode}>
                 <div class="table-card" aria-busy={loadingData}>
                   {#if loadingData && !result}<div class="table-state"><span class="spinner"></span>Loading rows…</div>
                   {:else if result && result.rows.length === 0}<div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
@@ -660,7 +698,7 @@
               {#if inspectorMode}<button class="inspector-backdrop" type="button" tabindex="-1" aria-label="Close inspector" onclick={closeInspector}></button><div bind:this={inspector} class="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title"><header><div><p>{inspectorMode === 'filter' ? 'Filter column' : 'Column profile'}</p><h2 id="inspector-title">{filterColumn?.name ?? statsColumn?.name}</h2><small>{filterColumn?.type ?? statsColumn?.type}</small></div><button class="icon-button" onclick={closeInspector} aria-label="Close inspector" title="Close inspector">×</button></header><div class="inspector-body">
                 {#if inspectorMode === 'filter' && filterColumn}
                   {#if isTextType(filterColumn.type)}<section class="category-picker" aria-label={`Categories for ${filterColumn.name}`}><form onsubmit={(event) => { event.preventDefault(); loadCategoryValues(true); }}><label>Find a category<input bind:this={filterInput} type="search" bind:value={categorySearch} placeholder="Search values" /></label><button class="secondary-button" type="submit" disabled={categoriesLoading}>Search</button></form><div class="category-actions"><button type="button" onclick={selectVisibleCategories} disabled={categoriesLoading || categoryValues.length === 0}>Select visible</button><button type="button" onclick={() => selectedCategories = []} disabled={selectedCategories.length === 0}>Clear</button><span>{selectedCategories.length} selected</span></div>{#if categoriesLoading && categoryValues.length === 0}<p class="panel-state"><span class="spinner"></span>Loading values…</p>{:else if categoriesError}<p class="panel-state error-text" role="alert">{categoriesError}</p>{:else}<div class="category-list">{#each categoryValues as item (item.value)}<label><input type="checkbox" checked={selectedCategories.includes(item.value)} onchange={(event) => toggleCategory(item.value, event.currentTarget.checked)} /><span title={item.value}>{item.value}</span><small>{count(item.count)}</small></label>{:else}<p class="panel-state">No matching values.</p>{/each}</div><div class="category-page"><span>{categoryValues.length.toLocaleString()} / {count(categoryTotal)}</span>{#if categoryHasMore}<button type="button" onclick={() => loadCategoryValues(false)} disabled={categoriesLoading}>{categoriesLoading ? 'Loading…' : 'Load more'}</button>{/if}</div>{/if}</section><details><summary>Advanced condition</summary><form class="advanced-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value<input type="text" bind:value={filterValue} /></label>{/if}<button class="primary-button" type="submit">Apply filter</button></form></details>
-                  {:else}<form class="direct-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value<input bind:this={filterInput} type="text" inputmode={filterColumn.numeric ? 'decimal' : undefined} bind:value={filterValue} onblur={filterColumn.numeric ? normalizeNumericFilter : undefined} /></label>{/if}<button class="primary-button" type="submit" disabled={filterOperator !== 'is_null' && filterOperator !== 'not_null' && filterValue === ''}>Apply filter</button></form>{/if}
+                  {:else}<form class="direct-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value{#if isBooleanType(filterColumn.type)}<select bind:this={filterInput} bind:value={filterValue}><option value="" disabled>Select value</option><option value="true">True</option><option value="false">False</option></select>{:else}<input bind:this={filterInput} type="text" inputmode={filterColumn.numeric ? 'decimal' : undefined} bind:value={filterValue} onblur={filterColumn.numeric ? normalizeNumericFilter : undefined} />{/if}</label>{/if}<button class="primary-button" type="submit" disabled={filterOperator !== 'is_null' && filterOperator !== 'not_null' && filterValue === ''}>Apply filter</button></form>{/if}
                 {:else if inspectorMode === 'profile' && statsColumn}
                   {#if statsLoading}<div class="panel-state"><span class="spinner"></span>Computing statistics…</div>
                   {:else if statsError}<div class="panel-state error-text"><strong>Statistics unavailable</strong><span>{statsError}</span></div>
@@ -671,10 +709,10 @@
                       <section class="histogram"><header><h3>Distribution</h3><span>{stats.histogram.length} bins</span></header>{#if stats.histogram.length}<div class="bars">{#each stats.histogram as bin (bin.lower)}<button style:height={`${Math.max(3, (Number(bin.count) / maxBin) * 100)}%`} onclick={() => showBin(bin)} onfocus={() => showBin(bin)} aria-label={`${binLabel(bin)}: ${count(bin.count)} rows`} title={`${binLabel(bin)}: ${count(bin.count)} rows`}></button>{/each}</div><p class="bin-readout" aria-live="polite">{binReadout}</p>{:else}<p class="muted">No values to chart.</p>{/if}</section>
                     {:else if stats.kind === 'categorical'}
                       <dl class="profile-summary"><div><dt>Distinct values</dt><dd>{count(stats.distinct_count)}</dd></div></dl>
-                      <section class="profile-values"><header><h3>Top values</h3></header>{#each stats.top_values as value (value.value)}<div><span title={display(value.value)}>{display(value.value)}</span><b>{count(value.count)}</b></div>{:else}<p class="muted">No values to show.</p>{/each}</section>
+                      <section class="profile-values"><header><h3>Top values</h3><div class="distribution-controls" role="group" aria-label="Distribution display"><button class="secondary-button" aria-pressed={distributionMode === 'count'} onclick={() => distributionMode = 'count'}>Count</button><button class="secondary-button" aria-pressed={distributionMode === 'percent'} onclick={() => distributionMode = 'percent'}>Percent</button><button class="secondary-button" aria-pressed={cumulativeDistribution} onclick={() => cumulativeDistribution = !cumulativeDistribution}>Cumulative</button></div></header>{#each stats.top_values as value, index (value.value)}<div><span title={display(value.value)}>{display(value.value)}</span><b>{distributionText(value.count, stats.top_values, index, stats.non_null_count)}</b></div>{:else}<p class="muted">No values to show.</p>{/each}</section>
                     {:else}
                       <dl class="profile-summary"><div><dt>Range</dt><dd>{compact(stats.min)} — {compact(stats.max)}</dd></div><div><dt>Distinct values</dt><dd>{count(stats.distinct_count)}</dd></div></dl>
-                      <section class="histogram"><header><h3>Distribution</h3><span>{stats.histogram.length} bins</span></header>{#if stats.histogram.length}<div class="bars">{#each stats.histogram as bin (bin.lower)}<button style:height={`${Math.max(3, (Number(bin.count) / maxBin) * 100)}%`} onclick={() => showBin(bin)} onfocus={() => showBin(bin)} aria-label={`${binLabel(bin)}: ${count(bin.count)} rows`} title={`${binLabel(bin)}: ${count(bin.count)} rows`}></button>{/each}</div><p class="bin-readout" aria-live="polite">{binReadout}</p>{:else}<p class="muted">No values to chart.</p>{/if}</section>
+                      <section class="profile-values"><header><h3>By year</h3><div class="distribution-controls" role="group" aria-label="Distribution display"><button class="secondary-button" aria-pressed={distributionMode === 'count'} onclick={() => distributionMode = 'count'}>Count</button><button class="secondary-button" aria-pressed={distributionMode === 'percent'} onclick={() => distributionMode = 'percent'}>Percent</button><button class="secondary-button" aria-pressed={cumulativeDistribution} onclick={() => cumulativeDistribution = !cumulativeDistribution}>Cumulative</button></div></header>{#each stats.year_counts as year, index (year.year)}<div><span>{year.year}</span><b>{distributionText(year.count, stats.year_counts, index, stats.non_null_count)}</b></div>{:else}<p class="muted">No yearly values to show.</p>{/each}</section>
                     {/if}
                   {:else}<div class="panel-state">No statistics available.</div>{/if}
                 {/if}

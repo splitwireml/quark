@@ -97,6 +97,17 @@ def test_legacy_registry_without_dataset_name_keeps_data_view(tmp_path):
     assert json.loads((tmp_path / "registry.json").read_text()) == [node]
 
 
+def test_restart_keeps_registry_entries_when_a_source_is_temporarily_missing(tmp_path):
+    node = {"id": "offline", "name": "offline.csv", "kind": "upload", "source": str(tmp_path / "uploads" / "offline.csv")}
+    (tmp_path / "uploads").mkdir()
+    (tmp_path / "registry.json").write_text(json.dumps([node]))
+
+    with TestClient(create_app(tmp_path)) as client:
+        assert client.get("/api/nodes").json() == []
+
+    assert json.loads((tmp_path / "registry.json").read_text()) == [node]
+
+
 def test_upload_supported_formats_and_rejects_unsupported(client, tmp_path):
     parquet = tmp_path / "x.parquet"
     db = tmp_path / "x.duckdb"
@@ -168,6 +179,36 @@ def test_upload_workbook_requires_sheet_confirmation(client, tmp_path):
     assert response.status_code == 200, response.text
     assert response.json()["rows"] == [{"A1": 2.0}]
     assert json.loads((tmp_path / "registry.json").read_text()) == [{**node, "sheets": ["O'Reilly"]}]
+
+
+def test_workbook_dates_are_typed_summarized_by_year_and_identifiers_stay_text(client, tmp_path):
+    workbook = tmp_path / "dates.xlsx"
+    with duckdb.connect() as con:
+        con.execute("INSTALL excel; LOAD excel")
+        con.execute("""
+            COPY (SELECT * FROM (VALUES
+                ('keep', DATE '2024-01-02', TIMESTAMP '2024-01-02 09:30:00', '2024-001A'),
+                ('keep', DATE '2024-02-03', TIMESTAMP '2024-02-03 10:30:00', '2024-002A'),
+                ('also', DATE '2025-01-01', TIMESTAMP '2025-01-01 11:30:00', '2025-001A'),
+                ('filtered', NULL, NULL, '2025-002A')
+            ) t(group_name, day, moment, identifier)) TO ? (FORMAT xlsx, HEADER true, SHEET 'Dates')
+        """, [str(workbook)])
+    preview = upload(client, "dates.xlsx", workbook.read_bytes())
+    node = client.post(f"/api/nodes/upload/{preview['id']}/confirm", json={"sheets": ["Dates"]}).json()
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'Dates')['id']}"
+
+    query = client.post(base + "/query", json={})
+    assert query.status_code == 200, query.text
+    kinds = {column["name"]: column["profile_kind"] for column in query.json()["columns"]}
+    assert kinds == {"group_name": "categorical", "day": "date", "moment": "date", "identifier": "categorical"}
+    assert query.json()["rows"][0]["moment"] == "2024-01-02T09:30:00"
+    stats = client.post(base + "/columns/day/stats", json={
+        "filters": [{"column": "group_name", "operator": "in", "value": ["keep", "also"]}],
+        "dedupe_columns": ["group_name"],
+    })
+    assert stats.status_code == 200, stats.text
+    assert (stats.json()["min"], stats.json()["max"]) == ("2024-01-02", "2025-01-01")
+    assert stats.json()["year_counts"] == [{"year": "2024", "count": 1}, {"year": "2025", "count": 1}]
 
 
 def test_workbook_confirmation_validates_selection_and_cancel(client, tmp_path):
@@ -640,6 +681,19 @@ def test_profile_kinds_and_categorical_and_date_stats(client, tmp_path):
     empty_day = client.get(base + "/columns/empty_day/stats")
     assert empty_day.json()["kind"] == "date"
     assert (empty_day.json()["min"], empty_day.json()["max"], empty_day.json()["histogram"]) == (None, None, [])
+
+
+def test_time_profile_has_no_year_breakdown(client, tmp_path):
+    db = tmp_path / "times.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE times (clock TIME)")
+        con.execute("INSERT INTO times VALUES (TIME '08:30:00'), (TIME '17:45:00'), (NULL)")
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'times')['id']}"
+
+    stats = client.get(base + "/columns/clock/stats")
+    assert stats.status_code == 200, stats.text
+    assert (stats.json()["min"], stats.json()["max"], stats.json()["year_counts"]) == ("08:30:00", "17:45:00", [])
 
 
 def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
