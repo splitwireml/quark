@@ -145,6 +145,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     registry_path = root / "registry.json"
     uploads = root / "uploads"
     nodes: dict[str, dict[str, Any]] = {}
+    registered_nodes: list[dict[str, Any]] = []
     pending_workbooks: dict[str, dict[str, Any]] = {}
     connections: dict[str, duckdb.DuckDBPyConnection] = {}
 
@@ -154,7 +155,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def save_registry() -> None:
         root.mkdir(parents=True, exist_ok=True)
         temporary = registry_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(list(nodes.values()), indent=2))
+        temporary.write_text(json.dumps(registered_nodes, indent=2))
         temporary.replace(registry_path)
 
     def _xlsx_typed_view(con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str) -> None:
@@ -228,6 +229,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(400, f"Could not open source: {exc}") from exc
         nodes[node["id"]] = node
+        registered_nodes.append(node)
         connections[node["id"]] = con
         save_registry()
         return public(node)
@@ -351,7 +353,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             except (json.JSONDecodeError, OSError):
                 pass
             for node in stored:
-                if not isinstance(node, dict) or not Path(node.get("source", "")).is_file():
+                if not isinstance(node, dict):
+                    continue
+                registered_nodes.append(node)
+                if not Path(node.get("source", "")).is_file():
                     continue
                 try:
                     connections[node["id"]] = connect(node)
@@ -440,6 +445,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         connections.pop(node_id).close()
         if node["kind"] == "upload":
             Path(node["source"]).unlink(missing_ok=True)
+        registered_nodes[:] = [record for record in registered_nodes if record.get("id") != node_id]
         save_registry()
         return Response(status_code=204)
 

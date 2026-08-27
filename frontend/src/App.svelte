@@ -610,7 +610,10 @@
   function sortFor(column: string): SortCondition | undefined { return sorts.find((sort) => sort.column === column); }
   function compact(value: number | string | null | undefined): string { return value == null ? '—' : typeof value === 'string' ? value : new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value); }
   function count(value: AggregateCount): string { return typeof value === 'string' ? value : value.toLocaleString(); }
-  function distributionText(value: AggregateCount, values: { count: AggregateCount }[], index: number, total: AggregateCount): string { const amount = cumulativeDistribution ? values.slice(0, index + 1).reduce((sum, item) => sum + Number(item.count), 0) : value; return distributionMode === 'percent' ? `${Number(total) === 0 ? '0.0' : (Number(amount) * 100 / Number(total)).toFixed(1)}%` : count(amount); }
+  function distributionText(value: AggregateCount, values: { count: AggregateCount }[], index: number, total: AggregateCount): string {
+    const amount = cumulativeDistribution ? (() => { const bigint = (globalThis as unknown as { BigInt(value: number | string): bigint }).BigInt; const sum = values.slice(0, index + 1).reduce((sum, item) => sum + bigint(item.count), bigint(0)); return sum <= bigint(Number.MAX_SAFE_INTEGER) ? Number(sum) : sum.toString(); })() : value;
+    return distributionMode === 'percent' ? `${Number(total) === 0 ? '0.0' : (Number(amount) * 100 / Number(total)).toFixed(1)}%` : count(amount);
+  }
   // ponytail: numeric page input stops before multiplication loses integer precision; add a BigInt text pager only if a human needs deeper pages.
   function isSafeCount(value: AggregateCount): boolean { return typeof value === 'number' || value.length < 16 || (value.length === 16 && value <= String(Number.MAX_SAFE_INTEGER)); }
   function pageLimit(value: AggregateCount): number { const ceiling = Math.floor(Number.MAX_SAFE_INTEGER / pageSize); return isSafeCount(value) ? Math.min(Number(value), ceiling) : ceiling; }

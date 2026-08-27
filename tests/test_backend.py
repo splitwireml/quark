@@ -104,6 +104,9 @@ def test_restart_keeps_registry_entries_when_a_source_is_temporarily_missing(tmp
 
     with TestClient(create_app(tmp_path)) as client:
         assert client.get("/api/nodes").json() == []
+        uploaded = upload(client, "new.csv", b"value\n1\n")
+        assert json.loads((tmp_path / "registry.json").read_text()) == [node, {**uploaded, "dataset_name": "new"}]
+        assert client.delete(f"/api/nodes/{uploaded['id']}").status_code == 204
 
     assert json.loads((tmp_path / "registry.json").read_text()) == [node]
 
