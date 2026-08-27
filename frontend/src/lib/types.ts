@@ -81,10 +81,8 @@ export interface QueryResponse {
   sql: string;
 }
 
-export interface SqlQueryRequest {
+export interface SqlQueryRequest extends QueryRequest {
   sql: string;
-  page: number;
-  page_size: number;
 }
 
 export type NumericValue = number | string;

@@ -59,11 +59,13 @@ class Query(BaseModel):
     dedupe_columns: list[str] = []
 
 
-class SQLQuery(BaseModel):
+class SQLRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sql: str
-    page: int = Field(1, ge=1)
-    page_size: int = Field(100, ge=1, le=1000)
+
+
+class SQLQuery(SQLRequest, Query):
+    pass
 
 
 def quote(value: str) -> str:
@@ -263,7 +265,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         columns = [(row[0], row[1]) for row in con.execute(f"DESCRIBE SELECT * FROM {table}").fetchall()]
         return table, columns
 
-    def filtered_relation(table: str, columns: list[tuple[str, str]], request: Query) -> tuple[str, list[Any], str]:
+    def filtered_relation(
+        table: str, columns: list[tuple[str, str]], request: Query, display_table: str | None = None,
+    ) -> tuple[str, list[Any], str]:
+        display_table = display_table or table
         column_types = dict(columns)
         clauses: list[str] = []
         display_clauses: list[str] = []
@@ -300,8 +305,39 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if request.dedupe_columns:
             keys = ", ".join(quote(column) for column in request.dedupe_columns)
             qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}) = 1"
-            return f"(SELECT * FROM {table}{where}{qualify})", values, f"(SELECT * FROM {table}{display_where}{qualify})"
-        return f"(SELECT * FROM {table}{where})", values, f"(SELECT * FROM {table}{display_where})"
+            return f"(SELECT * FROM {table}{where}{qualify})", values, f"(SELECT * FROM {display_table}{display_where}{qualify})"
+        return f"(SELECT * FROM {table}{where})", values, f"(SELECT * FROM {display_table}{display_where})"
+
+    def controlled_query(
+        table: str, columns: list[tuple[str, str]], request: Query, display_table: str | None = None,
+    ) -> tuple[str, list[Any], str]:
+        source, values, display_source = filtered_relation(table, columns, request, display_table)
+        column_names = {name for name, _ in columns}
+        if any(sort.column not in column_names for sort in request.sorts):
+            raise HTTPException(422, "Invalid sort column")
+        order = " ORDER BY " + ", ".join(
+            f"{quote(sort.column)} {sort.direction.upper()}" for sort in request.sorts
+        ) if request.sorts else ""
+        return f"SELECT * FROM {source}{order}", values, f"SELECT * FROM {display_source}{order}"
+
+    def read_only_sql(con: duckdb.DuckDBPyConnection, sql: str) -> str:
+        try:
+            statements = con.extract_statements(sql)
+        except duckdb.Error as exc:
+            raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise HTTPException(422, "SQL accepts only one read-only SELECT query")
+        return sql.strip()
+
+    def sql_metadata(con: duckdb.DuckDBPyConnection, request: SQLRequest) -> tuple[str, list[tuple[str, str]]]:
+        sql = read_only_sql(con, request.sql)
+        try:
+            columns = [(item[0], str(item[1])) for item in con.execute("DESCRIBE SELECT * FROM query(?)", [sql]).fetchall()]
+        except duckdb.ParserException as exc:
+            raise HTTPException(422, "SQL accepts only one read-only SELECT query") from exc
+        except duckdb.Error as exc:
+            raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+        return sql, columns
 
     def query_response(
         con: duckdb.DuckDBPyConnection,
@@ -462,20 +498,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def sql_query(node_id: str, request: SQLQuery):
         started = time.perf_counter()
         con = get_connection(node_id)
+        sql, columns = sql_metadata(con, request)
+        query_sql, values, display_sql = controlled_query("query(?)", columns, request, f"({sql})")
         try:
-            statements = con.extract_statements(request.sql)
-        except duckdb.Error as exc:
-            raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
-        if (
-            len(statements) != 1
-            or statements[0].type != duckdb.StatementType.SELECT
-        ):
-            raise HTTPException(422, "SQL accepts only one read-only SELECT query")
-        sql = request.sql.strip()
-        try:
-            return query_response(con, "SELECT * FROM query(?)", [sql], request.page, request.page_size, started, sql)
-        except duckdb.ParserException as exc:
-            raise HTTPException(422, "SQL accepts only one read-only SELECT query") from exc
+            return query_response(
+                con, query_sql, [sql, *values], request.page, request.page_size, started,
+                display_sql if request.filters or request.sorts or request.dedupe_columns else sql,
+            )
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
 
@@ -484,26 +513,44 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         started = time.perf_counter()
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
-        column_names = {name for name, _ in columns}
-        source, values, display_source = filtered_relation(table, columns, request)
-        for sort in request.sorts:
-            if sort.column not in column_names:
-                raise HTTPException(422, "Invalid sort column")
-        order = ""
-        if request.sorts:
-            order = " ORDER BY " + ", ".join(f"{quote(sort.column)} {sort.direction.upper()}" for sort in request.sorts)
+        query_sql, values, display_sql = controlled_query(table, columns, request)
         try:
-            return query_response(
-                con,
-                f"SELECT * FROM {source}{order}",
-                values,
-                request.page,
-                request.page_size,
-                started,
-                f"SELECT * FROM {display_source}{order}",
-            )
+            return query_response(con, query_sql, values, request.page, request.page_size, started, display_sql)
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid filter value: {exc}") from exc
+
+    def category_response(
+        con: duckdb.DuckDBPyConnection,
+        table: str,
+        metadata_columns: list[tuple[str, str]],
+        column: str,
+        params: list[Any] | None = None,
+        search: str = "",
+        offset: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        columns = dict(metadata_columns)
+        if column not in columns:
+            raise HTTPException(404, "Column not found")
+        if not columns[column].upper().startswith(TEXT):
+            raise HTTPException(422, "Column is not text")
+        field = quote(column)
+        where = f"{field} IS NOT NULL AND contains(lower({field}), lower(?))"
+        params = params or []
+        total = con.execute(f"SELECT count(DISTINCT {field}) FROM {table} WHERE {where}", [*params, search]).fetchone()[0]
+        rows = con.execute(f"""
+            SELECT {field}, count(*) AS count
+            FROM {table} WHERE {where}
+            GROUP BY {field} ORDER BY count DESC, {field}
+            LIMIT ? OFFSET ?
+        """, [*params, search, limit, offset]).fetchall()
+        return {
+            "values": [{"value": safe(value), "count": safe(count)} for value, count in rows],
+            "total": safe(total),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total,
+        }
 
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values")
     def category_values(
@@ -516,34 +563,28 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     ):
         con = get_connection(node_id)
         table, metadata_columns = metadata(con, dataset)
-        columns = dict(metadata_columns)
-        if column not in columns:
-            raise HTTPException(404, "Column not found")
-        if not columns[column].upper().startswith(TEXT):
-            raise HTTPException(422, "Column is not text")
-        field = quote(column)
-        where = f"{field} IS NOT NULL AND contains(lower({field}), lower(?))"
-        total = con.execute(f"SELECT count(DISTINCT {field}) FROM {table} WHERE {where}", [search]).fetchone()[0]
-        rows = con.execute(f"""
-            SELECT {field}, count(*) AS count
-            FROM {table} WHERE {where}
-            GROUP BY {field} ORDER BY count DESC, {field}
-            LIMIT ? OFFSET ?
-        """, [search, limit, offset]).fetchall()
-        return {
-            "values": [{"value": safe(value), "count": safe(count)} for value, count in rows],
-            "total": safe(total),
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(rows) < total,
-        }
+        return category_response(con, table, metadata_columns, column, search=search, offset=offset, limit=limit)
 
-    @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
-    @api.post("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
-    def stats(node_id: str, dataset: str, column: str, request: Query | None = None):
+    @api.post("/api/nodes/{node_id}/sql/columns/{column}/values")
+    def sql_category_values(
+        node_id: str,
+        column: str,
+        request: SQLRequest,
+        search: str = "",
+        offset: int = QueryParam(0, ge=0),
+        limit: int = QueryParam(200, ge=1, le=500),
+    ):
         con = get_connection(node_id)
-        table, metadata_columns = metadata(con, dataset)
-        source, values, _ = filtered_relation(table, metadata_columns, request or Query(page=1, page_size=100))
+        sql, columns = sql_metadata(con, request)
+        return category_response(con, "query(?)", columns, column, [sql], search, offset, limit)
+
+    def profile_response(
+        con: duckdb.DuckDBPyConnection,
+        source: str,
+        values: list[Any],
+        metadata_columns: list[tuple[str, str]],
+        column: str,
+    ) -> dict[str, Any]:
         columns = dict(metadata_columns)
         if column not in columns:
             raise HTTPException(404, "Column not found")
@@ -649,6 +690,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "min": safe(minimum), "max": safe(maximum), "mean": safe(mean), "stddev": safe(stddev),
             "p25": safe(p25), "median": safe(median), "p75": safe(p75), "histogram": histogram,
         }
+
+    @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
+    @api.post("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
+    def stats(node_id: str, dataset: str, column: str, request: Query | None = None):
+        con = get_connection(node_id)
+        table, columns = metadata(con, dataset)
+        source, values, _ = filtered_relation(table, columns, request or Query(page=1, page_size=100))
+        return profile_response(con, source, values, columns, column)
+
+    @api.post("/api/nodes/{node_id}/sql/columns/{column}/stats")
+    def sql_stats(node_id: str, column: str, request: SQLQuery):
+        con = get_connection(node_id)
+        sql, columns = sql_metadata(con, request)
+        source, values, _ = filtered_relation("query(?)", columns, request)
+        return profile_response(con, source, [sql, *values], columns, column)
 
     frontend = Path(__file__).parent.parent / "frontend" / "dist"
     if frontend.is_dir():

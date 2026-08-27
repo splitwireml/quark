@@ -53,8 +53,26 @@ export function querySql(nodeId: string, body: SqlQueryRequest): Promise<QueryRe
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, json(body));
 }
 
+export function getSqlColumnStats(nodeId: string, column: string, body: SqlQueryRequest): Promise<ColumnStats> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql/columns/${encodeURIComponent(column)}/stats`, json(body));
+}
+
 export function getColumnStats(nodeId: string, dataset: string, column: string, body: QueryRequest): Promise<ColumnStats> {
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/stats`, json(body));
+}
+
+export function getSqlCategoryValues(
+  nodeId: string,
+  column: string,
+  body: Pick<SqlQueryRequest, 'sql'>,
+  params: { search?: string; offset?: number; limit?: number } = {}
+): Promise<CategoryValuesResponse> {
+  const query = new URLSearchParams();
+  if (params.search) query.set('search', params.search);
+  if (params.offset !== undefined) query.set('offset', String(params.offset));
+  if (params.limit !== undefined) query.set('limit', String(params.limit));
+  const suffix = query.size ? `?${query}` : '';
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql/columns/${encodeURIComponent(column)}/values${suffix}`, json(body));
 }
 
 export function getCategoryValues(

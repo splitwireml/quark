@@ -5,8 +5,10 @@
   import { keywordCompletionSource, schemaCompletionSource, sql, StandardSQL, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
   import { keymap } from '@codemirror/view';
   import * as api from './lib/api';
+  import { buildAggregateSql } from './lib/aggregate-sql';
   import type { AggregateCount, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, FilterCondition, FilterOperator, NodeInfo, QueryResponse, SortCondition, WorkbookPreview } from './lib/types';
 
+  type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
   type SavedQuery = { id: string; name: string; sql: string; nodeId: string; dataset: string };
   type RowDensity = 'compact' | 'default' | 'comfortable';
   type DistributionMode = 'count' | 'percent';
@@ -16,6 +18,8 @@
   const baseOperators: { value: FilterOperator; label: string }[] = [{ value: '=', label: 'equals' }, { value: '!=', label: 'not equal' }, { value: 'is_null', label: 'is null' }, { value: 'not_null', label: 'is not null' }];
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
   const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
+  const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
+
 
   let nodes = $state<NodeInfo[]>([]);
   let datasets = $state<DatasetInfo[]>([]);
@@ -26,6 +30,12 @@
   let sorts = $state<SortCondition[]>([]);
   let dedupeColumns = $state<string[]>([]);
   let dedupeDraft = $state<string[]>([]);
+  let aggregateColumn = $state('');
+  let aggregateColumnSearch = $state('');
+  let aggregateColumns = $state<string[]>([]);
+  let aggregateMetrics = $state<AggregateMetric[]>([]);
+  let aggregateSourceSql = $state('');
+  let aggregateSourceColumns = $state.raw<ColumnInfo[]>([]);
   let hiddenColumns = $state<string[]>([]);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
@@ -81,6 +91,7 @@
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
   let sqlText = $state('');
+  let sqlBase = $state('');
   let activeSql = $state('');
   let sqlError = $state('');
   let storageError = $state('');
@@ -88,14 +99,27 @@
   let editorHost = $state<HTMLDivElement | null>(null);
   let sqlTrigger = $state<HTMLButtonElement | null>(null);
   let editorView: EditorView | null = null;
+  let queryMenuOpen = $state<'columns' | 'aggregate' | 'dedupe' | null>(null);
 
   let selectedNode = $derived(nodes.find((node) => node.id === selectedNodeId));
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
   let totalPages = $derived(pageLimit(result?.total_pages ?? 0));
   let visibleColumns = $derived(result?.columns.filter((column) => !hiddenColumns.includes(column.name)) ?? []);
+  let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
+  let aggregateColumnMatches = $derived.by(() => { const query = aggregateColumnSearch.trim().toLowerCase(); return query ? aggregateFieldOptions.filter((column) => column.name.toLowerCase().includes(query)) : aggregateFieldOptions; });
+  let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === aggregateColumns[aggregateColumns.length - 1]));
+  let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
   let columnMenuItems = $derived.by(() => { const query = columnMenuSearch.trim().toLowerCase(); return query ? (result?.columns ?? []).filter((column) => column.name.toLowerCase().includes(query)) : result?.columns ?? []; });
   let columnTypes = $derived([...new Set((result?.columns ?? []).map((column) => column.type))]);
+  let columnTypeCounts = $derived.by(() => { const counts: Record<string, number> = Object.create(null); for (const column of result?.columns ?? []) counts[column.type] = (counts[column.type] ?? 0) + 1; return counts; });
+  let aggregateRowTones = $derived.by(() => {
+    const rows = result?.rows ?? [];
+    const majorIndex = queryMode === 'sql' && aggregateSourceSql ? aggregateColumns[0] : '';
+    if (!majorIndex) return [];
+    let alternate = false;
+    return rows.map((row, index) => { if (index && !Object.is(row[majorIndex], rows[index - 1][majorIndex])) alternate = !alternate; return alternate; });
+  });
   let operators = $derived.by(() => filterColumn ? [...baseOperators, ...(!filterColumn.numeric && isTextType(filterColumn.type) ? textOperators : []), ...(filterColumn.numeric || isOrderedType(filterColumn.type) ? orderedOperators : [])] : baseOperators);
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
   let querySummary = $derived(result ? queryMode === 'sql' ? `${count(result.total_rows)} SQL result rows, page ${result.page} of ${count(result.total_pages)}.` : `${count(result.total_rows)} rows, page ${result.page} of ${count(result.total_pages)}, ${filters.length} filters, ${sorts.length} sorts, and ${dedupeColumns.length} dedupe keys.` : '');
@@ -106,6 +130,14 @@
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
   function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
+  function syncQueryMenu(menu: 'columns' | 'aggregate' | 'dedupe', event: Event) {
+    const open = (event.currentTarget as HTMLDetailsElement).open;
+    queryMenuOpen = open ? menu : queryMenuOpen === menu ? null : queryMenuOpen;
+  }
+  function clearAggregateDraft() { aggregateColumn = ''; aggregateColumnSearch = ''; aggregateColumns = []; aggregateMetrics = []; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
+  function addAggregateColumn(column: string) { if (!column || aggregateColumns.includes(column)) return; aggregateColumns = [...aggregateColumns, column]; aggregateColumn = ''; aggregateMetrics = ['count']; }
+  function removeAggregateColumn(column: string) { const next = aggregateColumns.filter((item) => item !== column); aggregateColumns = next; aggregateMetrics = next.length ? ['count'] : []; }
+  function toggleAggregateMetric(metric: AggregateMetric, checked: boolean) { aggregateMetrics = checked ? [...aggregateMetrics, metric] : aggregateMetrics.filter((item) => item !== metric); }
   function isWorkbookPreview(node: NodeInfo | WorkbookPreview): node is WorkbookPreview { return node.kind === 'workbook' && 'sheets' in node && Array.isArray(node.sheets); }
   function toggleWorkbookSheet(sheet: string, checked: boolean) { workbookSheets = checked ? [...workbookSheets, sheet] : workbookSheets.filter((item) => item !== sheet); }
   function quoteIdentifier(value: string): string { return `"${value.replace(/"/g, '""')}"`; }
@@ -202,7 +234,7 @@
 
   function closeSql(restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; if (restoreFocus) tick().then(() => sqlTrigger?.focus()); }
   function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); railOpen = false; } tableExpanded = !tableExpanded; }
-  function resetSql(dataset: DatasetInfo | undefined) { closeSql(); sqlText = seedSql(dataset); activeSql = ''; sqlError = ''; }
+  function resetSql(dataset: DatasetInfo | undefined) { closeSql(); sqlText = seedSql(dataset); sqlBase = ''; activeSql = ''; sqlError = ''; }
 
   async function runSavedQuery(saved: SavedQuery) {
     workspaceTab = 'data';
@@ -325,6 +357,7 @@
     sorts = [];
     dedupeColumns = [];
     dedupeDraft = [];
+    clearAggregateDraft();
     hiddenColumns = [];
     lastHiddenColumn = null;
     shownColumnTypes = [];
@@ -347,6 +380,7 @@
     sorts = [];
     dedupeColumns = [];
     dedupeDraft = [];
+    clearAggregateDraft();
     hiddenColumns = [];
     lastHiddenColumn = null;
     shownColumnTypes = [];
@@ -356,6 +390,7 @@
   }
 
   async function loadData() {
+    if (queryMode === 'sql') { await runSql(sqlBase || activeSql, true); return; }
     if (!selectedNodeId || !selectedDataset) return;
     const id = ++requestId;
     loadingData = true;
@@ -373,18 +408,46 @@
     finally { if (id === requestId) loadingData = false; }
   }
 
-  async function runSql(value = sqlText) {
+  async function createAggregateView() {
+    const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql;
+    const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns;
+    if (!selectedAggregateColumn || aggregateMetrics.length === 0 || !source) return;
+    const query = buildAggregateSql(source, aggregateColumns, aggregateMetrics);
+    if (!query) return;
+    aggregateSourceSql = source;
+    aggregateSourceColumns = columns;
+    filters = [];
+    sorts = [];
+    dedupeColumns = [];
+    dedupeDraft = [];
+    page = 1;
+    pageInput = '1';
+    sqlText = query;
+    closeSql(false);
+    await runSql(query, false, true);
+  }
+
+  async function runSql(value = sqlText, keepSqlBase = false, keepAggregateBuilder = false) {
     const query = value.trim();
     if (!selectedNodeId || !query) { sqlError = 'Enter a SQL query to run.'; return; }
+    const source = keepSqlBase ? sqlBase || query : query;
+    if (!keepSqlBase) {
+      filters = [];
+      sorts = [];
+      dedupeColumns = [];
+      dedupeDraft = [];
+      if (!keepAggregateBuilder) clearAggregateDraft();
+    }
     const id = ++requestId;
     loadingData = true;
     error = '';
     sqlError = '';
     try {
-      const next = await api.querySql(selectedNodeId, { sql: query, page, page_size: pageSize });
+      const next = await api.querySql(selectedNodeId, { sql: source, page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns });
       if (id !== requestId) return;
       result = next;
-      activeSql = query;
+      sqlBase = source;
+      activeSql = next.sql;
       queryMode = 'sql';
       selectedCell = null;
       hiddenColumns = [];
@@ -396,7 +459,7 @@
     finally { if (id === requestId) loadingData = false; }
   }
 
-  async function loadActiveData() { if (queryMode === 'sql') await runSql(activeSql); else await loadData(); }
+  async function loadActiveData() { if (queryMode === 'sql') await runSql(sqlBase || activeSql, true); else await loadData(); }
 
   async function upload(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
@@ -451,7 +514,9 @@
     categoriesLoading = true;
     categoriesError = '';
     try {
-      const response = await api.getCategoryValues(selectedNodeId, selectedDataset, filterColumn.name, { search: categorySearch.trim(), offset });
+      const response = queryMode === 'sql'
+        ? await api.getSqlCategoryValues(selectedNodeId, filterColumn.name, { sql: sqlBase || activeSql }, { search: categorySearch.trim(), offset })
+        : await api.getCategoryValues(selectedNodeId, selectedDataset, filterColumn.name, { search: categorySearch.trim(), offset });
       if (id !== categoryRequestId) return;
       categoryValues = reset ? response.values : [...categoryValues, ...response.values];
       categoryTotal = response.total;
@@ -494,10 +559,21 @@
   }
   async function removeSort(column: string) { sorts = sorts.filter((sort) => sort.column !== column); page = 1; await loadData(); }
   async function clearQuery() { filters = []; sorts = []; dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
+  async function backToBuilder() {
+    queryMode = 'builder';
+    clearAggregateDraft();
+    filters = [];
+    sorts = [];
+    dedupeColumns = [];
+    dedupeDraft = [];
+    page = 1;
+    pageInput = '1';
+    await loadData();
+  }
   function toggleDedupe(column: string, checked: boolean) { dedupeDraft = checked ? [...dedupeDraft, column] : dedupeDraft.filter((item) => item !== column); }
   async function applyDedupe() { dedupeColumns = [...dedupeDraft]; page = 1; await loadData(); }
   async function clearDedupe() { dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
-  function isColumnProtected(column: string): boolean { return queryMode === 'builder' && [...dedupeColumns, ...dedupeDraft].includes(column); }
+  function isColumnProtected(column: string): boolean { return [...dedupeColumns, ...dedupeDraft].includes(column); }
   function hideColumn(column: string) { if (!isColumnProtected(column) && visibleColumns.length > 1) { hiddenColumns = [...hiddenColumns, column]; lastHiddenColumn = column; } }
   function hideColumnsAtNullFraction(fraction: number) {
     const columns = visibleColumns.filter((column) => !isColumnProtected(column.name) && column.null_fraction >= fraction).slice(0, visibleColumns.length - 1);
@@ -540,7 +616,9 @@
     await tick();
     focusInspector();
     try {
-      const next = await api.getColumnStats(selectedNodeId, selectedDataset, column.name, { page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns });
+      const next = queryMode === 'sql'
+        ? await api.getSqlColumnStats(selectedNodeId, column.name, { sql: sqlBase || activeSql, page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns })
+        : await api.getColumnStats(selectedNodeId, selectedDataset, column.name, { page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns });
       if (id === statsRequestId) stats = next;
     } catch (reason) { if (id === statsRequestId) statsError = message(reason); }
     finally { if (id === statsRequestId) statsLoading = false; }
@@ -600,6 +678,14 @@
     return parts;
   }
   function expandCell(event: MouseEvent, row: number, column: string) { const cell = event.currentTarget as HTMLTableCellElement; if (cell.scrollWidth > cell.clientWidth) selectedCell = { row, column }; }
+  async function filterCategoricalCell(column: ColumnInfo, value: unknown) {
+    if (column.profile_kind !== 'categorical' || (typeof value !== 'string' && typeof value !== 'boolean') || filters.some((filter) => filter.column === column.name && filter.operator === '=' && filter.value === value)) return;
+    filters = [...filters, { column: column.name, operator: '=', value }];
+    page = 1;
+    pageInput = '1';
+    await loadData();
+  }
+  function cellTitle(column: ColumnInfo, value: unknown): string { const text = display(value); return column.profile_kind === 'categorical' && (typeof value === 'string' || typeof value === 'boolean') ? `${text} — Double-click to filter by this value` : text; }
   function toggleCellFromKeyboard(event: KeyboardEvent, row: number, column: string) {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
@@ -677,12 +763,14 @@
           {#if datasets.length === 0 && !error}<div class="empty"><strong>No datasets found</strong><p>This source has no tables or views to browse.</p></div>
           {:else if selectedDataset}
             <section class="querybar" aria-label="Query controls" inert={!!inspectorMode || tableExpanded}>
-              <details class="query-details columns-menu"><summary>Columns</summary><div class="detail-list"><header><strong>Columns</strong><span>{visibleColumns.length} of {result?.columns.length ?? 0} shown</span></header><label class="columns-menu-search" for="column-menu-search">Search columns<input id="column-menu-search" type="search" bind:value={columnMenuSearch} placeholder="Search columns" /></label><div class="column-type-filters" role="group" aria-label="Column types">{#each columnTypes as type (type)}<label><input type="checkbox" checked={isTypeShown(type)} disabled={isTypeShown(type) && (columnTypes.length === 1 || shownColumnTypes.length === 1 && shownColumnTypes[0] === type)} onchange={(event) => toggleShownType(type, event.currentTarget.checked)} /> {type}</label>{/each}</div><div class="columns-menu-actions"><button type="button" onclick={() => hideColumnsAtNullFraction(1)}>Hide fully empty</button><label>Hide columns with at least <input type="number" min="0" max="100" step="1" bind:value={nullThreshold} aria-label="Null percentage" />% null</label><button type="button" class="secondary-button" onclick={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}>Apply threshold</button><button type="button" class="secondary-button" onclick={showAllColumns} disabled={hiddenColumns.length === 0}>Show all columns</button></div><div class="columns-menu-list">{#each columnMenuItems as column (column.name)}<label><input type="checkbox" checked={!hiddenColumns.includes(column.name)} disabled={isColumnProtected(column.name) || (!hiddenColumns.includes(column.name) && visibleColumns.length <= 1)} onchange={(event) => toggleColumn(column.name, event.currentTarget.checked)} /> <span title={column.name}>{column.name}</span><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></label>{:else}<p class="muted">No matching columns.</p>{/each}</div></div></details>
-              {#if queryMode === 'builder'}
-                <details class="query-details"><summary>Dedupe{dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}</summary><div class="detail-list">{#each visibleColumns as column (column.name)}<label><input type="checkbox" checked={dedupeDraft.includes(column.name)} onchange={(event) => toggleDedupe(column.name, event.currentTarget.checked)} /> {column.name}</label>{/each}<div><button type="button" class="secondary-button" onclick={applyDedupe} disabled={dedupeDraft.length === 0}>Apply</button><button type="button" class="secondary-button" onclick={clearDedupe} disabled={dedupeColumns.length === 0 && dedupeDraft.length === 0}>Clear</button></div></div></details>
+              <details class="query-details columns-menu" open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}><summary>Columns</summary><div class="detail-list"><header><strong>Columns</strong><span>{visibleColumns.length} of {result?.columns.length ?? 0} shown</span></header><label class="columns-menu-search" for="column-menu-search">Search columns<input id="column-menu-search" type="search" bind:value={columnMenuSearch} placeholder="Search columns" /></label><div class="column-type-table" role="group" aria-label="Column types"><div><span>Type</span><span>Columns</span></div>{#each columnTypes as type (type)}<button type="button" aria-pressed={isTypeShown(type)} aria-label={`${type}: ${columnTypeCounts[type] ?? 0} columns`} disabled={isTypeShown(type) && (columnTypes.length === 1 || shownColumnTypes.length === 1 && shownColumnTypes[0] === type)} onclick={() => toggleShownType(type, !isTypeShown(type))}><span>{type}</span><span>{columnTypeCounts[type] ?? 0}</span></button>{/each}</div><div class="columns-menu-actions"><button type="button" onclick={() => hideColumnsAtNullFraction(1)}>Hide fully empty</button><label>Hide columns with at least <input type="number" min="0" max="100" step="1" bind:value={nullThreshold} aria-label="Null percentage" />% null</label><button type="button" class="secondary-button" onclick={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}>Apply threshold</button><button type="button" class="secondary-button" onclick={showAllColumns} disabled={hiddenColumns.length === 0}>Show all columns</button></div><div class="columns-menu-list">{#each columnMenuItems as column (column.name)}<label><input type="checkbox" checked={!hiddenColumns.includes(column.name)} disabled={isColumnProtected(column.name) || (!hiddenColumns.includes(column.name) && visibleColumns.length <= 1)} onchange={(event) => toggleColumn(column.name, event.currentTarget.checked)} /> <span title={column.name}>{column.name}</span><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></label>{:else}<p class="muted">No matching columns.</p>{/each}</div></div></details>
+              {#if queryMode === 'builder' || aggregateSourceSql}
+                <details class="query-details aggregate-menu" open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}><summary>{queryMode === 'sql' ? 'Aggregate builder' : 'Aggregate'}</summary><div class="detail-list"><label>Find a column<input type="search" bind:value={aggregateColumnSearch} placeholder="Type to filter columns" /></label><label>Add column<select value={aggregateColumn} onchange={(event) => addAggregateColumn(event.currentTarget.value)}><option value="">Choose index or aggregate column</option>{#each aggregateColumnMatches as column (column.name)}{#if !aggregateColumns.includes(column.name)}<option value={column.name}>{column.name}</option>{/if}{/each}</select></label>{#if aggregateColumns.length}<div class="aggregate-columns" aria-label="Aggregate columns">{#each aggregateColumns as column, index (column)}<span class="aggregate-column"><b>{index < aggregateColumns.length - 1 ? 'Index' : aggregateColumns.length === 1 ? 'Index' : 'Aggregate'}</b><span title={column}>{column}</span><button type="button" aria-label={`Remove aggregate column ${column}`} onclick={() => removeAggregateColumn(column)}>×</button></span>{/each}</div><p class="aggregate-note">Earlier columns are indexes. One column + Count shows its distribution.</p>{#if selectedAggregateColumn}<fieldset class="aggregate-metrics"><legend>Metrics for {selectedAggregateColumn.name}</legend>{#each availableAggregateMetrics as metric (metric.value)}<label><input type="checkbox" checked={aggregateMetrics.includes(metric.value)} onchange={(event) => toggleAggregateMetric(metric.value, event.currentTarget.checked)} /> {metric.label}</label>{/each}</fieldset>{/if}<button type="button" class="primary-button" onclick={createAggregateView} disabled={loadingData || !selectedAggregateColumn || aggregateMetrics.length === 0}>{loadingData ? 'Creating…' : 'Create view'}</button>{/if}</div></details>
+                <details class="query-details" open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}><summary>Dedupe{dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}</summary><div class="detail-list">{#each visibleColumns as column (column.name)}<label><input type="checkbox" checked={dedupeDraft.includes(column.name)} onchange={(event) => toggleDedupe(column.name, event.currentTarget.checked)} /> {column.name}</label>{/each}<div><button type="button" class="secondary-button" onclick={applyDedupe} disabled={dedupeDraft.length === 0}>Apply</button><button type="button" class="secondary-button" onclick={clearDedupe} disabled={dedupeColumns.length === 0 && dedupeDraft.length === 0}>Clear</button></div></div></details>
                 <div class="tokens" aria-label="Active query conditions">{#each filters as filter, index (filter)}<span class="token" title={result?.sql ?? ''}><b>{filter.column}</b><button aria-label={`Remove filter ${filter.column}`} onclick={() => removeFilter(index)}>×</button></span>{/each}{#each sorts as sort, index (sort.column)}<span class="token sort-token"><b>{index + 1}. {sort.column}</b> {sort.direction}<button aria-label={`Remove sort ${sort.column}`} onclick={() => removeSort(sort.column)}>×</button></span>{/each}{#if dedupeColumns.length}<span class="token"><b>Dedupe</b> <span title={dedupeColumns.join(', ')}>{dedupeColumns.join(', ')}</span><button aria-label="Clear dedupe keys" onclick={clearDedupe}>×</button></span>{/if}{#if filters.length === 0 && sorts.length === 0 && dedupeColumns.length === 0}<span class="muted">No filters, sorts, or dedupe applied</span>{/if}</div>
                 {#if filters.length || sorts.length || dedupeColumns.length}<button class="secondary-button" onclick={() => saveQuery(result?.sql ?? '')} disabled={!result?.sql}>Save query</button><button class="clear-query" onclick={clearQuery}>Clear query</button>{/if}
-              {:else}<div class="tokens"><span class="token" title={activeSql}>SQL</span></div><button class="secondary-button" onclick={() => { page = 1; pageInput = '1'; loadData(); }}>Back to builder</button>{/if}
+                {#if queryMode === 'sql'}<button class="secondary-button" onclick={backToBuilder}>Back to full table</button>{/if}
+              {:else}<div class="tokens"><span class="token" title={activeSql}>SQL</span></div><button class="secondary-button" onclick={() => saveQuery(activeSql)} disabled={!activeSql}>Save view</button><button class="secondary-button" onclick={() => { page = 1; pageInput = '1'; loadData(); }}>Back to builder</button>{/if}
               <input class="column-search" type="search" bind:value={columnSearch} oninput={findColumn} onkeydown={cycleColumnMatch} placeholder="Find column" aria-label="Find column" />
               <span class="column-search-count" aria-live="polite" aria-label={`${columnMatches.length} matching columns`}>{columnMatches.length}</span>
               <button bind:this={sqlTrigger} class="secondary-button" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={() => sqlOpen ? closeSql() : openSql()}>SQL</button>
@@ -694,13 +782,13 @@
                 <div class="table-card" aria-busy={loadingData}>
                   {#if loadingData && !result}<div class="table-state"><span class="spinner"></span>Loading rows…</div>
                   {:else if result && result.rows.length === 0}<div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
-                  {:else if result}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><div bind:this={tableScroll} class="table-scroll" role="region" tabindex="0" aria-label="Scrollable dataset table"><table><caption class="sr-only">Rows from {currentDataset?.name ?? selectedDataset}</caption><thead><tr>{#each visibleColumns as column (column.name)}<th data-column={column.name} tabindex="-1" scope="col" style:min-width={`${Math.max(168, Math.min(360, column.name.length * 9 + (column.profile_kind ? 150 : 118)))}px`}><div class="column-head"><div class="column-label"><strong title={column.name}>{#each columnLabelParts(column.name) as part, index (`${part.match}-${part.text}-${index}`)}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</strong><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></div><div class="header-actions">{#if queryMode === 'builder'}<button class:sorted={sorts.some((sort) => sort.column === column.name)} onclick={() => cycleSort(column)} aria-label={`Sort ${column.name}`} title={`Sort ${column.name}`}>{sortFor(column.name)?.direction === 'asc' ? '↑' : sortFor(column.name)?.direction === 'desc' ? '↓' : '↕'}</button><button class:filtered={filters.some((filter) => filter.column === column.name)} onclick={(event) => openFilter(column, event.currentTarget as HTMLButtonElement)} aria-label={`Filter ${column.name}`} title={`Filter ${column.name}`}>⌕</button>{#if column.profile_kind}<button onclick={(event) => openStats(column, event.currentTarget as HTMLButtonElement)} aria-label={`Profile column ${column.name}`} title={`Profile column ${column.name}`}>▥</button>{/if}{/if}<button onclick={() => hideColumn(column.name)} disabled={isColumnProtected(column.name) || visibleColumns.length <= 1} aria-label={`Hide column ${column.name}`} title={`Hide column ${column.name}`}>×</button></div><div class="null-gauge" title={`${(column.null_fraction * 100).toFixed(1)}% null`}><span style:width={`${Math.min(100, column.null_fraction * 100)}%`}></span></div></div></th>{/each}</tr></thead><tbody>{#each result.rows as row, index (index)}<tr>{#each visibleColumns as column (column.name)}<td tabindex="0" class:expanded-cell={selectedCell?.row === index && selectedCell.column === column.name} onclick={(event) => expandCell(event, index, column.name)} onkeydown={(event) => toggleCellFromKeyboard(event, index, column.name)} title={selectedCell?.row === index && selectedCell.column === column.name ? undefined : display(row[column.name])}><span>{display(row[column.name])}</span>{#if selectedCell?.row === index && selectedCell.column === column.name}<button class="collapse-cell" onclick={(event) => { event.stopPropagation(); collapseCell(index, column.name); }} aria-label={`Collapse ${column.name}`}>Collapse</button>{/if}</td>{/each}</tr>{/each}</tbody></table></div>{#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}{/if}
+                  {:else if result}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><div bind:this={tableScroll} class="table-scroll" role="region" tabindex="0" aria-label="Scrollable dataset table"><table><caption class="sr-only">Rows from {currentDataset?.name ?? selectedDataset}</caption><thead><tr>{#each visibleColumns as column (column.name)}<th data-column={column.name} tabindex="-1" scope="col" style:min-width={`${Math.max(168, Math.min(360, column.name.length * 9 + (column.profile_kind ? 150 : 118)))}px`}><div class="column-head"><div class="column-label"><strong title={column.name}>{#each columnLabelParts(column.name) as part, index (`${part.match}-${part.text}-${index}`)}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</strong><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></div><div class="header-actions">{#if queryMode === 'builder' || aggregateSourceSql}<button class:sorted={sorts.some((sort) => sort.column === column.name)} onclick={() => cycleSort(column)} aria-label={`Sort ${column.name}`} title={`Sort ${column.name}`}>{sortFor(column.name)?.direction === 'asc' ? '↑' : sortFor(column.name)?.direction === 'desc' ? '↓' : '↕'}</button><button class:filtered={filters.some((filter) => filter.column === column.name)} onclick={(event) => openFilter(column, event.currentTarget as HTMLButtonElement)} aria-label={`Filter ${column.name}`} title={`Filter ${column.name}`}>⌕</button>{#if column.profile_kind}<button onclick={(event) => openStats(column, event.currentTarget as HTMLButtonElement)} aria-label={`Profile column ${column.name}`} title={`Profile column ${column.name}`}>▥</button>{/if}{/if}<button onclick={() => hideColumn(column.name)} disabled={isColumnProtected(column.name) || visibleColumns.length <= 1} aria-label={`Hide column ${column.name}`} title={`Hide column ${column.name}`}>×</button></div><div class="null-gauge" title={`${(column.null_fraction * 100).toFixed(1)}% null`}><span style:width={`${Math.min(100, column.null_fraction * 100)}%`}></span></div></div></th>{/each}</tr></thead><tbody>{#each result.rows as row, index (index)}<tr class:aggregate-result-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>{#each visibleColumns as column (column.name)}<td tabindex="0" class:expanded-cell={selectedCell?.row === index && selectedCell.column === column.name} onclick={(event) => expandCell(event, index, column.name)} ondblclick={() => filterCategoricalCell(column, row[column.name])} onkeydown={(event) => toggleCellFromKeyboard(event, index, column.name)} title={selectedCell?.row === index && selectedCell.column === column.name ? undefined : cellTitle(column, row[column.name])}><span>{display(row[column.name])}</span>{#if selectedCell?.row === index && selectedCell.column === column.name}<button class="collapse-cell" onclick={(event) => { event.stopPropagation(); collapseCell(index, column.name); }} aria-label={`Collapse ${column.name}`}>Collapse</button>{/if}</td>{/each}</tr>{/each}</tbody></table></div>{#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}{/if}
                 </div>
                 {#if result}<footer class="pagination"><label>Rows per page <select value={pageSize} onchange={changePageSize}>{#each pageSizes as size (size)}<option value={size}>{size}</option>{/each}</select></label><span class="range">{rangeStart(result.total_rows)}–{rangeEnd(result.total_rows)} of {count(result.total_rows)}</span><div class="pager"><button onclick={() => changePage(page - 1)} disabled={page <= 1 || loadingData} aria-label="Previous page">←</button><form onsubmit={(event) => { event.preventDefault(); jumpPage(); }}><label for="page-number">Page</label><input id="page-number" type="number" min="1" max={Math.max(totalPages, 1)} bind:value={pageInput} /><span>of {count(result.total_pages)}</span></form><button onclick={() => changePage(page + 1)} disabled={page >= totalPages || loadingData} aria-label="Next page">→</button></div></footer>{/if}
               </section>
               {#if inspectorMode}<button class="inspector-backdrop" type="button" tabindex="-1" aria-label="Close inspector" onclick={closeInspector}></button><div bind:this={inspector} class="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title"><header><div><p>{inspectorMode === 'filter' ? 'Filter column' : 'Column profile'}</p><h2 id="inspector-title">{filterColumn?.name ?? statsColumn?.name}</h2><small>{filterColumn?.type ?? statsColumn?.type}</small></div><button class="icon-button" onclick={closeInspector} aria-label="Close inspector" title="Close inspector">×</button></header><div class="inspector-body">
                 {#if inspectorMode === 'filter' && filterColumn}
-                  {#if isTextType(filterColumn.type)}<section class="category-picker" aria-label={`Categories for ${filterColumn.name}`}><form onsubmit={(event) => { event.preventDefault(); loadCategoryValues(true); }}><label>Find a category<input bind:this={filterInput} type="search" bind:value={categorySearch} placeholder="Search values" /></label><button class="secondary-button" type="submit" disabled={categoriesLoading}>Search</button></form><div class="category-actions"><button type="button" onclick={selectVisibleCategories} disabled={categoriesLoading || categoryValues.length === 0}>Select visible</button><button type="button" onclick={() => selectedCategories = []} disabled={selectedCategories.length === 0}>Clear</button><span>{selectedCategories.length} selected</span></div>{#if categoriesLoading && categoryValues.length === 0}<p class="panel-state"><span class="spinner"></span>Loading values…</p>{:else if categoriesError}<p class="panel-state error-text" role="alert">{categoriesError}</p>{:else}<div class="category-list">{#each categoryValues as item (item.value)}<label><input type="checkbox" checked={selectedCategories.includes(item.value)} onchange={(event) => toggleCategory(item.value, event.currentTarget.checked)} /><span title={item.value}>{item.value}</span><small>{count(item.count)}</small></label>{:else}<p class="panel-state">No matching values.</p>{/each}</div><div class="category-page"><span>{categoryValues.length.toLocaleString()} / {count(categoryTotal)}</span>{#if categoryHasMore}<button type="button" onclick={() => loadCategoryValues(false)} disabled={categoriesLoading}>{categoriesLoading ? 'Loading…' : 'Load more'}</button>{/if}</div>{/if}</section><details><summary>Advanced condition</summary><form class="advanced-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value<input type="text" bind:value={filterValue} /></label>{/if}<button class="primary-button" type="submit">Apply filter</button></form></details>
+                  {#if isTextType(filterColumn.type)}<section class="category-picker" aria-label={`Categories for ${filterColumn.name}`}><form onsubmit={(event) => { event.preventDefault(); loadCategoryValues(true); }}><label>Find a category<input bind:this={filterInput} type="search" bind:value={categorySearch} oninput={() => loadCategoryValues(true)} placeholder="Search values" /></label><button class="secondary-button" type="submit" disabled={categoriesLoading}>Search</button></form><div class="category-actions"><button type="button" onclick={selectVisibleCategories} disabled={categoriesLoading || categoryValues.length === 0}>Select visible</button><button type="button" onclick={() => selectedCategories = []} disabled={selectedCategories.length === 0}>Clear</button><span>{selectedCategories.length} selected</span></div>{#if categoriesLoading && categoryValues.length === 0}<p class="panel-state"><span class="spinner"></span>Loading values…</p>{:else if categoriesError}<p class="panel-state error-text" role="alert">{categoriesError}</p>{:else}<div class="category-list">{#each categoryValues as item (item.value)}<label><input type="checkbox" checked={selectedCategories.includes(item.value)} onchange={(event) => toggleCategory(item.value, event.currentTarget.checked)} /><span title={item.value}>{item.value}</span><small>{count(item.count)}</small></label>{:else}<p class="panel-state">No matching values.</p>{/each}</div><div class="category-page"><span>{categoryValues.length.toLocaleString()} / {count(categoryTotal)}</span>{#if categoryHasMore}<button type="button" onclick={() => loadCategoryValues(false)} disabled={categoriesLoading}>{categoriesLoading ? 'Loading…' : 'Load more'}</button>{/if}</div>{/if}</section><details><summary>Advanced condition</summary><form class="advanced-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value<input type="text" bind:value={filterValue} /></label>{/if}<button class="primary-button" type="submit">Apply filter</button></form></details>
                   {:else}<form class="direct-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value{#if isBooleanType(filterColumn.type)}<select bind:this={filterInput} bind:value={filterValue}><option value="" disabled>Select value</option><option value="true">True</option><option value="false">False</option></select>{:else}<input bind:this={filterInput} type="text" inputmode={filterColumn.numeric ? 'decimal' : undefined} bind:value={filterValue} onblur={filterColumn.numeric ? normalizeNumericFilter : undefined} />{/if}</label>{/if}<button class="primary-button" type="submit" disabled={filterOperator !== 'is_null' && filterOperator !== 'not_null' && filterValue === ''}>Apply filter</button></form>{/if}
                 {:else if inspectorMode === 'profile' && statsColumn}
                   {#if statsLoading}<div class="panel-state"><span class="spinner"></span>Computing statistics…</div>

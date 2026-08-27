@@ -382,6 +382,33 @@ def test_sql_query_pages_with_metadata_and_safe_values(client):
     assert body["elapsed_ms"] >= 0
 
 
+def test_sql_result_controls_filter_sort_categories_and_profile(client):
+    node = upload(client, "items.csv", b"category,price\na,10\na,20\nb,30\n")
+    sql = 'SELECT category, sum(price) AS total FROM "main"."items" GROUP BY category'
+    base = f"/api/nodes/{node['id']}/sql"
+
+    response = client.post(base, json={
+        "sql": sql,
+        "filters": [{"column": "category", "operator": "=", "value": "a"}],
+        "sorts": [{"column": "total", "direction": "desc"}],
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [{"category": "a", "total": 30.0}]
+    assert 'WHERE "category" = \'a\'' in response.json()["sql"]
+    assert response.json()["sql"].endswith('ORDER BY "total" DESC')
+
+    values = client.post(base + "/columns/category/values?search=b", json={"sql": sql})
+    assert values.status_code == 200, values.text
+    assert values.json()["values"] == [{"value": "b", "count": 1}]
+
+    stats = client.post(base + "/columns/total/stats", json={
+        "sql": sql,
+        "filters": [{"column": "category", "operator": "=", "value": "a"}],
+    })
+    assert stats.status_code == 200, stats.text
+    assert (stats.json()["kind"], stats.json()["row_count"], stats.json()["mean"]) == ("numeric", 1, 30.0)
+
+
 @pytest.mark.parametrize("sql", [
     "SELECT 1 AS value -- trailing",
     "SELECT 1 AS value; -- trailing",
