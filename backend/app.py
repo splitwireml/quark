@@ -10,6 +10,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 from xml.etree import ElementTree
 
@@ -150,6 +151,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     registered_nodes: list[dict[str, Any]] = []
     pending_workbooks: dict[str, dict[str, Any]] = {}
     connections: dict[str, duckdb.DuckDBPyConnection] = {}
+    # ponytail: global lock; use per-node locks if category lookup throughput matters.
+    category_values_lock = Lock()
 
     def public(node: dict[str, Any]) -> dict[str, str]:
         return {key: node[key] for key in ("id", "name", "kind", "source")}
@@ -561,9 +564,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         offset: int = QueryParam(0, ge=0),
         limit: int = QueryParam(200, ge=1, le=500),
     ):
-        con = get_connection(node_id)
-        table, metadata_columns = metadata(con, dataset)
-        return category_response(con, table, metadata_columns, column, search=search, offset=offset, limit=limit)
+        with category_values_lock:
+            con = get_connection(node_id)
+            table, metadata_columns = metadata(con, dataset)
+            return category_response(con, table, metadata_columns, column, search=search, offset=offset, limit=limit)
 
     @api.post("/api/nodes/{node_id}/sql/columns/{column}/values")
     def sql_category_values(
@@ -574,9 +578,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         offset: int = QueryParam(0, ge=0),
         limit: int = QueryParam(200, ge=1, le=500),
     ):
-        con = get_connection(node_id)
-        sql, columns = sql_metadata(con, request)
-        return category_response(con, "query(?)", columns, column, [sql], search, offset, limit)
+        with category_values_lock:
+            con = get_connection(node_id)
+            sql, columns = sql_metadata(con, request)
+            return category_response(con, "query(?)", columns, column, [sql], search, offset, limit)
 
     def profile_response(
         con: duckdb.DuckDBPyConnection,

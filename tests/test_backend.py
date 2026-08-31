@@ -1,7 +1,10 @@
 import json
 import sys
+import threading
+import time
 import warnings
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -12,6 +15,7 @@ import pytest
 warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient` is deprecated.*")
 from fastapi.testclient import TestClient
 
+import backend.app as backend_app
 from backend.app import create_app, page_count, safe
 
 
@@ -547,6 +551,48 @@ def test_category_values_are_distinct_counted_safe_and_text_only(client, tmp_pat
     assert client.get(base + "/columns/amount/values").status_code == 422
     assert client.get(base + "/columns/missing/values").status_code == 404
     assert client.get(f"/api/nodes/{node['id']}/datasets/missing/columns/category/values").status_code == 404
+
+
+def test_category_values_do_not_share_a_connection_concurrently(tmp_path, monkeypatch):
+    db = tmp_path / "categories.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE items AS SELECT 'value-' || i AS category FROM range(100) t(i)")
+
+    original_connect = duckdb.connect
+
+    # ponytail: deterministic shared-cursor race without a production test hook.
+    class GuardedConnection:
+        def __init__(self, con):
+            self.con = con
+            self.executing = threading.Lock()
+
+        def __getattr__(self, name):
+            return getattr(self.con, name)
+
+        def execute(self, *args, **kwargs):
+            if not self.executing.acquire(blocking=False):
+                raise RuntimeError("shared DuckDB connection used concurrently")
+            try:
+                time.sleep(0.02)
+                return self.con.execute(*args, **kwargs)
+            finally:
+                self.executing.release()
+
+    monkeypatch.setattr(backend_app.duckdb, "connect", lambda *args, **kwargs: GuardedConnection(original_connect(*args, **kwargs)))
+    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as client:
+        node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+        dataset_id = dataset(client, node, "items")["id"]
+        url = f"/api/nodes/{node['id']}/datasets/{dataset_id}/columns/category/values"
+        barrier = threading.Barrier(8)
+
+        def get_values(search):
+            barrier.wait()
+            return client.get(url, params={"search": search})
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            responses = list(executor.map(get_values, map(str, range(8))))
+
+    assert all(response.status_code == 200 for response in responses)
 
 
 def test_category_values_are_paged_and_searchable(client, tmp_path):
