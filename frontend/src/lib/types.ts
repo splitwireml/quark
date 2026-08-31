@@ -135,3 +135,15 @@ export interface DateColumnStats extends ColumnStatsBase {
 }
 
 export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColumnStats;
+
+export type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
+export type RowDensity = 'compact' | 'default' | 'comfortable';
+export type DistributionMode = 'count' | 'percent';
+
+export interface SavedQuery {
+  id: string;
+  name: string;
+  sql: string;
+  nodeId: string;
+  dataset: string;
+}
