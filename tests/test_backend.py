@@ -36,6 +36,15 @@ def dataset(client, node, name, schema="main"):
     return next(item for item in datasets if (item["schema"], item["name"]) == (schema, name))
 
 
+def join_payload(left_node, left_dataset, right_node, right_dataset, left_keys, right_keys):
+    return {
+        "left": {"node_id": left_node["id"], "dataset": left_dataset["id"]},
+        "right": {"node_id": right_node["id"], "dataset": right_dataset["id"]},
+        "left_keys": left_keys,
+        "right_keys": right_keys,
+    }
+
+
 def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
     app = create_app(tmp_path)
     with TestClient(app) as client:
@@ -847,3 +856,160 @@ def test_stats_invalid_filter_value_returns_422(tmp_path):
             "filters": [{"column": "value", "operator": ">", "value": "not-a-number"}],
         })
     assert response.status_code == 422
+
+
+def test_join_workspace_same_node_composite_cardinality(client, tmp_path):
+    db = tmp_path / "same-source.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("""
+            CREATE TABLE left_items(region INTEGER, code VARCHAR, value VARCHAR);
+            INSERT INTO left_items VALUES (1, 'a', 'la'), (1, 'b', 'lb'), (2, 'a', 'lc'), (NULL, 'a', 'null');
+            CREATE TABLE right_items(region INTEGER, code VARCHAR, value VARCHAR);
+            INSERT INTO right_items VALUES (1, 'a', 'ra'), (1, 'a', 'rb'), (1, 'b', 'rc'), (3, 'z', 'rd');
+        """)
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    left = dataset(client, node, "left_items")
+    right = dataset(client, node, "right_items")
+
+    response = client.post("/api/join-workspaces", json=join_payload(
+        node, left, node, right, ["region", "code"], ["region", "code"],
+    ))
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "node_id": node["id"],
+        "left": {"schema": "main", "name": "left_items"},
+        "right": {"schema": "main", "name": "right_items"},
+        "left_rows": 4,
+        "right_rows": 4,
+        "output_rows": 3,
+        "relationship": "one_to_many",
+        "cartesian_risk": False,
+    }
+
+
+def test_cross_node_join_workspace_is_queryable_by_sql_and_profile_routes(client, tmp_path):
+    left_node = upload(client, "people.csv", b"id,name\n1,Ada\n2,Bob\n4,Dana\n")
+    db = tmp_path / "groups.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE groups AS SELECT * FROM (VALUES (1, 'admin'), (2, 'staff'), (3, 'guest')) t(id, category)")
+    right_node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+
+    response = client.post("/api/join-workspaces", json=join_payload(
+        left_node, dataset(client, left_node, "people"),
+        right_node, dataset(client, right_node, "groups"), ["id"], ["id"],
+    ))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {
+        "node_id": body["node_id"],
+        "left": {"schema": "left_source", "name": "people"},
+        "right": {"schema": "right_source", "name": "groups"},
+        "left_rows": 3,
+        "right_rows": 3,
+        "output_rows": 2,
+        "relationship": "one_to_one",
+        "cartesian_risk": False,
+    }
+    assert body["node_id"] not in {left_node["id"], right_node["id"]}
+    sql = (
+        'SELECT l.name, r.category FROM "left_source"."people" l '
+        'JOIN "right_source"."groups" r ON l.id = r.id ORDER BY l.id'
+    )
+    query = client.post(f"/api/nodes/{body['node_id']}/sql", json={"sql": sql})
+    assert query.status_code == 200, query.text
+    assert query.json()["rows"] == [
+        {"name": "Ada", "category": "admin"},
+        {"name": "Bob", "category": "staff"},
+    ]
+    values = client.post(
+        f"/api/nodes/{body['node_id']}/sql/columns/category/values", json={"sql": sql},
+    )
+    assert values.status_code == 200, values.text
+    assert values.json()["values"] == [
+        {"value": "admin", "count": 1}, {"value": "staff", "count": 1},
+    ]
+    stats = client.post(
+        f"/api/nodes/{body['node_id']}/sql/columns/name/stats", json={"sql": sql},
+    )
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["row_count"] == 2
+
+
+def test_join_workspace_empty_keys_previews_cartesian_product(client):
+    left_node = upload(client, "left.csv", b"id\n1\n2\n")
+    right_node = upload(client, "right.csv", b"id\n1\n2\n3\n")
+    response = client.post("/api/join-workspaces", json=join_payload(
+        left_node, dataset(client, left_node, "left"),
+        right_node, dataset(client, right_node, "right"), [], [],
+    ))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["left_rows"] == 2
+    assert response.json()["right_rows"] == 3
+    assert response.json()["output_rows"] == 6
+    assert response.json()["relationship"] == "cartesian"
+    assert response.json()["cartesian_risk"] is True
+
+
+def test_join_workspace_marks_many_to_many_risk(client, tmp_path):
+    db = tmp_path / "many.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("""
+            CREATE TABLE left_items AS SELECT * FROM (VALUES (1), (1), (2)) t(id);
+            CREATE TABLE right_items AS SELECT * FROM (VALUES (1), (1), (3)) t(id);
+        """)
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    response = client.post("/api/join-workspaces", json=join_payload(
+        node, dataset(client, node, "left_items"),
+        node, dataset(client, node, "right_items"), ["id"], ["id"],
+    ))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["output_rows"] == 4
+    assert response.json()["relationship"] == "many_to_many"
+    assert response.json()["cartesian_risk"] is True
+
+
+def test_join_workspace_rejects_invalid_references_and_keys(client):
+    node = upload(client, "items.csv", b"id,kind\n1,a\n")
+    item = dataset(client, node, "items")
+    valid = join_payload(node, item, node, item, ["id"], ["id"])
+    invalid = [
+        ({**valid, "left_keys": ["id", "kind"]}, 422),
+        ({**valid, "left_keys": ["id", "id"], "right_keys": ["id", "id"]}, 422),
+        ({**valid, "left_keys": ["missing"]}, 422),
+        ({**valid, "left": {**valid["left"], "dataset": "missing"}}, 404),
+        ({**valid, "right": {**valid["right"], "node_id": "missing"}}, 404),
+    ]
+
+    for payload, status in invalid:
+        response = client.post("/api/join-workspaces", json=payload)
+        assert response.status_code == status, response.text
+
+
+def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
+    first = upload(client, "first.csv", b"id\n1\n")
+    second = upload(client, "second.csv", b"id\n1\n")
+    third = upload(client, "third.csv", b"id\n1\n")
+    first_workspace = client.post("/api/join-workspaces", json=join_payload(
+        first, dataset(client, first, "first"),
+        second, dataset(client, second, "second"), ["id"], ["id"],
+    )).json()["node_id"]
+    second_response = client.post("/api/join-workspaces", json=join_payload(
+        first, dataset(client, first, "first"),
+        third, dataset(client, third, "third"), ["id"], ["id"],
+    ))
+
+    assert second_response.status_code == 200, second_response.text
+    second_workspace = second_response.json()["node_id"]
+    assert second_workspace != first_workspace
+    assert client.post(f"/api/nodes/{first_workspace}/sql", json={"sql": "SELECT 1"}).status_code == 404
+    assert client.post(
+        f"/api/nodes/{second_workspace}/sql",
+        json={"sql": 'SELECT count(*) AS n FROM "left_source"."first"'},
+    ).json()["rows"] == [{"n": 1}]
+    assert {node["id"] for node in client.get("/api/nodes").json()} == {
+        first["id"], second["id"], third["id"],
+    }

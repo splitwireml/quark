@@ -69,6 +69,20 @@ class SQLQuery(SQLRequest, Query):
     pass
 
 
+class JoinReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: str
+    dataset: str
+
+
+class JoinWorkspaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    left: JoinReference
+    right: JoinReference
+    left_keys: list[str]
+    right_keys: list[str]
+
+
 def quote(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
@@ -151,6 +165,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     registered_nodes: list[dict[str, Any]] = []
     pending_workbooks: dict[str, dict[str, Any]] = {}
     connections: dict[str, duckdb.DuckDBPyConnection] = {}
+    # ponytail: one process-global slot is intentional; Quark is local and single-user.
+    join_workspace: dict[str, Any] = {}
     # ponytail: global lock; use per-node locks if category lookup throughput matters.
     category_values_lock = Lock()
 
@@ -163,7 +179,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         temporary.write_text(json.dumps(registered_nodes, indent=2))
         temporary.replace(registry_path)
 
-    def _xlsx_typed_view(con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str) -> None:
+    def _xlsx_typed_view(
+        con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str, schema: str | None = None,
+    ) -> None:
         """Keep Excel's styled date cells typed while safely coercing consistent text columns."""
         typed_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}')"
         raw_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}', all_varchar = true)"
@@ -198,7 +216,18 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 selects.append(f"TRY_CAST({cq} AS DATE) AS {cq}")
             else:
                 selects.append(cq)
-        con.execute(f"CREATE VIEW {quote(name)} AS SELECT {', '.join(selects)} FROM {raw_expr}")
+        target = f"{quote(schema)}.{quote(name)}" if schema else quote(name)
+        con.execute(f"CREATE VIEW {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
+
+    def scan_expression(source: Path) -> str:
+        source_sql = str(source).replace("'", "''")
+        suffix = source.suffix.lower()
+        if suffix in {".csv", ".tsv"}:
+            delimiter = "\\t" if suffix == ".tsv" else ","
+            return f"read_csv_auto('{source_sql}', delim='{delimiter}')"
+        if suffix == ".parquet":
+            return f"read_parquet('{source_sql}')"
+        return f"read_json_auto('{source_sql}')"
 
     def connect(node: dict[str, Any]) -> duckdb.DuckDBPyConnection:
         source = Path(node["source"])
@@ -215,14 +244,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 sheet_sql = sheet.replace("'", "''")
                 _xlsx_typed_view(con, source_sql, sheet_sql, sheet)
         else:
-            if suffix in {".csv", ".tsv"}:
-                delimiter = "\\t" if suffix == ".tsv" else ","
-                scan = f"read_csv_auto('{source_sql}', delim='{delimiter}')"
-            elif suffix == ".parquet":
-                scan = f"read_parquet('{source_sql}')"
-            else:
-                scan = f"read_json_auto('{source_sql}')"
-            con.execute(f"CREATE VIEW {quote(node.get('dataset_name', 'data'))} AS SELECT * FROM {scan}")
+            con.execute(
+                f"CREATE VIEW {quote(node.get('dataset_name', 'data'))} AS SELECT * FROM {scan_expression(source)}"
+            )
         con.execute("SET allowed_directories = ?", [[str(source.parent)]])
         con.execute("SET enable_external_access = ?", [False])
         return con
@@ -240,6 +264,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return public(node)
 
     def get_connection(node_id: str) -> duckdb.DuckDBPyConnection:
+        if node_id == join_workspace.get("id"):
+            return join_workspace["connection"]
         if node_id not in nodes:
             raise HTTPException(404, "Node not found")
         return connections[node_id]
@@ -260,13 +286,37 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "type": kind,
         } for schema, name, kind in rows]
 
-    def metadata(con: duckdb.DuckDBPyConnection, dataset: str) -> tuple[str, list[tuple[str, str]]]:
+    def dataset_for(con: duckdb.DuckDBPyConnection, dataset: str) -> dict[str, Any]:
         item = next((item for item in datasets_for(con) if item["id"] == dataset), None)
         if item is None:
             raise HTTPException(404, "Dataset not found")
+        return item
+
+    def metadata(con: duckdb.DuckDBPyConnection, dataset: str) -> tuple[str, list[tuple[str, str]]]:
+        item = dataset_for(con, dataset)
         table = f'{quote(item["schema"])}.{quote(item["name"])}'
         columns = [(row[0], row[1]) for row in con.execute(f"DESCRIBE SELECT * FROM {table}").fetchall()]
         return table, columns
+
+    def mount_dataset(
+        con: duckdb.DuckDBPyConnection, schema: str, node: dict[str, Any], item: dict[str, Any],
+    ) -> str:
+        source = Path(node["source"])
+        source_sql = str(source).replace("'", "''")
+        target = f"{quote(schema)}.{quote(item['name'])}"
+        con.execute(f"CREATE SCHEMA {quote(schema)}")
+        if source.suffix.lower() in {".duckdb", ".db"}:
+            alias = f"{schema}_database"
+            con.execute(f"ATTACH '{source_sql}' AS {quote(alias)} (READ_ONLY)")
+            con.execute(
+                f"CREATE VIEW {target} AS SELECT * FROM {quote(alias)}.{quote(item['schema'])}.{quote(item['name'])}"
+            )
+        elif source.suffix.lower() == ".xlsx":
+            con.execute("INSTALL excel; LOAD excel")
+            _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+        else:
+            con.execute(f"CREATE VIEW {target} AS SELECT * FROM {scan_expression(source)}")
+        return target
 
     def filtered_relation(
         table: str, columns: list[tuple[str, str]], request: Query, display_table: str | None = None,
@@ -409,6 +459,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if candidate.is_file() and candidate.resolve() not in persisted_sources:
                 candidate.unlink()
         yield
+        if join_workspace:
+            join_workspace["connection"].close()
         for con in connections.values():
             con.close()
 
@@ -421,6 +473,93 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @api.get("/api/nodes")
     def list_nodes():
         return [public(node) for node in nodes.values()]
+
+    @api.post("/api/join-workspaces")
+    def create_join_workspace(request: JoinWorkspaceRequest):
+        if len(request.left_keys) != len(request.right_keys):
+            raise HTTPException(422, "Join key counts must match")
+        if len(set(request.left_keys)) != len(request.left_keys) or len(set(request.right_keys)) != len(request.right_keys):
+            raise HTTPException(422, "Join keys must be unique")
+
+        left_con = get_connection(request.left.node_id)
+        right_con = get_connection(request.right.node_id)
+        left_item = dataset_for(left_con, request.left.dataset)
+        right_item = dataset_for(right_con, request.right.dataset)
+        left_original, left_columns = metadata(left_con, request.left.dataset)
+        right_original, right_columns = metadata(right_con, request.right.dataset)
+        if any(key not in dict(left_columns) for key in request.left_keys) or any(
+            key not in dict(right_columns) for key in request.right_keys
+        ):
+            raise HTTPException(422, "Join key not found")
+
+        new_con = None
+        if request.left.node_id == request.right.node_id:
+            con = left_con
+            node_id = request.left.node_id
+            left_table, right_table = left_original, right_original
+            left_identity = {"schema": left_item["schema"], "name": left_item["name"]}
+            right_identity = {"schema": right_item["schema"], "name": right_item["name"]}
+        else:
+            new_con = duckdb.connect()
+            con = new_con
+            try:
+                left_table = mount_dataset(con, "left_source", nodes[request.left.node_id], left_item)
+                right_table = mount_dataset(con, "right_source", nodes[request.right.node_id], right_item)
+                directories = sorted({str(Path(nodes[ref.node_id]["source"]).parent) for ref in (request.left, request.right)})
+                con.execute("SET allowed_directories = ?", [directories])
+                con.execute("SET enable_external_access = ?", [False])
+            except Exception:
+                con.close()
+                raise
+            node_id = f"join_{uuid.uuid4().hex}"
+            left_identity = {"schema": "left_source", "name": left_item["name"]}
+            right_identity = {"schema": "right_source", "name": right_item["name"]}
+
+        try:
+            left_rows = con.execute(f"SELECT count(*) FROM {left_table}").fetchone()[0]
+            right_rows = con.execute(f"SELECT count(*) FROM {right_table}").fetchone()[0]
+            if not request.left_keys:
+                output_rows = left_rows * right_rows
+                relationship = "cartesian"
+            else:
+                def unique(table: str, keys: list[str]) -> bool:
+                    fields = ", ".join(quote(key) for key in keys)
+                    distinct = f"({fields})" if len(keys) > 1 else fields
+                    where = " AND ".join(f"{quote(key)} IS NOT NULL" for key in keys)
+                    non_null, distinct_count = con.execute(
+                        f"SELECT count(*), count(DISTINCT {distinct}) FROM {table} WHERE {where}"
+                    ).fetchone()
+                    return non_null == distinct_count
+
+                left_unique = unique(left_table, request.left_keys)
+                right_unique = unique(right_table, request.right_keys)
+                if left_unique:
+                    relationship = "one_to_one" if right_unique else "one_to_many"
+                else:
+                    relationship = "many_to_one" if right_unique else "many_to_many"
+                on = " AND ".join(
+                    f"l.{quote(left)} = r.{quote(right)}"
+                    for left, right in zip(request.left_keys, request.right_keys)
+                )
+                output_rows = con.execute(
+                    f"SELECT count(*) FROM {left_table} l INNER JOIN {right_table} r ON {on}"
+                ).fetchone()[0]
+        except Exception:
+            if new_con is not None:
+                new_con.close()
+            raise
+
+        if new_con is not None:
+            if join_workspace:
+                join_workspace["connection"].close()
+            join_workspace.clear()
+            join_workspace.update({"id": node_id, "connection": new_con})
+        return safe({
+            "node_id": node_id, "left": left_identity, "right": right_identity,
+            "left_rows": left_rows, "right_rows": right_rows, "output_rows": output_rows,
+            "relationship": relationship,
+            "cartesian_risk": relationship in {"cartesian", "many_to_many"},
+        })
 
     @api.post("/api/nodes/upload", status_code=201)
     async def upload(file: UploadFile = File(...)):

@@ -85,6 +85,36 @@ export interface SqlQueryRequest extends QueryRequest {
   sql: string;
 }
 
+export interface JoinWorkspaceSideRequest {
+  node_id: string;
+  dataset: string;
+}
+
+export interface JoinWorkspaceRequest {
+  left: JoinWorkspaceSideRequest;
+  right: JoinWorkspaceSideRequest;
+  left_keys: string[];
+  right_keys: string[];
+}
+
+export interface JoinWorkspaceDataset {
+  schema: string;
+  name: string;
+}
+
+export type JoinRelationship = 'cartesian' | 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many';
+
+export interface JoinWorkspaceResponse {
+  node_id: string;
+  left: JoinWorkspaceDataset;
+  right: JoinWorkspaceDataset;
+  left_rows: AggregateCount;
+  right_rows: AggregateCount;
+  output_rows: AggregateCount;
+  relationship: JoinRelationship;
+  cartesian_risk: boolean;
+}
+
 export type NumericValue = number | string;
 
 export interface HistogramBin {

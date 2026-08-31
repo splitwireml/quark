@@ -1,4 +1,4 @@
-import type { CategoryValuesResponse, ColumnStats, DatasetInfo, NodeInfo, QueryRequest, QueryResponse, SqlQueryRequest, WorkbookPreview } from './types';
+import type { CategoryValuesResponse, ColumnStats, DatasetInfo, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, QueryRequest, QueryResponse, SqlQueryRequest, WorkbookPreview } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -51,6 +51,10 @@ export function queryDataset(nodeId: string, dataset: string, body: QueryRequest
 
 export function querySql(nodeId: string, body: SqlQueryRequest): Promise<QueryResponse> {
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, json(body));
+}
+
+export function previewJoinWorkspace(body: JoinWorkspaceRequest): Promise<JoinWorkspaceResponse> {
+  return request('/api/join-workspaces', json(body));
 }
 
 export function getSqlColumnStats(nodeId: string, column: string, body: SqlQueryRequest): Promise<ColumnStats> {
