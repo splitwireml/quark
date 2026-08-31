@@ -16,13 +16,14 @@
     onfilter: (trigger: HTMLButtonElement) => void;
     onprofile: (trigger: HTMLButtonElement) => void;
     onhide: () => void;
+    oncontextmenu: (event: MouseEvent) => void;
   };
 
-  let { column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, onsort, onfilter, onprofile, onhide }: Props = $props();
+  let { column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, onsort, onfilter, onprofile, onhide, oncontextmenu }: Props = $props();
   let width = $derived(Math.max(168, Math.min(360, column.name.length * 9 + (column.profile_kind ? 150 : 118))));
 </script>
 
-<th data-column={column.name} tabindex="-1" scope="col" style:min-width={`${width}px`}>
+<th data-column={column.name} tabindex="-1" scope="col" {oncontextmenu} style:min-width={`${width}px`}>
   <div class="head">
     <div class="label">
       <strong title={column.name}>
@@ -34,13 +35,13 @@
     </div>
     <div class="actions">
       {#if canQuery}
-        <button class:on={!!sort} onclick={onsort} aria-label={`Sort ${column.name}`} title={`Sort ${column.name}`}>{sort?.direction === 'asc' ? '↑' : sort?.direction === 'desc' ? '↓' : '↕'}</button>
-        <button class:on={filtered} onclick={(event) => onfilter(event.currentTarget as HTMLButtonElement)} aria-label={`Filter ${column.name}`} title={`Filter ${column.name}`}>⌕</button>
+        <button class:on={!!sort} onclick={onsort} aria-label={`Sort ${column.name}`} title="Sort">{sort?.direction === 'asc' ? '↑' : sort?.direction === 'desc' ? '↓' : '↕'}</button>
+        <button class:on={filtered} onclick={(event) => onfilter(event.currentTarget as HTMLButtonElement)} aria-label={`Filter ${column.name}`} title="Filter">⌕</button>
         {#if column.profile_kind}
-          <button onclick={(event) => onprofile(event.currentTarget as HTMLButtonElement)} aria-label={`Profile column ${column.name}`} title={`Profile column ${column.name}`}>▥</button>
+          <button onclick={(event) => onprofile(event.currentTarget as HTMLButtonElement)} aria-label={`Profile column ${column.name}`} title="Profile">▥</button>
         {/if}
       {/if}
-      <button onclick={onhide} disabled={protectedColumn || !canHide} aria-label={`Hide column ${column.name}`} title={`Hide column ${column.name}`}>×</button>
+      <button onclick={onhide} disabled={protectedColumn || !canHide} aria-label={`Hide column ${column.name}`} title="Hide">×</button>
     </div>
     <NullGauge fraction={column.null_fraction} />
   </div>

@@ -6,6 +6,7 @@
   import { keymap } from '@codemirror/view';
   import * as api from './lib/api';
   import { buildAggregateSql } from './lib/aggregate-sql';
+  import { buildJoinSql, type JoinKey } from './lib/join-sql';
   import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DistributionMode, FilterCondition, FilterOperator, NodeInfo, QueryResponse, RowDensity, SavedQuery, SortCondition, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
@@ -18,6 +19,7 @@
   import SavedQueriesPane from './components/organisms/SavedQueriesPane.svelte';
   import QueryConditionBar from './components/organisms/QueryConditionBar.svelte';
   import ColumnsMenuPopover from './components/organisms/ColumnsMenuPopover.svelte';
+  import JoinMenuPopover from './components/organisms/JoinMenuPopover.svelte';
   import AggregateMenuPopover from './components/organisms/AggregateMenuPopover.svelte';
   import DedupeMenuPopover from './components/organisms/DedupeMenuPopover.svelte';
   import SqlEditorPanel from './components/organisms/SqlEditorPanel.svelte';
@@ -52,6 +54,12 @@
   let aggregateMetrics = $state<AggregateMetric[]>([]);
   let aggregateSourceSql = $state('');
   let aggregateSourceColumns = $state.raw<ColumnInfo[]>([]);
+  let joinDataset = $state('');
+  let joinKeys = $state<JoinKey[]>([]);
+  let joinLeftColumns = $state<string[]>([]);
+  let joinRightColumns = $state<string[]>([]);
+  let saveJoinView = $state(false);
+  let joinViewName = $state('');
   let hiddenColumns = $state<string[]>([]);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
@@ -115,10 +123,12 @@
   let editorHost = $state<HTMLDivElement | null>(null);
   let sqlTrigger = $state<HTMLButtonElement | null>(null);
   let editorView: EditorView | null = null;
-  let queryMenuOpen = $state<'columns' | 'aggregate' | 'dedupe' | null>(null);
+  let queryMenuOpen = $state<'columns' | 'joins' | 'aggregate' | 'dedupe' | null>(null);
 
   let selectedNode = $derived(nodes.find((node) => node.id === selectedNodeId));
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
+  let joinRightDataset = $derived(datasets.find((dataset) => dataset.id === joinDataset));
+  let joinSql = $derived(currentDataset && joinRightDataset ? buildJoinSql(currentDataset, joinRightDataset, joinKeys, joinLeftColumns, joinRightColumns) : '');
   let totalPages = $derived(pageLimit(result?.total_pages ?? 0));
   let visibleColumns = $derived(result?.columns.filter((column) => !hiddenColumns.includes(column.name)) ?? []);
   let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
@@ -146,11 +156,43 @@
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
   function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
-  function syncQueryMenu(menu: 'columns' | 'aggregate' | 'dedupe', event: Event) {
+  function filterSummary(filter: FilterCondition): string {
+    const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most' };
+    if (filter.operator === 'is_null' || filter.operator === 'not_null') return `${filter.column} ${labels[filter.operator]}`;
+    const values = Array.isArray(filter.value) ? filter.value : [filter.value];
+    const text = `${values.slice(0, 3).map(String).join(', ')}${values.length > 3 ? `, +${values.length - 3} more` : ''}`;
+    return `${filter.column} ${labels[filter.operator]} ${text.length > 48 ? `${text.slice(0, 47)}…` : text}`;
+  }
+  function syncQueryMenu(menu: 'columns' | 'joins' | 'aggregate' | 'dedupe', event: Event) {
     const open = (event.currentTarget as HTMLDetailsElement).open;
     queryMenuOpen = open ? menu : queryMenuOpen === menu ? null : queryMenuOpen;
   }
   function clearAggregateDraft() { aggregateColumn = ''; aggregateColumnSearch = ''; aggregateColumns = []; aggregateMetrics = []; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
+  function clearJoinDraft() { joinDataset = ''; joinKeys = []; joinLeftColumns = []; joinRightColumns = []; saveJoinView = false; joinViewName = ''; if (queryMenuOpen === 'joins') queryMenuOpen = null; }
+  function selectJoinDataset(id: string) {
+    joinDataset = id;
+    const right = datasets.find((dataset) => dataset.id === id);
+    joinLeftColumns = [...(currentDataset?.columns ?? [])];
+    joinRightColumns = [...(right?.columns ?? [])];
+    const common = currentDataset?.columns.find((column) => right?.columns.includes(column)) ?? '';
+    joinKeys = [{ left: common, right: common }];
+  }
+  function updateJoinKey(index: number, side: keyof JoinKey, value: string) { joinKeys = joinKeys.map((key, item) => item === index ? { ...key, [side]: value } : key); }
+  function toggleJoinColumn(side: 'left' | 'right', column: string, checked: boolean) {
+    if (side === 'left') joinLeftColumns = checked ? [...joinLeftColumns, column] : joinLeftColumns.filter((item) => item !== column);
+    else joinRightColumns = checked ? [...joinRightColumns, column] : joinRightColumns.filter((item) => item !== column);
+  }
+  async function createJoinView() {
+    if (!joinSql) return;
+    const query = joinSql;
+    page = 1;
+    pageInput = '1';
+    sqlText = query;
+    queryMenuOpen = null;
+    closeSql(false);
+    await runSql(query);
+    if (saveJoinView && !sqlError && sqlBase === query) saveQuery(query, joinViewName);
+  }
   function addAggregateColumn(column: string) { if (!column || aggregateColumns.includes(column)) return; aggregateColumns = [...aggregateColumns, column]; aggregateColumn = ''; aggregateMetrics = ['count']; }
   function removeAggregateColumn(column: string) { const next = aggregateColumns.filter((item) => item !== column); aggregateColumns = next; aggregateMetrics = next.length ? ['count'] : []; }
   function toggleAggregateMetric(metric: AggregateMetric, checked: boolean) { aggregateMetrics = checked ? [...aggregateMetrics, metric] : aggregateMetrics.filter((item) => item !== metric); }
@@ -171,11 +213,11 @@
     catch { storageError = 'Saved queries could not be stored in this browser.'; }
   }
 
-  function saveQuery(value: string) {
+  function saveQuery(value: string, displayName = '') {
     const query = value.trim();
     if (!query) return;
     const firstLine = query.split(/\r?\n/, 1)[0].replace(/\s+/g, ' ').trim();
-    storeSavedQueries([...savedQueries, { id: crypto.randomUUID(), name: firstLine.slice(0, 64) || `Query ${savedQueries.length + 1}`, sql: query, nodeId: selectedNodeId, dataset: selectedDataset }]);
+    storeSavedQueries([...savedQueries, { id: crypto.randomUUID(), name: displayName.trim().slice(0, 64) || firstLine.slice(0, 64) || `Query ${savedQueries.length + 1}`, sql: query, nodeId: selectedNodeId, dataset: selectedDataset }]);
   }
 
   function deleteQuery(id: string) { storeSavedQueries(savedQueries.filter((query) => query.id !== id)); }
@@ -375,6 +417,7 @@
     dedupeColumns = [];
     dedupeDraft = [];
     clearAggregateDraft();
+    clearJoinDraft();
     hiddenColumns = [];
     lastHiddenColumn = null;
     shownColumnTypes = [];
@@ -398,6 +441,7 @@
     dedupeColumns = [];
     dedupeDraft = [];
     clearAggregateDraft();
+    clearJoinDraft();
     hiddenColumns = [];
     lastHiddenColumn = null;
     shownColumnTypes = [];
@@ -567,6 +611,8 @@
     await loadData();
   }
 
+  function addNullFilter(operator: 'is_null' | 'not_null') { filterOperator = operator; void addFilter(); }
+
   async function removeFilter(index: number) { filters = filters.filter((_, itemIndex) => itemIndex !== index); page = 1; await loadData(); }
   async function cycleSort(column: ColumnInfo) {
     const existing = sorts.find((sort) => sort.column === column.name);
@@ -579,6 +625,7 @@
   async function backToBuilder() {
     queryMode = 'builder';
     clearAggregateDraft();
+    clearJoinDraft();
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -799,7 +846,7 @@
                 inert={!!inspectorMode || tableExpanded}
                 showBuilder={canQuery}
                 {filters} {sorts} {dedupeColumns}
-                {activeSql} resultSql={result?.sql ?? ''}
+                {activeSql} {filterSummary}
                 onRemoveFilter={removeFilter} onRemoveSort={removeSort} onClearDedupe={clearDedupe}
                 onSaveQuery={() => saveQuery(result?.sql ?? '')} canSaveBuilderQuery={!!result?.sql}
                 onClearQuery={clearQuery}
@@ -827,6 +874,25 @@
                     {columnMenuItems} {hiddenColumns} {isColumnProtected}
                     visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
                   />
+                {/snippet}
+                {#snippet joinMenu()}
+                  {#if queryMode === 'builder'}
+                    <JoinMenuPopover
+                      open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
+                      datasets={datasets.filter((dataset) => dataset.id !== selectedDataset)}
+                      leftDataset={currentDataset} rightDataset={joinRightDataset}
+                      {joinDataset} onSelectDataset={selectJoinDataset}
+                      {joinKeys} onUpdateKey={updateJoinKey}
+                      onAddKey={() => joinKeys = [...joinKeys, { left: '', right: '' }]}
+                      onRemoveKey={(index) => joinKeys = joinKeys.filter((_, item) => item !== index)}
+                      {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
+                      onSelectAll={(side) => side === 'left' ? joinLeftColumns = [...(currentDataset?.columns ?? [])] : joinRightColumns = [...(joinRightDataset?.columns ?? [])]}
+                      onSelectNone={(side) => side === 'left' ? joinLeftColumns = [] : joinRightColumns = []}
+                      {saveJoinView} setSaveJoinView={(value) => saveJoinView = value}
+                      {joinViewName} setJoinViewName={(value) => joinViewName = value}
+                      onRun={createJoinView} canRun={!!joinSql} running={loadingData}
+                    />
+                  {/if}
                 {/snippet}
                 {#snippet aggregateMenu()}
                   <AggregateMenuPopover
@@ -923,6 +989,7 @@
                           {categoryTotal} {categoryHasMore} onLoadMore={() => loadCategoryValues(false)}
                           {selectedCategories} onToggleCategory={toggleCategory}
                           onSelectVisible={selectVisibleCategories} onClearSelected={() => selectedCategories = []}
+                          onAddNullFilter={addNullFilter}
                           {count}
                         />
                       {:else if inspectorMode === 'profile' && statsColumn}

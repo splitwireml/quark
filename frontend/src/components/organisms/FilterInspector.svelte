@@ -28,6 +28,7 @@
     onToggleCategory: (value: string, checked: boolean) => void;
     onSelectVisible: () => void;
     onClearSelected: () => void;
+    onAddNullFilter: (operator: 'is_null' | 'not_null') => void;
     count: (value: AggregateCount) => string;
   };
 
@@ -35,7 +36,7 @@
     column, isText, operators, operator, value, setOperator, setValue, onblurValue, valueInput = $bindable(null), onSubmitFilter,
     categorySearch, setCategorySearch, setCategoryInputRef, onSearchCategories,
     categoryValues, categoriesLoading, categoriesError, categoryTotal, categoryHasMore, onLoadMore,
-    selectedCategories, onToggleCategory, onSelectVisible, onClearSelected, count
+    selectedCategories, onToggleCategory, onSelectVisible, onClearSelected, onAddNullFilter, count
   }: Props = $props();
 
   function categoryInputRef(node: HTMLInputElement) {
@@ -55,6 +56,8 @@
     <div class="actions">
       <button type="button" onclick={onSelectVisible} disabled={categoriesLoading || categoryValues.length === 0}>Select visible</button>
       <button type="button" onclick={onClearSelected} disabled={selectedCategories.length === 0}>Clear</button>
+      <button type="button" onclick={() => onAddNullFilter('is_null')}>Is null</button>
+      <button type="button" onclick={() => onAddNullFilter('not_null')}>Isn't null</button>
       <span>{selectedCategories.length} selected</span>
     </div>
     {#if categoriesLoading && categoryValues.length === 0}

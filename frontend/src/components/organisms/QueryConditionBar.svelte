@@ -12,7 +12,7 @@
     sorts: SortCondition[];
     dedupeColumns: string[];
     activeSql: string;
-    resultSql: string;
+    filterSummary: (filter: FilterCondition) => string;
     onRemoveFilter: (index: number) => void;
     onRemoveSort: (column: string) => void;
     onClearDedupe: () => void;
@@ -33,17 +33,18 @@
     setSqlTrigger: (el: HTMLButtonElement | null) => void;
     storageError: string;
     columnsMenu: Snippet;
+    joinMenu: Snippet;
     aggregateMenu: Snippet;
     dedupeMenu: Snippet;
   };
 
   let {
-    inert = false, showBuilder, filters, sorts, dedupeColumns, activeSql, resultSql,
+    inert = false, showBuilder, filters, sorts, dedupeColumns, activeSql, filterSummary,
     onRemoveFilter, onRemoveSort, onClearDedupe, onSaveQuery, canSaveBuilderQuery, onClearQuery,
     isSqlMode, onBackToFullTable, onSaveView, onBackToBuilder,
     columnSearch, setColumnSearch, onFindColumn, onColumnSearchKeydown, columnMatchCount,
     sqlOpen, onToggleSql, setSqlTrigger, storageError,
-    columnsMenu, aggregateMenu, dedupeMenu
+    columnsMenu, joinMenu, aggregateMenu, dedupeMenu
   }: Props = $props();
 
   function trigger(node: HTMLButtonElement) {
@@ -54,12 +55,13 @@
 
 <section class="bar" aria-label="Query controls" {inert}>
   {@render columnsMenu()}
+  {@render joinMenu()}
   {#if showBuilder}
     {@render aggregateMenu()}
     {@render dedupeMenu()}
     <div class="tokens" aria-label="Active query conditions">
       {#each filters as filter, index (filter.column + index)}
-        <Chip onRemove={() => onRemoveFilter(index)} removeLabel={`Remove filter ${filter.column}`} title={resultSql}><b>{filter.column}</b></Chip>
+        <Chip onRemove={() => onRemoveFilter(index)} removeLabel={`Remove filter ${filter.column}`} title={filterSummary(filter)}><b>{filter.column}</b></Chip>
       {/each}
       {#each sorts as sort, index (sort.column)}
         <Chip tone="accent" onRemove={() => onRemoveSort(sort.column)} removeLabel={`Remove sort ${sort.column}`}><b>{index + 1}. {sort.column}</b> {sort.direction === 'asc' ? '↑' : '↓'}</Chip>
