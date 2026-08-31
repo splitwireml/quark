@@ -92,7 +92,7 @@
     <Button
       type="button"
       class="trigger"
-      style="width: 100%; justify-content: space-between;"
+      style="width: 100%; min-height: 32px; position: relative;"
       aria-label={`${label}: ${selected?.label ?? placeholder}`}
       aria-haspopup="listbox"
       aria-expanded={open}
@@ -134,7 +134,7 @@
   .label { font-size: 11px; color: var(--muted); }
   .trigger-host { display: flex; }
   .placeholder { color: var(--placeholder); }
-  .chevron { margin-left: 8px; color: var(--faint); }
+  .chevron { position: absolute; right: 10px; color: var(--faint); }
   .popover {
     position: absolute;
     top: calc(100% + 5px);

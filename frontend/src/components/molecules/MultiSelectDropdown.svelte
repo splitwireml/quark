@@ -94,7 +94,7 @@
     <Button
       type="button"
       class="trigger"
-      style="width: 100%; justify-content: space-between;"
+      style="width: 100%; min-height: 32px; position: relative;"
       aria-label={`${label}: ${summary}`}
       aria-haspopup="listbox"
       aria-expanded={open}
@@ -148,7 +148,7 @@
   .trigger-host { display: flex; }
   .summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .placeholder { color: var(--placeholder); }
-  .chevron { margin-left: 8px; color: var(--faint); }
+  .chevron { position: absolute; right: 10px; color: var(--faint); }
   .popover {
     position: absolute;
     top: calc(100% + 5px);
