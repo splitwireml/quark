@@ -154,7 +154,7 @@
   .trigger.active { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
   .popover {
     position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
-    width: min(620px, calc(100vw - 32px)); max-height: min(80vh, 680px); overflow-y: auto;
+    width: min(620px, calc(100vw - 32px)); min-height: min(600px, 80vh); max-height: min(80vh, 680px); overflow-y: auto;
     padding: 12px; border-radius: var(--radius-xl); background: var(--surface);
     border: 1px solid var(--line-strong); box-shadow: var(--shadow-popover-wide);
     display: flex; flex-direction: column; gap: 10px;
