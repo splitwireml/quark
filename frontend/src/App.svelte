@@ -249,8 +249,8 @@
   }
 
   function closeSql(restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; if (restoreFocus) tick().then(() => sqlTrigger?.focus()); }
-  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); railOpen = false; } tableExpanded = !tableExpanded; }
-  function resetSql(dataset: DatasetInfo | undefined) { closeSql(); sqlText = seedSql(dataset); sqlBase = ''; activeSql = ''; sqlError = ''; }
+  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; } tableExpanded = !tableExpanded; }
+  function resetSql(dataset: DatasetInfo | undefined) { closeSql(); queryMode = 'builder'; sqlText = seedSql(dataset); sqlBase = ''; activeSql = ''; sqlError = ''; }
 
   async function runSavedQuery(saved: SavedQuery) {
     workspaceTab = 'data';
@@ -360,6 +360,7 @@
   }
 
   async function selectNode(id: string, preferredDataset = '') {
+    if (id === selectedNodeId && result) { railOpen = false; return; }
     const datasetId = ++datasetRequestId;
     requestId++;
     closeInspector();
@@ -425,8 +426,8 @@
   }
 
   async function createAggregateView() {
-    const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql;
-    const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns;
+    const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql || sqlBase || activeSql;
+    const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? [];
     if (!selectedAggregateColumn || aggregateMetrics.length === 0 || !source) return;
     const query = buildAggregateSql(source, aggregateColumns, aggregateMetrics);
     if (!query) return;
@@ -725,7 +726,7 @@
   function showBin(bin: { lower: number | string; upper: number | string; count: AggregateCount }) { binReadout = `${binLabel(bin)} · ${count(bin.count)} rows`; }
 
   // -- view-layer adapters for the atomic component split below; no behavior change --
-  let canQuery = $derived(queryMode === 'builder' || !!aggregateSourceSql);
+  let canQuery = $derived(!!result);
   let aggregateMenuLabel = $derived(queryMode === 'sql' ? 'Aggregate builder' : 'Aggregate');
   function typeToggleDisabled(type: string): boolean { return isTypeShown(type) && (columnTypes.length === 1 || (shownColumnTypes.length === 1 && shownColumnTypes[0] === type)); }
   function setCategorySearchLive(value: string) { categorySearch = value; loadCategoryValues(true); }
@@ -805,7 +806,7 @@
                 isSqlMode={queryMode === 'sql'}
                 onBackToFullTable={backToBuilder}
                 onSaveView={() => saveQuery(activeSql)}
-                onBackToBuilder={() => { page = 1; pageInput = '1'; loadData(); }}
+                onBackToBuilder={backToBuilder}
                 {columnSearch} setColumnSearch={(value) => columnSearch = value}
                 onFindColumn={findColumn} onColumnSearchKeydown={cycleColumnMatch}
                 columnMatchCount={columnMatches.length}
@@ -859,6 +860,12 @@
                 />
               {/if}
               <div class:expanded={tableExpanded} class="data-stage">
+                {#if tableExpanded}
+                  <div class="expanded-toolbar">
+                    <span>Expanded table</span>
+                    <button onclick={toggleTableExpanded}>Back <kbd>Esc</kbd></button>
+                  </div>
+                {/if}
                 <section class="table-pane {rowDensity}" aria-label="Dataset rows" inert={!!inspectorMode}>
                   <div class="table-card" aria-busy={loadingData}>
                     {#if loadingData && !result}
@@ -963,7 +970,10 @@
 <style>
   .workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .data-stage { flex: 1; min-height: 0; display: flex; position: relative; }
-  .data-stage.expanded { position: fixed; inset: 20px; z-index: 6; }
+  .data-stage.expanded { position: fixed; inset: 20px; z-index: 6; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-panel); }
+  .expanded-toolbar { flex: none; height: 40px; padding: 0 10px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12px; font-weight: 600; }
+  .expanded-toolbar button { height: 28px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--surface); font-size: 12px; }
+  .expanded-toolbar kbd { margin-left: 5px; font: 10px var(--font-mono); color: var(--faint); }
   .table-pane { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }
   .table-pane.compact { --row-height: 26px; }
   .table-pane.comfortable { --row-height: 42px; }
