@@ -480,9 +480,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(422, "Join key counts must match")
         if len(set(request.left_keys)) != len(request.left_keys) or len(set(request.right_keys)) != len(request.right_keys):
             raise HTTPException(422, "Join keys must be unique")
+        if request.left.node_id not in nodes or request.right.node_id not in nodes:
+            raise HTTPException(404, "Node not found")
 
-        left_con = get_connection(request.left.node_id)
-        right_con = get_connection(request.right.node_id)
+        left_con = connections[request.left.node_id]
+        right_con = connections[request.right.node_id]
         left_item = dataset_for(left_con, request.left.dataset)
         right_item = dataset_for(right_con, request.right.dataset)
         left_original, left_columns = metadata(left_con, request.left.dataset)

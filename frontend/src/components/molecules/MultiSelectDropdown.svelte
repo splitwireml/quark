@@ -20,7 +20,7 @@
   let triggerHost: HTMLDivElement;
   let listbox = $state<HTMLDivElement>();
   let selectedLabels = $derived(selected.map((value) => options.find((option) => option.value === value)?.label ?? value));
-  let summary = $derived(selectedLabels.length === 0 ? placeholder : selectedLabels.length === 1 ? selectedLabels[0] : `${selectedLabels.length} selected`);
+  let summary = $derived(selectedLabels.length === 0 ? placeholder : selectedLabels.join(' + '));
 
   function optionElements() {
     return listbox?.querySelectorAll<HTMLElement>('[role="option"]') ?? [];
@@ -98,12 +98,12 @@
       aria-label={`${label}: ${summary}`}
       aria-haspopup="listbox"
       aria-expanded={open}
-      title={selectedLabels.join(', ') || undefined}
+      title={selectedLabels.join(' + ') || undefined}
       {disabled}
       onclick={() => open ? close() : show()}
       onkeydown={onTriggerKeydown}
     >
-      <span class:placeholder={selected.length === 0}>{summary}</span>
+      <span class="summary" class:placeholder={selected.length === 0}>{summary}</span>
       <span class="chevron" aria-hidden="true">⌄</span>
     </Button>
   </div>
@@ -146,6 +146,7 @@
   .field { position: relative; display: flex; min-width: 0; flex-direction: column; gap: 5px; }
   .label { font-size: 11px; color: var(--muted); }
   .trigger-host { display: flex; }
+  .summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .placeholder { color: var(--placeholder); }
   .chevron { margin-left: 8px; color: var(--faint); }
   .popover {

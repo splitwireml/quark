@@ -1010,6 +1010,11 @@ def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
         f"/api/nodes/{second_workspace}/sql",
         json={"sql": 'SELECT count(*) AS n FROM "left_source"."first"'},
     ).json()["rows"] == [{"n": 1}]
+    workspace_dataset = dataset(client, {"id": second_workspace}, "first", "left_source")
+    assert client.post("/api/join-workspaces", json=join_payload(
+        {"id": second_workspace}, workspace_dataset,
+        third, dataset(client, third, "third"), ["id"], ["id"],
+    )).status_code == 404
     assert {node["id"] for node in client.get("/api/nodes").json()} == {
         first["id"], second["id"], third["id"],
     }

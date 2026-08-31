@@ -1,6 +1,7 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
   import Checkbox from '../atoms/Checkbox.svelte';
+  import TextInput from '../atoms/TextInput.svelte';
   import MultiSelectDropdown from '../molecules/MultiSelectDropdown.svelte';
   import SelectDropdown from '../molecules/SelectDropdown.svelte';
   import type { AggregateCount, DatasetInfo, JoinRelationship, JoinWorkspaceResponse, NodeInfo } from '../../lib/types';
@@ -133,7 +134,7 @@
       {#if crossSource}<p class="session-note">Session-only cross-source view</p>{/if}
       {#if saveJoinView && !crossSource}
         <label class="field">Optional view name
-          <input type="text" maxlength="64" value={joinViewName} oninput={(event) => setJoinViewName((event.currentTarget as HTMLInputElement).value)} placeholder="Joined view" />
+          <TextInput type="text" maxlength="64" value={joinViewName} oninput={(event: Event) => setJoinViewName((event.currentTarget as HTMLInputElement).value)} placeholder="Joined view" />
         </label>
       {/if}
     {/if}
@@ -162,7 +163,6 @@
   header span { font: 10px var(--font-mono); color: var(--faint); white-space: nowrap; }
   .selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
-  .field input { height: 28px; min-width: 0; padding: 0 8px; border-radius: var(--radius-md); border: 1px solid var(--control-border); font-size: 12px; }
   .keys { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); }
   legend { padding: 0 4px; font-size: 11px; font-weight: 600; color: var(--muted); }
   .key-selectors { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: end; gap: 7px; }
@@ -178,7 +178,7 @@
   .preview-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .preview { padding: 9px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-inset); }
   .preview header { margin-bottom: 8px; }
-  .preview .risk { padding: 2px 6px; border-radius: 999px; background: #FEF3C7; color: #92400E; }
+  .preview .risk { padding: 2px 6px; border: 1px solid var(--warning-fill); border-radius: 999px; color: var(--warning); }
   dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
   dl div { min-width: 0; }
   dt { margin-bottom: 2px; font-size: 10px; color: var(--muted); }
