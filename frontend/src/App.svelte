@@ -6,12 +6,28 @@
   import { keymap } from '@codemirror/view';
   import * as api from './lib/api';
   import { buildAggregateSql } from './lib/aggregate-sql';
-  import type { AggregateCount, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, FilterCondition, FilterOperator, NodeInfo, QueryResponse, SortCondition, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DistributionMode, FilterCondition, FilterOperator, NodeInfo, QueryResponse, RowDensity, SavedQuery, SortCondition, WorkbookPreview } from './lib/types';
 
-  type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
-  type SavedQuery = { id: string; name: string; sql: string; nodeId: string; dataset: string };
-  type RowDensity = 'compact' | 'default' | 'comfortable';
-  type DistributionMode = 'count' | 'percent';
+  import Button from './components/atoms/Button.svelte';
+  import TitleBar from './components/organisms/TitleBar.svelte';
+  import SourceRail from './components/organisms/SourceRail.svelte';
+  import SourceDisclosure from './components/organisms/SourceDisclosure.svelte';
+  import WelcomeScreen from './components/organisms/WelcomeScreen.svelte';
+  import DatasetHead from './components/organisms/DatasetHead.svelte';
+  import DatasetTabsBar from './components/organisms/DatasetTabsBar.svelte';
+  import SavedQueriesPane from './components/organisms/SavedQueriesPane.svelte';
+  import QueryConditionBar from './components/organisms/QueryConditionBar.svelte';
+  import ColumnsMenuPopover from './components/organisms/ColumnsMenuPopover.svelte';
+  import AggregateMenuPopover from './components/organisms/AggregateMenuPopover.svelte';
+  import DedupeMenuPopover from './components/organisms/DedupeMenuPopover.svelte';
+  import SqlEditorPanel from './components/organisms/SqlEditorPanel.svelte';
+  import DataGridTable from './components/organisms/DataGridTable.svelte';
+  import PaginationFooter from './components/organisms/PaginationFooter.svelte';
+  import InspectorPanel from './components/organisms/InspectorPanel.svelte';
+  import FilterInspector from './components/organisms/FilterInspector.svelte';
+  import ProfileInspector from './components/organisms/ProfileInspector.svelte';
+  import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
+  import AppShell from './components/templates/AppShell.svelte';
 
   const pageSizes = [50, 100, 250, 500, 1000];
   const savedQueriesKey = 'quark.savedQueries';
@@ -233,8 +249,8 @@
   }
 
   function closeSql(restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; if (restoreFocus) tick().then(() => sqlTrigger?.focus()); }
-  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); railOpen = false; } tableExpanded = !tableExpanded; }
-  function resetSql(dataset: DatasetInfo | undefined) { closeSql(); sqlText = seedSql(dataset); sqlBase = ''; activeSql = ''; sqlError = ''; }
+  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; } tableExpanded = !tableExpanded; }
+  function resetSql(dataset: DatasetInfo | undefined) { closeSql(); queryMode = 'builder'; sqlText = seedSql(dataset); sqlBase = ''; activeSql = ''; sqlError = ''; }
 
   async function runSavedQuery(saved: SavedQuery) {
     workspaceTab = 'data';
@@ -344,6 +360,7 @@
   }
 
   async function selectNode(id: string, preferredDataset = '') {
+    if (id === selectedNodeId && result) { railOpen = false; return; }
     const datasetId = ++datasetRequestId;
     requestId++;
     closeInspector();
@@ -409,8 +426,8 @@
   }
 
   async function createAggregateView() {
-    const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql;
-    const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns;
+    const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql || sqlBase || activeSql;
+    const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? [];
     if (!selectedAggregateColumn || aggregateMetrics.length === 0 || !source) return;
     const query = buildAggregateSql(source, aggregateColumns, aggregateMetrics);
     if (!query) return;
@@ -707,128 +724,266 @@
   function rangeEnd(total: AggregateCount): string { const end = page * pageSize; return (isSafeCount(total) ? Math.min(end, Number(total)) : end).toLocaleString(); }
   function binLabel(bin: { lower: number | string; upper: number | string }): string { return `${compact(bin.lower)}–${compact(bin.upper)}`; }
   function showBin(bin: { lower: number | string; upper: number | string; count: AggregateCount }) { binReadout = `${binLabel(bin)} · ${count(bin.count)} rows`; }
+
+  // -- view-layer adapters for the atomic component split below; no behavior change --
+  let canQuery = $derived(!!result);
+  let aggregateMenuLabel = $derived(queryMode === 'sql' ? 'Aggregate builder' : 'Aggregate');
+  function typeToggleDisabled(type: string): boolean { return isTypeShown(type) && (columnTypes.length === 1 || (shownColumnTypes.length === 1 && shownColumnTypes[0] === type)); }
+  function setCategorySearchLive(value: string) { categorySearch = value; loadCategoryValues(true); }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
-<div class:rail-collapsed={railCollapsed} class="app-shell">
-  <header class="topbar" inert={!!inspectorMode || tableExpanded}>
-    <button class="menu-button" aria-label="Open sources" aria-expanded={railOpen} onclick={() => railOpen = true}>☰</button>
-    <button class="rail-toggle" aria-label={railCollapsed ? 'Expand sources sidebar' : 'Collapse sources sidebar'} aria-expanded={!railCollapsed} onclick={() => railCollapsed = !railCollapsed}>☰</button>
-    <div class="brand"><span aria-hidden="true">Q</span><strong>Quark</strong></div>
-    <nav class="breadcrumbs" aria-label="Current location"><span>Sources</span><b>{selectedNode?.name ?? 'Choose a source'}</b>{#if currentDataset}<span>/</span><b>{currentDataset.name}</b>{/if}</nav>
-    <div class="connection"><span class="status-dot" aria-hidden="true"></span>Connected</div>
-  </header>
 
-  <div class="shell">
-    <aside class:open={railOpen} class="rail" aria-label="Sources" inert={!!inspectorMode || tableExpanded}>
-      <div class="rail-head">
-        <button class="primary-button" aria-expanded={sourceOpen} onclick={() => sourceOpen = !sourceOpen}>Add source</button>
-        {#if sourceOpen}
-          <div class="source-disclosure">
-            <label class="upload-button" class:disabled={mutating}>Upload file<input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={upload} disabled={mutating} /></label>
-            <form onsubmit={(event) => { event.preventDefault(); attach(); }}>
-              <label for="database-path">Attach database path</label>
-              <div class="input-row"><input id="database-path" bind:value={attachPath} placeholder="/data/example.duckdb" disabled={mutating} /><button type="submit" disabled={mutating || !attachPath.trim()}>Attach</button></div>
-            </form>
-          </div>
-        {/if}
-      </div>
-      <nav class="nodes" aria-label="Available sources">
-        <div class="section-title"><h2>Sources</h2><span>{nodes.length}</span></div>
-        {#if loadingNodes}<p class="rail-state">Loading sources…</p>
-        {:else if nodes.length === 0}<p class="rail-state">No active sources yet.</p>
-        {:else}{#each nodes as node (node.id)}<button class:active={node.id === selectedNodeId} aria-current={node.id === selectedNodeId ? 'page' : undefined} onclick={() => selectNode(node.id)}><span class="status-dot" aria-hidden="true"></span><span><strong>{node.name}</strong><small>{node.kind}</small></span></button>{/each}{/if}
-      </nav>
-      <footer><span class="status-dot" aria-hidden="true"></span>Backend connected</footer>
-    </aside>
-    {#if railOpen}<button class="rail-backdrop" aria-label="Close sources" onclick={() => railOpen = false}></button>{/if}
+<AppShell liveSummary={querySummary}>
+  {#snippet titlebar()}
+    <TitleBar
+      {selectedNode} {currentDataset} {railCollapsed}
+      inert={!!inspectorMode || tableExpanded}
+      onToggleRailCollapsed={() => railCollapsed = !railCollapsed}
+      onOpenRail={() => railOpen = true}
+    />
+  {/snippet}
 
+  {#snippet rail()}
+    <SourceRail
+      {nodes} {selectedNodeId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen}
+      inert={!!inspectorMode || tableExpanded}
+      onSelectNode={(id) => selectNode(id)}
+      onToggleSource={() => sourceOpen = !sourceOpen}
+      onCloseRail={() => railOpen = false}
+    >
+      {#snippet disclosure()}
+        <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} />
+      {/snippet}
+    </SourceRail>
+  {/snippet}
+
+  {#snippet main()}
     <main>
       {#if !selectedNodeId}
-        <section class="welcome"><div class="welcome-icon">Q</div><h1>Explore local data</h1><p>Open a local file or a read-only DuckDB database. Quark keeps the work on this machine and loads only the page you are viewing.</p><ol class="onboarding-steps"><li><b>1. Add a source</b><span>CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX, DuckDB, or DB</span></li><li><b>2. Choose a dataset</b><span>Tables and views appear after the source opens</span></li><li><b>3. Inspect the data</b><span>Filter, profile, hide columns, or dedupe by selected keys</span></li></ol>{#if error}<div class="error" role="alert"><div><strong>Could not load Quark</strong><p>{error}</p></div><button onclick={loadNodes}>Retry</button></div>{/if}<label class="primary-button">Choose a file<input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={upload} disabled={mutating} /></label><details class="onboarding-attach"><summary>Attach a local DuckDB database</summary><form onsubmit={(event) => { event.preventDefault(); attach(); }}><label for="onboarding-database-path">Database path<input id="onboarding-database-path" bind:value={attachPath} placeholder="/data/example.duckdb" disabled={mutating} /></label><button class="secondary-button" type="submit" disabled={mutating || !attachPath.trim()}>Attach read-only database</button></form></details></section>
+        <WelcomeScreen {error} {mutating} onUpload={upload} onRetry={loadNodes}>
+          {#snippet attachForm()}
+            <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} idPrefix="onboarding-database-path" />
+          {/snippet}
+        </WelcomeScreen>
       {:else}
         <section class="workspace">
-          <header class="dataset-head" inert={!!inspectorMode || tableExpanded}>
-            <div><h1>{workspaceTab === 'queries' ? 'Saved queries' : currentDataset?.name ?? selectedNode?.name}</h1>{#if workspaceTab === 'data' && result}<p class="dataset-meta"><span>{count(result.total_rows)} rows</span><span>{compact(result.elapsed_ms)} ms</span></p>{/if}</div>
-            {#if workspaceTab === 'data'}<button class="icon-button" onclick={loadActiveData} disabled={loadingData} aria-label="Refresh data" title="Refresh data">↻</button>{/if}
-          </header>
-          <nav class:table-expanded={tableExpanded} class="dataset-tabs" aria-label="Datasets and saved queries">{#each datasets as dataset (dataset.id)}<button class:active={workspaceTab === 'data' && dataset.id === selectedDataset} aria-current={workspaceTab === 'data' && dataset.id === selectedDataset ? 'page' : undefined} disabled={tableExpanded} onclick={() => selectDataset(dataset.id)}>{dataset.name}</button>{/each}<button class:active={workspaceTab === 'queries'} aria-current={workspaceTab === 'queries' ? 'page' : undefined} disabled={tableExpanded} onclick={() => { closeSql(); workspaceTab = 'queries'; }}>Queries ({savedQueries.length})</button><div class="table-toolbar"><div role="group" aria-label="Row density"><button class="secondary-button" aria-pressed={rowDensity === 'compact'} onclick={() => rowDensity = 'compact'}>Compact</button><button class="secondary-button" aria-pressed={rowDensity === 'default'} onclick={() => rowDensity = 'default'}>Default</button><button class="secondary-button" aria-pressed={rowDensity === 'comfortable'} onclick={() => rowDensity = 'comfortable'}>Comfortable</button></div><button class="secondary-button" aria-label={tableExpanded ? 'Exit expanded table view' : 'Expand table to fill viewport'} onclick={toggleTableExpanded}>{tableExpanded ? 'Back' : 'Expand table'}</button></div></nav>
+          <DatasetHead
+            title={workspaceTab === 'queries' ? 'Saved queries' : (currentDataset?.name ?? selectedNode?.name ?? '')}
+            showMeta={workspaceTab === 'data' && !!result}
+            rows={result ? count(result.total_rows) : ''}
+            ms={result ? compact(result.elapsed_ms) : ''}
+            showRefresh={workspaceTab === 'data'}
+            onRefresh={loadActiveData}
+            {loadingData}
+            inert={!!inspectorMode || tableExpanded}
+          />
+          <DatasetTabsBar
+            {datasets} {selectedDataset} {workspaceTab} {tableExpanded} {rowDensity}
+            savedQueryCount={savedQueries.length}
+            onSelectDataset={(id) => selectDataset(id)}
+            onSelectQueries={() => { closeSql(); workspaceTab = 'queries'; }}
+            setRowDensity={(density) => rowDensity = density}
+            onToggleExpanded={toggleTableExpanded}
+          />
           {#if workspaceTab === 'queries'}
-            <section class="queries-pane" aria-label="Saved queries">
-              {#if storageError}<p class="sql-error" role="alert">{storageError}</p>{/if}
-              {#each savedQueries as saved (saved.id)}<article><div><h2>{saved.name}</h2><pre>{saved.sql}</pre></div><footer><button class="secondary-button" onclick={() => runSavedQuery(saved)}>Run</button><button class="secondary-button" aria-label={`Delete saved query ${saved.name}`} onclick={() => deleteQuery(saved.id)}>Delete</button></footer></article>{:else}<div class="empty"><strong>No saved queries</strong><p>Save a builder query or SQL statement to keep it in this browser.</p></div>{/each}
-            </section>
+            <SavedQueriesPane {savedQueries} {storageError} onRun={runSavedQuery} onDelete={deleteQuery} />
           {:else}
-          {#if error}<div class="error" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => selectedDataset ? loadData() : loadNodes()}>Retry</button></div>{/if}
-          {#if datasets.length === 0 && !error}<div class="empty"><strong>No datasets found</strong><p>This source has no tables or views to browse.</p></div>
-          {:else if selectedDataset}
-            <section class="querybar" aria-label="Query controls" inert={!!inspectorMode || tableExpanded}>
-              <details class="query-details columns-menu" open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}><summary>Columns</summary><div class="detail-list"><header><strong>Columns</strong><span>{visibleColumns.length} of {result?.columns.length ?? 0} shown</span></header><label class="columns-menu-search" for="column-menu-search">Search columns<input id="column-menu-search" type="search" bind:value={columnMenuSearch} placeholder="Search columns" /></label><div class="column-type-table" role="group" aria-label="Column types"><div><span>Type</span><span>Columns</span></div>{#each columnTypes as type (type)}<button type="button" aria-pressed={isTypeShown(type)} aria-label={`${type}: ${columnTypeCounts[type] ?? 0} columns`} disabled={isTypeShown(type) && (columnTypes.length === 1 || shownColumnTypes.length === 1 && shownColumnTypes[0] === type)} onclick={() => toggleShownType(type, !isTypeShown(type))}><span>{type}</span><span>{columnTypeCounts[type] ?? 0}</span></button>{/each}</div><div class="columns-menu-actions"><button type="button" onclick={() => hideColumnsAtNullFraction(1)}>Hide fully empty</button><label>Hide columns with at least <input type="number" min="0" max="100" step="1" bind:value={nullThreshold} aria-label="Null percentage" />% null</label><button type="button" class="secondary-button" onclick={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}>Apply threshold</button><button type="button" class="secondary-button" onclick={showAllColumns} disabled={hiddenColumns.length === 0}>Show all columns</button></div><div class="columns-menu-list">{#each columnMenuItems as column (column.name)}<label><input type="checkbox" checked={!hiddenColumns.includes(column.name)} disabled={isColumnProtected(column.name) || (!hiddenColumns.includes(column.name) && visibleColumns.length <= 1)} onchange={(event) => toggleColumn(column.name, event.currentTarget.checked)} /> <span title={column.name}>{column.name}</span><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></label>{:else}<p class="muted">No matching columns.</p>{/each}</div></div></details>
-              {#if queryMode === 'builder' || aggregateSourceSql}
-                <details class="query-details aggregate-menu" open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}><summary>{queryMode === 'sql' ? 'Aggregate builder' : 'Aggregate'}</summary><div class="detail-list"><label>Find a column<input type="search" bind:value={aggregateColumnSearch} placeholder="Type to filter columns" /></label><label>Add column<select value={aggregateColumn} onchange={(event) => addAggregateColumn(event.currentTarget.value)}><option value="">Choose index or aggregate column</option>{#each aggregateColumnMatches as column (column.name)}{#if !aggregateColumns.includes(column.name)}<option value={column.name}>{column.name}</option>{/if}{/each}</select></label>{#if aggregateColumns.length}<div class="aggregate-columns" aria-label="Aggregate columns">{#each aggregateColumns as column, index (column)}<span class="aggregate-column"><b>{index < aggregateColumns.length - 1 ? 'Index' : aggregateColumns.length === 1 ? 'Index' : 'Aggregate'}</b><span title={column}>{column}</span><button type="button" aria-label={`Remove aggregate column ${column}`} onclick={() => removeAggregateColumn(column)}>×</button></span>{/each}</div><p class="aggregate-note">Earlier columns are indexes. One column + Count shows its distribution.</p>{#if selectedAggregateColumn}<fieldset class="aggregate-metrics"><legend>Metrics for {selectedAggregateColumn.name}</legend>{#each availableAggregateMetrics as metric (metric.value)}<label><input type="checkbox" checked={aggregateMetrics.includes(metric.value)} onchange={(event) => toggleAggregateMetric(metric.value, event.currentTarget.checked)} /> {metric.label}</label>{/each}</fieldset>{/if}<button type="button" class="primary-button" onclick={createAggregateView} disabled={loadingData || !selectedAggregateColumn || aggregateMetrics.length === 0}>{loadingData ? 'Creating…' : 'Create view'}</button>{/if}</div></details>
-                <details class="query-details" open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}><summary>Dedupe{dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}</summary><div class="detail-list">{#each visibleColumns as column (column.name)}<label><input type="checkbox" checked={dedupeDraft.includes(column.name)} onchange={(event) => toggleDedupe(column.name, event.currentTarget.checked)} /> {column.name}</label>{/each}<div><button type="button" class="secondary-button" onclick={applyDedupe} disabled={dedupeDraft.length === 0}>Apply</button><button type="button" class="secondary-button" onclick={clearDedupe} disabled={dedupeColumns.length === 0 && dedupeDraft.length === 0}>Clear</button></div></div></details>
-                <div class="tokens" aria-label="Active query conditions">{#each filters as filter, index (filter)}<span class="token" title={result?.sql ?? ''}><b>{filter.column}</b><button aria-label={`Remove filter ${filter.column}`} onclick={() => removeFilter(index)}>×</button></span>{/each}{#each sorts as sort, index (sort.column)}<span class="token sort-token"><b>{index + 1}. {sort.column}</b> {sort.direction}<button aria-label={`Remove sort ${sort.column}`} onclick={() => removeSort(sort.column)}>×</button></span>{/each}{#if dedupeColumns.length}<span class="token"><b>Dedupe</b> <span title={dedupeColumns.join(', ')}>{dedupeColumns.join(', ')}</span><button aria-label="Clear dedupe keys" onclick={clearDedupe}>×</button></span>{/if}{#if filters.length === 0 && sorts.length === 0 && dedupeColumns.length === 0}<span class="muted">No filters, sorts, or dedupe applied</span>{/if}</div>
-                {#if filters.length || sorts.length || dedupeColumns.length}<button class="secondary-button" onclick={() => saveQuery(result?.sql ?? '')} disabled={!result?.sql}>Save query</button><button class="clear-query" onclick={clearQuery}>Clear query</button>{/if}
-                {#if queryMode === 'sql'}<button class="secondary-button" onclick={backToBuilder}>Back to full table</button>{/if}
-              {:else}<div class="tokens"><span class="token" title={activeSql}>SQL</span></div><button class="secondary-button" onclick={() => saveQuery(activeSql)} disabled={!activeSql}>Save view</button><button class="secondary-button" onclick={() => { page = 1; pageInput = '1'; loadData(); }}>Back to builder</button>{/if}
-              <input class="column-search" type="search" bind:value={columnSearch} oninput={findColumn} onkeydown={cycleColumnMatch} placeholder="Find column" aria-label="Find column" />
-              <span class="column-search-count" aria-live="polite" aria-label={`${columnMatches.length} matching columns`}>{columnMatches.length}</span>
-              <button bind:this={sqlTrigger} class="secondary-button" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={() => sqlOpen ? closeSql() : openSql()}>SQL</button>
-              {#if storageError}<span class="query-error" role="alert">{storageError}</span>{/if}
-            </section>
-            {#if sqlOpen}<aside class="sql-panel" aria-labelledby="sql-editor-title"><header><div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div><button class="icon-button" onclick={() => closeSql()} aria-label="Close SQL editor" title="Close SQL editor">×</button></header><div bind:this={editorHost} class:has-error={!!sqlError} class="sql-editor"></div>{#if sqlError}<p class="sql-error" role="alert">{sqlError}</p>{/if}<footer><button class="secondary-button" onclick={() => saveQuery(sqlText)} disabled={!sqlText.trim()}>Save</button><button class="primary-button" title="Run SQL (Shift+Enter)" onclick={() => { page = 1; pageInput = '1'; runSql(); }} disabled={loadingData || !sqlText.trim()}>{loadingData ? 'Running…' : 'Run SQL'}</button></footer></aside>{/if}
-            <div class:expanded={tableExpanded} class="data-stage">
-              <section class="table-pane {rowDensity}" aria-label="Dataset rows" inert={!!inspectorMode}>
-                <div class="table-card" aria-busy={loadingData}>
-                  {#if loadingData && !result}<div class="table-state"><span class="spinner"></span>Loading rows…</div>
-                  {:else if result && result.rows.length === 0}<div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
-                  {:else if result}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><div bind:this={tableScroll} class="table-scroll" role="region" tabindex="0" aria-label="Scrollable dataset table"><table><caption class="sr-only">Rows from {currentDataset?.name ?? selectedDataset}</caption><thead><tr>{#each visibleColumns as column (column.name)}<th data-column={column.name} tabindex="-1" scope="col" style:min-width={`${Math.max(168, Math.min(360, column.name.length * 9 + (column.profile_kind ? 150 : 118)))}px`}><div class="column-head"><div class="column-label"><strong title={column.name}>{#each columnLabelParts(column.name) as part, index (`${part.match}-${part.text}-${index}`)}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</strong><small>{column.type} · {(column.null_fraction * 100).toFixed(1)}% null</small></div><div class="header-actions">{#if queryMode === 'builder' || aggregateSourceSql}<button class:sorted={sorts.some((sort) => sort.column === column.name)} onclick={() => cycleSort(column)} aria-label={`Sort ${column.name}`} title={`Sort ${column.name}`}>{sortFor(column.name)?.direction === 'asc' ? '↑' : sortFor(column.name)?.direction === 'desc' ? '↓' : '↕'}</button><button class:filtered={filters.some((filter) => filter.column === column.name)} onclick={(event) => openFilter(column, event.currentTarget as HTMLButtonElement)} aria-label={`Filter ${column.name}`} title={`Filter ${column.name}`}>⌕</button>{#if column.profile_kind}<button onclick={(event) => openStats(column, event.currentTarget as HTMLButtonElement)} aria-label={`Profile column ${column.name}`} title={`Profile column ${column.name}`}>▥</button>{/if}{/if}<button onclick={() => hideColumn(column.name)} disabled={isColumnProtected(column.name) || visibleColumns.length <= 1} aria-label={`Hide column ${column.name}`} title={`Hide column ${column.name}`}>×</button></div><div class="null-gauge" title={`${(column.null_fraction * 100).toFixed(1)}% null`}><span style:width={`${Math.min(100, column.null_fraction * 100)}%`}></span></div></div></th>{/each}</tr></thead><tbody>{#each result.rows as row, index (index)}<tr class:aggregate-result-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>{#each visibleColumns as column (column.name)}<td tabindex="0" class:expanded-cell={selectedCell?.row === index && selectedCell.column === column.name} onclick={(event) => expandCell(event, index, column.name)} ondblclick={() => filterCategoricalCell(column, row[column.name])} onkeydown={(event) => toggleCellFromKeyboard(event, index, column.name)} title={selectedCell?.row === index && selectedCell.column === column.name ? undefined : cellTitle(column, row[column.name])}><span>{display(row[column.name])}</span>{#if selectedCell?.row === index && selectedCell.column === column.name}<button class="collapse-cell" onclick={(event) => { event.stopPropagation(); collapseCell(index, column.name); }} aria-label={`Collapse ${column.name}`}>Collapse</button>{/if}</td>{/each}</tr>{/each}</tbody></table></div>{#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}{/if}
-                </div>
-                {#if result}<footer class="pagination"><label>Rows per page <select value={pageSize} onchange={changePageSize}>{#each pageSizes as size (size)}<option value={size}>{size}</option>{/each}</select></label><span class="range">{rangeStart(result.total_rows)}–{rangeEnd(result.total_rows)} of {count(result.total_rows)}</span><div class="pager"><button onclick={() => changePage(page - 1)} disabled={page <= 1 || loadingData} aria-label="Previous page">←</button><form onsubmit={(event) => { event.preventDefault(); jumpPage(); }}><label for="page-number">Page</label><input id="page-number" type="number" min="1" max={Math.max(totalPages, 1)} bind:value={pageInput} /><span>of {count(result.total_pages)}</span></form><button onclick={() => changePage(page + 1)} disabled={page >= totalPages || loadingData} aria-label="Next page">→</button></div></footer>{/if}
-              </section>
-              {#if inspectorMode}<button class="inspector-backdrop" type="button" tabindex="-1" aria-label="Close inspector" onclick={closeInspector}></button><div bind:this={inspector} class="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title"><header><div><p>{inspectorMode === 'filter' ? 'Filter column' : 'Column profile'}</p><h2 id="inspector-title">{filterColumn?.name ?? statsColumn?.name}</h2><small>{filterColumn?.type ?? statsColumn?.type}</small></div><button class="icon-button" onclick={closeInspector} aria-label="Close inspector" title="Close inspector">×</button></header><div class="inspector-body">
-                {#if inspectorMode === 'filter' && filterColumn}
-                  {#if isTextType(filterColumn.type)}<section class="category-picker" aria-label={`Categories for ${filterColumn.name}`}><form onsubmit={(event) => { event.preventDefault(); loadCategoryValues(true); }}><label>Find a category<input bind:this={filterInput} type="search" bind:value={categorySearch} oninput={() => loadCategoryValues(true)} placeholder="Search values" /></label><button class="secondary-button" type="submit" disabled={categoriesLoading}>Search</button></form><div class="category-actions"><button type="button" onclick={selectVisibleCategories} disabled={categoriesLoading || categoryValues.length === 0}>Select visible</button><button type="button" onclick={() => selectedCategories = []} disabled={selectedCategories.length === 0}>Clear</button><span>{selectedCategories.length} selected</span></div>{#if categoriesLoading && categoryValues.length === 0}<p class="panel-state"><span class="spinner"></span>Loading values…</p>{:else if categoriesError}<p class="panel-state error-text" role="alert">{categoriesError}</p>{:else}<div class="category-list">{#each categoryValues as item (item.value)}<label><input type="checkbox" checked={selectedCategories.includes(item.value)} onchange={(event) => toggleCategory(item.value, event.currentTarget.checked)} /><span title={item.value}>{item.value}</span><small>{count(item.count)}</small></label>{:else}<p class="panel-state">No matching values.</p>{/each}</div><div class="category-page"><span>{categoryValues.length.toLocaleString()} / {count(categoryTotal)}</span>{#if categoryHasMore}<button type="button" onclick={() => loadCategoryValues(false)} disabled={categoriesLoading}>{categoriesLoading ? 'Loading…' : 'Load more'}</button>{/if}</div>{/if}</section><details><summary>Advanced condition</summary><form class="advanced-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value<input type="text" bind:value={filterValue} /></label>{/if}<button class="primary-button" type="submit">Apply filter</button></form></details>
-                  {:else}<form class="direct-filter" onsubmit={(event) => { event.preventDefault(); addFilter(); }}><label>Operator<select bind:value={filterOperator}>{#each operators as operator (operator.value)}<option value={operator.value}>{operator.label}</option>{/each}</select></label>{#if filterOperator !== 'is_null' && filterOperator !== 'not_null'}<label>Value{#if isBooleanType(filterColumn.type)}<select bind:this={filterInput} bind:value={filterValue}><option value="" disabled>Select value</option><option value="true">True</option><option value="false">False</option></select>{:else}<input bind:this={filterInput} type="text" inputmode={filterColumn.numeric ? 'decimal' : undefined} bind:value={filterValue} onblur={filterColumn.numeric ? normalizeNumericFilter : undefined} />{/if}</label>{/if}<button class="primary-button" type="submit" disabled={filterOperator !== 'is_null' && filterOperator !== 'not_null' && filterValue === ''}>Apply filter</button></form>{/if}
-                {:else if inspectorMode === 'profile' && statsColumn}
-                  {#if statsLoading}<div class="panel-state"><span class="spinner"></span>Computing statistics…</div>
-                  {:else if statsError}<div class="panel-state error-text"><strong>Statistics unavailable</strong><span>{statsError}</span></div>
-                  {:else if stats}
-                    <dl class="profile-summary"><div><dt>Completeness</dt><dd>{count(stats.non_null_count)} non-null · {count(stats.null_count)} null</dd></div></dl>
-                    {#if stats.kind === 'numeric'}
-                      <dl class="profile-summary"><div><dt>Range</dt><dd>{compact(stats.min)} — {compact(stats.max)}</dd></div><div><dt>Center</dt><dd>mean {compact(stats.mean)} · median {compact(stats.median)}</dd></div><div><dt>Spread</dt><dd>σ {compact(stats.stddev)} · P25 {compact(stats.p25)} · P75 {compact(stats.p75)}</dd></div></dl>
-                      <section class="histogram"><header><h3>Distribution</h3><span>{stats.histogram.length} bins</span></header>{#if stats.histogram.length}<div class="bars">{#each stats.histogram as bin (bin.lower)}<button style:height={`${Math.max(3, (Number(bin.count) / maxBin) * 100)}%`} onclick={() => showBin(bin)} onfocus={() => showBin(bin)} aria-label={`${binLabel(bin)}: ${count(bin.count)} rows`} title={`${binLabel(bin)}: ${count(bin.count)} rows`}></button>{/each}</div><p class="bin-readout" aria-live="polite">{binReadout}</p>{:else}<p class="muted">No values to chart.</p>{/if}</section>
-                    {:else if stats.kind === 'categorical'}
-                      <dl class="profile-summary"><div><dt>Distinct values</dt><dd>{count(stats.distinct_count)}</dd></div></dl>
-                      <section class="profile-values"><header><h3>Top values</h3><div class="distribution-controls" role="group" aria-label="Distribution display"><button class="secondary-button" aria-pressed={distributionMode === 'count'} onclick={() => distributionMode = 'count'}>Count</button><button class="secondary-button" aria-pressed={distributionMode === 'percent'} onclick={() => distributionMode = 'percent'}>Percent</button><button class="secondary-button" aria-pressed={cumulativeDistribution} onclick={() => cumulativeDistribution = !cumulativeDistribution}>Cumulative</button></div></header>{#each stats.top_values as value, index (value.value)}<div><span title={display(value.value)}>{display(value.value)}</span><b>{distributionText(value.count, stats.top_values, index, stats.non_null_count)}</b></div>{:else}<p class="muted">No values to show.</p>{/each}</section>
-                    {:else}
-                      <dl class="profile-summary"><div><dt>Range</dt><dd>{compact(stats.min)} — {compact(stats.max)}</dd></div><div><dt>Distinct values</dt><dd>{count(stats.distinct_count)}</dd></div></dl>
-                      <section class="profile-values"><header><h3>By year</h3><div class="distribution-controls" role="group" aria-label="Distribution display"><button class="secondary-button" aria-pressed={distributionMode === 'count'} onclick={() => distributionMode = 'count'}>Count</button><button class="secondary-button" aria-pressed={distributionMode === 'percent'} onclick={() => distributionMode = 'percent'}>Percent</button><button class="secondary-button" aria-pressed={cumulativeDistribution} onclick={() => cumulativeDistribution = !cumulativeDistribution}>Cumulative</button></div></header>{#each stats.year_counts as year, index (year.year)}<div><span>{year.year}</span><b>{distributionText(year.count, stats.year_counts, index, stats.non_null_count)}</b></div>{:else}<p class="muted">No yearly values to show.</p>{/each}</section>
-                    {/if}
-                  {:else}<div class="panel-state">No statistics available.</div>{/if}
+            {#if error}
+              <div class="banner error-banner" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => selectedDataset ? loadData() : loadNodes()}>Retry</button></div>
+            {/if}
+            {#if datasets.length === 0 && !error}
+              <div class="banner"><strong>No datasets found</strong><p>This source has no tables or views to browse.</p></div>
+            {:else if selectedDataset}
+              <QueryConditionBar
+                inert={!!inspectorMode || tableExpanded}
+                showBuilder={canQuery}
+                {filters} {sorts} {dedupeColumns}
+                {activeSql} resultSql={result?.sql ?? ''}
+                onRemoveFilter={removeFilter} onRemoveSort={removeSort} onClearDedupe={clearDedupe}
+                onSaveQuery={() => saveQuery(result?.sql ?? '')} canSaveBuilderQuery={!!result?.sql}
+                onClearQuery={clearQuery}
+                isSqlMode={queryMode === 'sql'}
+                onBackToFullTable={backToBuilder}
+                onSaveView={() => saveQuery(activeSql)}
+                onBackToBuilder={backToBuilder}
+                {columnSearch} setColumnSearch={(value) => columnSearch = value}
+                onFindColumn={findColumn} onColumnSearchKeydown={cycleColumnMatch}
+                columnMatchCount={columnMatches.length}
+                {sqlOpen} onToggleSql={() => sqlOpen ? closeSql() : openSql()}
+                setSqlTrigger={(el) => sqlTrigger = el}
+                {storageError}
+              >
+                {#snippet columnsMenu()}
+                  <ColumnsMenuPopover
+                    open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}
+                    visibleCount={visibleColumns.length} totalCount={result?.columns.length ?? 0}
+                    {columnMenuSearch} setColumnMenuSearch={(value) => columnMenuSearch = value}
+                    {columnTypes} {columnTypeCounts} {isTypeShown} {toggleShownType} {typeToggleDisabled}
+                    {nullThreshold} setNullThreshold={(value) => nullThreshold = value}
+                    onHideFullyEmpty={() => hideColumnsAtNullFraction(1)}
+                    onApplyThreshold={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}
+                    onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
+                    {columnMenuItems} {hiddenColumns} {isColumnProtected}
+                    visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
+                  />
+                {/snippet}
+                {#snippet aggregateMenu()}
+                  <AggregateMenuPopover
+                    open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
+                    label={aggregateMenuLabel}
+                    {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
+                    {aggregateColumn} {aggregateColumnMatches} {aggregateColumns}
+                    onAddColumn={addAggregateColumn} onRemoveColumn={removeAggregateColumn}
+                    {selectedAggregateColumn} availableMetrics={availableAggregateMetrics}
+                    {aggregateMetrics} onToggleMetric={toggleAggregateMetric}
+                    onCreateView={createAggregateView} creating={loadingData}
+                  />
+                {/snippet}
+                {#snippet dedupeMenu()}
+                  <DedupeMenuPopover
+                    open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}
+                    label={`Dedupe${dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}`}
+                    columns={visibleColumns} {dedupeDraft} onToggle={toggleDedupe}
+                    onApply={applyDedupe} onClear={clearDedupe} dedupeAppliedCount={dedupeColumns.length}
+                  />
+                {/snippet}
+              </QueryConditionBar>
+              {#if sqlOpen}
+                <SqlEditorPanel
+                  setEditorHost={(el) => editorHost = el}
+                  hasError={!!sqlError} {sqlError}
+                  onClose={() => closeSql()}
+                  onSave={() => saveQuery(sqlText)} canSave={!!sqlText.trim()}
+                  onRun={() => { page = 1; pageInput = '1'; runSql(); }}
+                  canRun={!loadingData && !!sqlText.trim()} running={loadingData}
+                />
+              {/if}
+              <div class:expanded={tableExpanded} class="data-stage">
+                {#if tableExpanded}
+                  <div class="expanded-toolbar">
+                    <span>Expanded table</span>
+                    <button onclick={toggleTableExpanded}>Back <kbd>Esc</kbd></button>
+                  </div>
                 {/if}
-              </div><footer class="inspector-footer">{#if inspectorMode === 'filter' && isTextType(filterColumn?.type ?? '')}<button class="secondary-button" onclick={closeInspector}>Cancel</button><button class="primary-button" onclick={addCategoryFilter} disabled={selectedCategories.length === 0}>Apply categories</button>{:else}<button class="secondary-button" onclick={closeInspector}>{inspectorMode === 'profile' ? 'Done' : 'Cancel'}</button>{/if}</footer></div>{/if}
-            </div>
-          {/if}
+                <section class="table-pane {rowDensity}" aria-label="Dataset rows" inert={!!inspectorMode}>
+                  <div class="table-card" aria-busy={loadingData}>
+                    {#if loadingData && !result}
+                      <div class="table-state"><span class="spinner"></span>Loading rows…</div>
+                    {:else if result && result.rows.length === 0}
+                      <div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
+                    {:else if result}
+                      <DataGridTable
+                        columns={visibleColumns} rows={result.rows}
+                        caption={`Rows from ${currentDataset?.name ?? selectedDataset}`}
+                        {canQuery} {sorts} {filters} {columnLabelParts} {isColumnProtected}
+                        onSort={cycleSort}
+                        onFilter={(column, trigger) => openFilter(column, trigger)}
+                        onProfile={(column, trigger) => openStats(column, trigger)}
+                        onHide={hideColumn} {display} {cellTitle}
+                        {selectedCell} onExpandCell={expandCell} onFilterCategoricalCell={filterCategoricalCell}
+                        onCellKeydown={toggleCellFromKeyboard} onCollapseCell={collapseCell}
+                        {aggregateRowTones} setTableScroll={(el) => tableScroll = el}
+                      />
+                      {#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}
+                    {/if}
+                  </div>
+                  {#if result}
+                    <PaginationFooter
+                      {pageSizes} {pageSize} onChangePageSize={changePageSize}
+                      rangeStart={rangeStart(result.total_rows)} rangeEnd={rangeEnd(result.total_rows)} totalRows={count(result.total_rows)}
+                      {page} {pageInput} {totalPages} {loadingData}
+                      onPrev={() => changePage(page - 1)} onNext={() => changePage(page + 1)}
+                      onJump={(event) => { event.preventDefault(); jumpPage(); }}
+                      setPageInput={(value) => pageInput = value}
+                    />
+                  {/if}
+                </section>
+                {#if inspectorMode}
+                  <InspectorPanel
+                    title={filterColumn?.name ?? statsColumn?.name ?? ''}
+                    subtitle={inspectorMode === 'filter' ? 'Filter column' : 'Column profile'}
+                    typeLabel={filterColumn?.type ?? statsColumn?.type ?? ''}
+                    onClose={closeInspector}
+                    setPanel={(el) => inspector = el}
+                  >
+                    {#snippet body()}
+                      {#if inspectorMode === 'filter' && filterColumn}
+                        <FilterInspector
+                          column={filterColumn} isText={isTextType(filterColumn.type)}
+                          {operators} operator={filterOperator} value={filterValue}
+                          setOperator={(value) => filterOperator = value} setValue={(value) => filterValue = value}
+                          onblurValue={filterColumn.numeric ? normalizeNumericFilter : undefined}
+                          bind:valueInput={filterInput}
+                          onSubmitFilter={(event) => { event.preventDefault(); addFilter(); }}
+                          {categorySearch} setCategorySearch={setCategorySearchLive}
+                          setCategoryInputRef={(el) => filterInput = el}
+                          onSearchCategories={(event) => { event.preventDefault(); loadCategoryValues(true); }}
+                          {categoryValues} {categoriesLoading} {categoriesError}
+                          {categoryTotal} {categoryHasMore} onLoadMore={() => loadCategoryValues(false)}
+                          {selectedCategories} onToggleCategory={toggleCategory}
+                          onSelectVisible={selectVisibleCategories} onClearSelected={() => selectedCategories = []}
+                          {count}
+                        />
+                      {:else if inspectorMode === 'profile' && statsColumn}
+                        <ProfileInspector
+                          loading={statsLoading} error={statsError} {stats} {count} {compact}
+                          {maxBin} {binReadout} {binLabel} onFocusBin={showBin}
+                          {distributionMode} setDistributionMode={(mode) => distributionMode = mode}
+                          {cumulativeDistribution} toggleCumulative={() => cumulativeDistribution = !cumulativeDistribution}
+                          {distributionText}
+                        />
+                      {/if}
+                    {/snippet}
+                    {#snippet footer()}
+                      {#if inspectorMode === 'filter' && isTextType(filterColumn?.type ?? '')}
+                        <Button onclick={closeInspector}>Cancel</Button>
+                        <Button variant="primary" onclick={addCategoryFilter} disabled={selectedCategories.length === 0}>Apply categories</Button>
+                      {:else}
+                        <Button onclick={closeInspector}>{inspectorMode === 'profile' ? 'Done' : 'Cancel'}</Button>
+                      {/if}
+                    {/snippet}
+                  </InspectorPanel>
+                {/if}
+              </div>
+            {/if}
           {/if}
         </section>
       {/if}
     </main>
-  </div>
-  <p class="sr-only" aria-live="polite">{querySummary}</p>
-</div>
+  {/snippet}
+</AppShell>
+
 {#if workbookPreview}
-  <dialog bind:this={workbookDialog} aria-labelledby="workbook-title" onclose={discardWorkbook} oncancel={(event) => { if (confirmingWorkbook) event.preventDefault(); }} onclick={(event) => { if (event.target === workbookDialog && !confirmingWorkbook) workbookDialog?.close(); }}>
-    <section class="workbook-dialog">
-      <h2 id="workbook-title">Workbook detected</h2>
-      <p>Choose the worksheets to add before continuing.</p>
-      <div class="workbook-sheet-list">
-        {#each workbookPreview.sheets as sheet (sheet)}
-          <label><input type="checkbox" checked={workbookSheets.includes(sheet)} onchange={(event) => toggleWorkbookSheet(sheet, event.currentTarget.checked)} disabled={confirmingWorkbook} /> {sheet}</label>
-        {/each}
-      </div>
-      <p class="workbook-count">{workbookSheets.length} of {workbookPreview.sheets.length} selected</p>
-      <footer><button class="secondary-button" onclick={() => workbookDialog?.close()} disabled={confirmingWorkbook}>Cancel</button><button class="primary-button" onclick={confirmWorkbook} disabled={confirmingWorkbook || workbookSheets.length === 0}>{confirmingWorkbook ? 'Adding…' : 'Continue'}</button></footer>
-    </section>
-  </dialog>
+  <WorkbookDialog
+    preview={workbookPreview} selectedSheets={workbookSheets} confirming={confirmingWorkbook}
+    setDialog={(el) => workbookDialog = el}
+    onClose={discardWorkbook}
+    onCancelAttempt={(event) => { if (confirmingWorkbook) event.preventDefault(); }}
+    onBackdropClick={(event) => { if (event.target === workbookDialog && !confirmingWorkbook) workbookDialog?.close(); }}
+    onToggleSheet={toggleWorkbookSheet}
+    onCancel={() => workbookDialog?.close()}
+    onConfirm={confirmWorkbook}
+  />
 {/if}
+
+<style>
+  .workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .data-stage { flex: 1; min-height: 0; display: flex; position: relative; }
+  .data-stage.expanded { position: fixed; inset: 20px; z-index: 6; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-panel); }
+  .expanded-toolbar { flex: none; height: 40px; padding: 0 10px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12px; font-weight: 600; }
+  .expanded-toolbar button { height: 28px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--surface); font-size: 12px; }
+  .expanded-toolbar kbd { margin-left: 5px; font: 10px var(--font-mono); color: var(--faint); }
+  .table-pane { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }
+  .table-pane.compact { --row-height: 26px; }
+  .table-pane.comfortable { --row-height: 42px; }
+  .table-card { position: relative; min-height: 180px; flex: 1; overflow: hidden; }
+  .table-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; padding: 40px; text-align: center; color: var(--muted); font-family: var(--font-ui); font-size: 13px; }
+  .loading-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255, 255, 255, 0.7); font-size: 12.5px; color: var(--muted); }
+  .banner { margin: 14px 20px; padding: 12px 14px; border-radius: var(--radius-lg); border: 1px solid var(--line); background: var(--surface-inset); font-size: 12.5px; color: var(--muted); }
+  .banner strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 13px; }
+  .banner p { margin: 0; }
+  .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-color: var(--error); }
+  .error-banner strong { color: var(--error); }
+  .error-banner button { flex: none; height: 28px; padding: 0 12px; border-radius: var(--radius-md); border: 1px solid var(--control-border); background: var(--surface); }
+</style>
