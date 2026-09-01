@@ -177,3 +177,27 @@ export interface SavedQuery {
   nodeId: string;
   dataset: string;
 }
+
+export type ExportFormat = 'csv' | 'xlsx';
+
+export interface ExportSheetRequest {
+  node_id: string;
+  name: string;
+  sql: string;
+}
+
+export interface ExportOption extends ExportSheetRequest {
+  key: string;
+  source: string;
+}
+
+export interface ExportRequest {
+  format: ExportFormat;
+  filename?: string;
+  sheets: ExportSheetRequest[];
+}
+
+export interface ExportDownload {
+  blob: Blob;
+  filename: string;
+}

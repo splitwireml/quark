@@ -1,15 +1,21 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import InsertionHandle from '../atoms/InsertionHandle.svelte';
   import ColumnHeaderCell from '../molecules/ColumnHeaderCell.svelte';
   import type { ColumnInfo, FilterCondition, SortCondition } from '../../lib/types';
 
   type LabelPart = { text: string; match: boolean };
+  type CellMove = 'up' | 'down' | 'left' | 'right';
+  type SelectedCell = { row: number; column: string; expanded?: boolean };
+  type EditingCell = { row: number; column: string; value: string; original: string };
 
   type Props = {
     columns: ColumnInfo[];
     rows: Record<string, unknown>[];
     caption: string;
     canQuery: boolean;
+    canInsert: boolean;
+    canEdit: boolean;
     sorts: SortCondition[];
     filters: FilterCondition[];
     columnLabelParts: (name: string) => LabelPart[];
@@ -20,20 +26,27 @@
     onHide: (name: string) => void;
     display: (value: unknown) => string;
     cellTitle: (column: ColumnInfo, value: unknown) => string;
-    selectedCell: { row: number; column: string } | null;
+    selectedCell: SelectedCell | null;
+    editingCell: EditingCell | null;
+    editSaving: boolean;
+    onSelectCell: (event: MouseEvent, row: number, column: string) => void;
     onExpandCell: (event: MouseEvent, row: number, column: string) => void;
     onFilterCategoricalCell: (column: ColumnInfo, value: unknown) => void;
     onCellKeydown: (event: KeyboardEvent, row: number, column: string) => void;
     onCollapseCell: (row: number, column: string) => void;
+    onEditValue: (value: string) => void;
+    onCommitEdit: (move?: CellMove) => void;
+    onCancelEdit: () => void;
     aggregateRowTones: boolean[];
     setTableScroll: (el: HTMLDivElement | null) => void;
+    onInsert: (left: ColumnInfo, right: ColumnInfo | null, trigger: HTMLButtonElement) => void;
   };
 
   let {
-    columns, rows, caption, canQuery, sorts, filters, columnLabelParts, isColumnProtected,
+    columns, rows, caption, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
-    selectedCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
-    aggregateRowTones, setTableScroll
+    selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
+    onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
@@ -58,6 +71,15 @@
     setTableScroll(node);
     return { destroy: () => setTableScroll(null) };
   }
+
+  function focusEditor(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.setSelectionRange(node.value.length, node.value.length); }); }
+  function editorKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); onCancelEdit(); return; }
+    if (event.key === 'Enter') { event.preventDefault(); onCommitEdit(); return; }
+    const moves: Record<string, CellMove> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    if (moves[event.key]) { event.preventDefault(); onCommitEdit(moves[event.key]); }
+  }
 </script>
 
 <svelte:window onclick={closeContextMenuOnClick} onkeydown={closeContextMenuOnKeydown} />
@@ -68,7 +90,7 @@
     <caption class="sr-only">{caption}</caption>
     <thead>
       <tr>
-        {#each columns as column (column.name)}
+        {#each columns as column, columnIndex (column.name)}
           <ColumnHeaderCell
             {column}
             labelParts={columnLabelParts(column.name)}
@@ -83,6 +105,7 @@
             onhide={() => onHide(column.name)}
             oncontextmenu={(event) => openContextMenu(event, column)}
           />
+          <th class="insertion-slot" scope="col"><InsertionHandle left={column.name} right={columns[columnIndex + 1]?.name ?? null} disabled={!canInsert} onclick={(event) => onInsert(column, columns[columnIndex + 1] ?? null, event.currentTarget as HTMLButtonElement)} /></th>
         {/each}
       </tr>
     </thead>
@@ -90,20 +113,41 @@
       {#each rows as row, index (index)}
         <tr class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
           {#each columns as column (column.name)}
-            {@const expanded = selectedCell?.row === index && selectedCell.column === column.name}
+            {@const selected = selectedCell?.row === index && selectedCell.column === column.name}
+            {@const expanded = selected && selectedCell?.expanded}
+            {@const editing = editingCell?.row === index && editingCell.column === column.name}
             <td
               tabindex="0"
+              data-row={index}
+              data-column={column.name}
+              class:selected-cell={selected}
               class:expanded-cell={expanded}
-              onclick={(event) => onExpandCell(event, index, column.name)}
-              ondblclick={() => onFilterCategoricalCell(column, row[column.name])}
+              class:editing-cell={editing}
+              onclick={(event) => { onSelectCell(event, index, column.name); onExpandCell(event, index, column.name); }}
+              ondblclick={() => { if (!editing) onFilterCategoricalCell(column, row[column.name]); }}
               onkeydown={(event) => onCellKeydown(event, index, column.name)}
-              title={expanded ? undefined : cellTitle(column, row[column.name])}
+              title={expanded || editing ? undefined : cellTitle(column, row[column.name])}
             >
-              <span>{display(row[column.name])}</span>
-              {#if expanded}
-                <button class="collapse" onclick={(event) => { event.stopPropagation(); onCollapseCell(index, column.name); }} aria-label={`Collapse ${column.name}`}>Collapse</button>
+              {#if editing}
+                <input
+                  use:focusEditor
+                  type="text"
+                  value={editingCell.value}
+                  disabled={editSaving || !canEdit}
+                  aria-label={`Edit row ${index + 1}, ${column.name}`}
+                  oninput={(event) => onEditValue(event.currentTarget.value)}
+                  onkeydown={editorKeydown}
+                  onblur={() => onCommitEdit()}
+                  onclick={(event) => event.stopPropagation()}
+                />
+              {:else}
+                <span>{display(row[column.name])}</span>
+                {#if expanded}
+                  <button class="collapse" onclick={(event) => { event.stopPropagation(); onCollapseCell(index, column.name); }} aria-label={`Collapse ${column.name}`}>Collapse</button>
+                {/if}
               {/if}
             </td>
+            <td class="insertion-gap" aria-hidden="true"></td>
           {/each}
         </tr>
       {/each}
@@ -126,6 +170,8 @@
 <style>
   .table-scroll { width: 100%; height: 100%; overflow: auto; }
   table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: 12px var(--font-mono); }
+  .insertion-slot { position: sticky; top: 0; z-index: 4; width: 2px; min-width: 2px; height: 48px; padding: 0; border: 0; border-bottom: 1px solid var(--line); background: var(--surface-3); }
+  td.insertion-gap { width: 2px; min-width: 2px; padding: 0; border-right: 0; background: color-mix(in srgb, var(--success) 4%, var(--surface)); }
   td {
     height: var(--row-height, 34px);
     max-width: 320px;
@@ -143,6 +189,10 @@
   tbody tr.aggregate-row td { background: var(--surface); }
   tbody tr.aggregate-row.aggregate-row-alt td { background: var(--surface-inset); }
   td.expanded-cell { white-space: normal; overflow: visible; position: relative; z-index: 2; box-shadow: var(--shadow-popover); }
+  td.selected-cell { position: relative; z-index: 1; box-shadow: inset 0 0 0 2px var(--action); }
+  td.editing-cell { padding: 0; overflow: visible; }
+  td.editing-cell input { width: 100%; min-width: 120px; height: 100%; padding: 0 9px; border: 0; outline: 2px solid var(--action); outline-offset: -2px; background: var(--surface); color: var(--ink); font: inherit; }
+  td.editing-cell input:disabled { opacity: 0.7; }
   .collapse { display: block; margin-top: 4px; font-size: 10.5px; color: var(--action); background: none; border: none; }
   .context-menu { position: fixed; z-index: 20; width: 176px; display: grid; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-popover); }
   .context-menu strong { min-width: 0; padding: 8px 9px; overflow: hidden; border-bottom: 1px solid var(--line); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }

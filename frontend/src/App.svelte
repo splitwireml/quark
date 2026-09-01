@@ -7,7 +7,8 @@
   import * as api from './lib/api';
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
-  import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DistributionMode, FilterCondition, FilterOperator, JoinWorkspaceResponse, NodeInfo, QueryResponse, RowDensity, SavedQuery, SortCondition, WorkbookPreview } from './lib/types';
+  import { buildCellEditSql, buildMutationSql, hasVolatileRowOrder, quoteIdentifier } from './lib/mutation-sql';
+  import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceResponse, NodeInfo, QueryResponse, RowDensity, SavedQuery, SortCondition, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
   import TitleBar from './components/organisms/TitleBar.svelte';
@@ -29,6 +30,8 @@
   import FilterInspector from './components/organisms/FilterInspector.svelte';
   import ProfileInspector from './components/organisms/ProfileInspector.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
+  import FormulaMenu from './components/organisms/FormulaMenu.svelte';
+  import ExportDialog from './components/organisms/ExportDialog.svelte';
   import AppShell from './components/templates/AppShell.svelte';
 
   const pageSizes = [50, 100, 250, 500, 1000];
@@ -37,6 +40,7 @@
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
   const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
   const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
+  type CellMove = 'up' | 'down' | 'left' | 'right';
 
 
   let nodes = $state<NodeInfo[]>([]);
@@ -92,7 +96,10 @@
   let columnMenuSearch = $state('');
   let nullThreshold = $state(50);
   let activeColumnMatch = $state(0);
-  let selectedCell = $state<{ row: number; column: string } | null>(null);
+  let selectedCell = $state<{ row: number; column: string; expanded?: boolean } | null>(null);
+  let editingCell = $state<{ row: number; column: string; value: string; original: string } | null>(null);
+  let cellEditSaving = $state(false);
+  let cellEditError = $state('');
   let tableScroll = $state<HTMLDivElement | null>(null);
   let categoryValues = $state.raw<CategoryValue[]>([]);
   let categorySearch = $state('');
@@ -126,6 +133,20 @@
   let workbookPreview = $state<WorkbookPreview | null>(null);
   let workbookSheets = $state<string[]>([]);
   let confirmingWorkbook = $state(false);
+  let mutationDialog = $state<HTMLDialogElement | null>(null);
+  let mutationBoundary = $state<{ insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | null>(null);
+  let mutationApplying = $state(false);
+  let mutationError = $state('');
+  let exportDialog = $state<HTMLDialogElement | null>(null);
+  let exportOpen = $state(false);
+  let exportFormat = $state<ExportFormat>('csv');
+  let exportOptions = $state.raw<ExportOption[]>([]);
+  let exportSelectedKeys = $state<string[]>(['current']);
+  let exportLoading = $state(false);
+  let exporting = $state(false);
+  let exportError = $state('');
+  let exportTrigger = $state<HTMLButtonElement | null>(null);
+  let exportRequestId = 0;
   let workspaceTab = $state<'data' | 'queries'>('data');
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -143,6 +164,13 @@
 
   let selectedNode = $derived(nodes.find((node) => node.id === selectedNodeId));
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
+  let currentExportOption = $derived(result ? {
+    key: 'current',
+    node_id: queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId,
+    name: currentDataset?.name ?? selectedNode?.name ?? 'Current view',
+    source: 'Current view',
+    sql: result.sql
+  } : null);
   let joinLeftDataset = $derived(joinLeftDatasets.find((dataset) => dataset.id === joinLeftDatasetId));
   let joinRightDataset = $derived(joinRightDatasets.find((dataset) => dataset.id === joinRightDatasetId));
   let joinKeyPairs = $derived(joinLeftKeys.map((left, index) => ({ left, right: joinRightKeys[index] ?? '' })));
@@ -311,8 +339,135 @@
   function toggleAggregateMetric(metric: AggregateMetric, checked: boolean) { aggregateMetrics = checked ? [...aggregateMetrics, metric] : aggregateMetrics.filter((item) => item !== metric); }
   function isWorkbookPreview(node: NodeInfo | WorkbookPreview): node is WorkbookPreview { return node.kind === 'workbook' && 'sheets' in node && Array.isArray(node.sheets); }
   function toggleWorkbookSheet(sheet: string, checked: boolean) { workbookSheets = checked ? [...workbookSheets, sheet] : workbookSheets.filter((item) => item !== sheet); }
-  function quoteIdentifier(value: string): string { return `"${value.replace(/"/g, '""')}"`; }
   function seedSql(dataset = currentDataset): string { return dataset ? `SELECT * FROM ${quoteIdentifier(dataset.schema)}.${quoteIdentifier(dataset.name)}` : ''; }
+
+  async function openMutation(left: ColumnInfo, right: ColumnInfo | null, trigger: HTMLButtonElement) {
+    if (!result || loadingData) return;
+    const insertIndex = right ? result.columns.findIndex((column) => column.name === right.name) : result.columns.length;
+    if (insertIndex < 0) return;
+    mutationBoundary = { insertIndex, left: left.name, right: right?.name ?? null, trigger };
+    mutationError = '';
+    mutationApplying = false;
+    await tick();
+    mutationDialog?.showModal();
+    mutationDialog?.querySelector<HTMLInputElement>('input')?.focus();
+  }
+
+  function finishMutationClose() {
+    const trigger = mutationBoundary?.trigger;
+    mutationBoundary = null;
+    mutationError = '';
+    mutationApplying = false;
+    tick().then(() => trigger?.focus());
+  }
+
+  async function applyMutation(name: string, expression: string) {
+    const boundary = mutationBoundary;
+    const current = result;
+    const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
+    if (!boundary || !current || !targetNodeId || mutationApplying) return;
+    const query = buildMutationSql(current.sql, current.columns.map((column) => column.name), boundary.insertIndex, expression, name);
+    if (!query) { mutationError = 'Could not build the formula query.'; return; }
+    const id = ++requestId;
+    mutationApplying = true;
+    mutationError = '';
+    try {
+      const next = await api.querySql(targetNodeId, { sql: query, page: 1, page_size: pageSize, filters: [], sorts: [], dedupe_columns: [] });
+      if (id !== requestId) return;
+      closeSql(false);
+      clearAggregateDraft();
+      filters = [];
+      sorts = [];
+      dedupeColumns = [];
+      dedupeDraft = [];
+      result = next;
+      queryMode = 'sql';
+      sqlText = query;
+      sqlBase = query;
+      activeSql = next.sql;
+      activeSqlNodeId = targetNodeId;
+      selectedCell = null;
+      editingCell = null;
+      cellEditError = '';
+      page = next.page;
+      pageInput = String(next.page);
+      mutationDialog?.close();
+    } catch (reason) { if (id === requestId) mutationError = message(reason); }
+    finally { mutationApplying = false; }
+  }
+
+  async function openExport(trigger: HTMLButtonElement) {
+    if (!currentExportOption || exportOpen) return;
+    exportTrigger = trigger;
+    exportOpen = true;
+    exportFormat = 'csv';
+    exportSelectedKeys = ['current'];
+    exportOptions = [];
+    exportError = '';
+    exportLoading = true;
+    const id = ++exportRequestId;
+    await tick();
+    exportDialog?.showModal();
+    try {
+      const catalogs = await Promise.all(nodes.map(async (node) => ({ node, datasets: await api.listDatasets(node.id) })));
+      const options: ExportOption[] = [];
+      for (const { node, datasets } of catalogs) {
+        for (const dataset of datasets) options.push({
+          key: `${node.id}:${dataset.id}`,
+          node_id: node.id,
+          name: dataset.name,
+          source: node.name,
+          sql: seedSql(dataset)
+        });
+      }
+      if (id !== exportRequestId) return;
+      exportOptions = options;
+    } catch (reason) { if (id === exportRequestId) exportError = message(reason); }
+    finally { if (id === exportRequestId) exportLoading = false; }
+  }
+
+  function finishExportClose() {
+    const trigger = exportTrigger;
+    exportRequestId++;
+    exportOpen = false;
+    exportOptions = [];
+    exportSelectedKeys = ['current'];
+    exportError = '';
+    exportLoading = false;
+    exporting = false;
+    exportTrigger = null;
+    tick().then(() => trigger?.focus());
+  }
+
+  function setExportFormat(format: ExportFormat) { exportFormat = format; if (format === 'csv') exportSelectedKeys = ['current']; }
+  function toggleExportOption(key: string, checked: boolean) { exportSelectedKeys = checked ? [...new Set([...exportSelectedKeys, key])] : exportSelectedKeys.filter((item) => item !== key); }
+
+  async function runExport() {
+    const current = currentExportOption;
+    if (!current || exporting || exportLoading) return;
+    const choices = [current, ...exportOptions];
+    const selected = exportFormat === 'csv' ? [current] : choices.filter((option) => exportSelectedKeys.includes(option.key));
+    if (!selected.length) return;
+    exporting = true;
+    exportError = '';
+    try {
+      const download = await api.exportData({
+        format: exportFormat,
+        filename: exportFormat === 'csv' ? current.name : 'quark-export',
+        sheets: selected.map(({ node_id, name, sql }) => ({ node_id, name, sql }))
+      });
+      const url = URL.createObjectURL(download.blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = download.filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      exportDialog?.close();
+    } catch (reason) { exportError = message(reason); }
+    finally { exporting = false; }
+  }
 
   function loadSavedQueries() {
     try {
@@ -576,6 +731,9 @@
       queryMode = 'builder';
       sqlError = '';
       selectedCell = null;
+      editingCell = null;
+      cellEditSaving = false;
+      cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
     } catch (reason) { if (id === requestId) error = message(reason); }
@@ -626,6 +784,9 @@
       activeSqlNodeId = targetNodeId;
       queryMode = 'sql';
       selectedCell = null;
+      editingCell = null;
+      cellEditSaving = false;
+      cellEditError = '';
       hiddenColumns = [];
       shownColumnTypes = [];
       page = next.page;
@@ -857,7 +1018,14 @@
     if (start < name.length) parts.push({ text: name.slice(start), match: false });
     return parts;
   }
-  function expandCell(event: MouseEvent, row: number, column: string) { const cell = event.currentTarget as HTMLTableCellElement; if (cell.scrollWidth > cell.clientWidth) selectedCell = { row, column }; }
+  function selectCell(event: MouseEvent, row: number, column: string) {
+    selectedCell = { row, column, expanded: false };
+    (event.currentTarget as HTMLTableCellElement).focus();
+  }
+  function expandCell(event: MouseEvent, row: number, column: string) {
+    const cell = event.currentTarget as HTMLTableCellElement;
+    selectedCell = { row, column, expanded: cell.scrollWidth > cell.clientWidth };
+  }
   async function filterCategoricalCell(column: ColumnInfo, value: unknown) {
     if (column.profile_kind !== 'categorical' || (typeof value !== 'string' && typeof value !== 'boolean') || filters.some((filter) => filter.column === column.name && filter.operator === '=' && filter.value === value)) return;
     filters = [...filters, { column: column.name, operator: '=', value }];
@@ -866,13 +1034,97 @@
     await loadData();
   }
   function cellTitle(column: ColumnInfo, value: unknown): string { const text = display(value); return column.profile_kind === 'categorical' && (typeof value === 'string' || typeof value === 'boolean') ? `${text} — Double-click to filter by this value` : text; }
-  function toggleCellFromKeyboard(event: KeyboardEvent, row: number, column: string) {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    if (selectedCell?.row === row && selectedCell.column === column) collapseCell(row, column);
-    else expandCell(event as unknown as MouseEvent, row, column);
+  function cellEditText(value: unknown): string { return value == null ? '' : display(value); }
+  function startCellEdit(row: number, column: string, initial?: string) {
+    if (!result || loadingData || cellEditSaving) return;
+    const original = cellEditText(result.rows[row]?.[column]);
+    selectedCell = { row, column, expanded: false };
+    editingCell = { row, column, value: initial ?? original, original };
+    cellEditError = '';
   }
-  function collapseCell(row: number, column: string) { if (selectedCell?.row === row && selectedCell.column === column) selectedCell = null; }
+  async function focusCell(row: number, column: string) {
+    await tick();
+    const cell = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('td[data-row][data-column]') ?? [])].find(
+      (element) => Number(element.dataset.row) === row && element.dataset.column === column,
+    );
+    cell?.focus();
+  }
+  function moveCell(row: number, column: string, move: CellMove) {
+    if (!result || !visibleColumns.length || !result.rows.length) return;
+    const columnIndex = Math.max(0, visibleColumns.findIndex((item) => item.name === column));
+    const nextRow = Math.min(result.rows.length - 1, Math.max(0, row + (move === 'down' ? 1 : move === 'up' ? -1 : 0)));
+    const nextColumnIndex = Math.min(visibleColumns.length - 1, Math.max(0, columnIndex + (move === 'right' ? 1 : move === 'left' ? -1 : 0)));
+    const nextColumn = visibleColumns[nextColumnIndex].name;
+    selectedCell = { row: nextRow, column: nextColumn, expanded: false };
+    void focusCell(nextRow, nextColumn);
+  }
+  function handleCellKeydown(event: KeyboardEvent, row: number, column: string) {
+    if (editingCell || loadingData || cellEditSaving) return;
+    const moves: Record<string, CellMove> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    if (moves[event.key]) { event.preventDefault(); moveCell(row, column, moves[event.key]); return; }
+    if (event.key === 'Enter') { event.preventDefault(); startCellEdit(row, column); return; }
+    if (event.key === 'Backspace' || event.key === 'Delete') { event.preventDefault(); startCellEdit(row, column, ''); return; }
+    if (event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); startCellEdit(row, column, event.key); }
+  }
+  function setCellEditValue(value: string) { if (editingCell) editingCell = { ...editingCell, value }; }
+  function cancelCellEdit() {
+    const edit = editingCell;
+    editingCell = null;
+    cellEditError = '';
+    if (edit) void focusCell(edit.row, edit.column);
+  }
+  async function commitCellEdit(move?: CellMove) {
+    const edit = editingCell;
+    const current = result;
+    const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
+    if (!edit || !current || !targetNodeId || cellEditSaving) return;
+    if (edit.value === edit.original) {
+      editingCell = null;
+      cellEditError = '';
+      if (move) moveCell(edit.row, edit.column, move);
+      return;
+    }
+    if (hasVolatileRowOrder(current.sql)) {
+      cellEditError = 'Cell editing is unavailable for queries with randomized row order.';
+      return;
+    }
+    // ponytail: row-position edits stay view-local; switch to key-based patches when datasets expose primary keys.
+    const rowNumber = (current.page - 1) * current.page_size + edit.row + 1;
+    const query = buildCellEditSql(current.sql, current.columns.map((column) => column.name), rowNumber, edit.column, edit.value);
+    if (!query) { cellEditError = 'Could not build the cell edit query.'; return; }
+    const id = ++requestId;
+    cellEditSaving = true;
+    cellEditError = '';
+    try {
+      const next = await api.querySql(targetNodeId, { sql: query, page: current.page, page_size: current.page_size, filters: [], sorts: [], dedupe_columns: [] });
+      if (id !== requestId) return;
+      closeSql(false);
+      clearAggregateDraft();
+      filters = [];
+      sorts = [];
+      dedupeColumns = [];
+      dedupeDraft = [];
+      result = next;
+      queryMode = 'sql';
+      sqlText = query;
+      sqlBase = query;
+      activeSql = next.sql;
+      activeSqlNodeId = targetNodeId;
+      editingCell = null;
+      page = next.page;
+      pageInput = String(next.page);
+      if (move) moveCell(edit.row, edit.column, move);
+      else void focusCell(selectedCell?.row ?? edit.row, selectedCell?.column ?? edit.column);
+    } catch (reason) {
+      if (id === requestId) {
+        cellEditError = message(reason);
+        cellEditSaving = false;
+        await tick();
+        tableScroll?.querySelector<HTMLInputElement>('td.editing-cell input')?.focus();
+      }
+    } finally { cellEditSaving = false; }
+  }
+  function collapseCell(row: number, column: string) { if (selectedCell?.row === row && selectedCell.column === column) selectedCell = { row, column, expanded: false }; }
   function sortFor(column: string): SortCondition | undefined { return sorts.find((sort) => sort.column === column); }
   function compact(value: number | string | null | undefined): string { return value == null ? '—' : typeof value === 'string' ? value : new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value); }
   function count(value: AggregateCount): string { return typeof value === 'string' ? value : value.toLocaleString(); }
@@ -930,7 +1182,7 @@
           {/snippet}
         </WelcomeScreen>
       {:else}
-        <section class="workspace">
+        <section class="workspace" inert={cellEditSaving}>
           <DatasetHead
             title={workspaceTab === 'queries' ? 'Saved queries' : (currentDataset?.name ?? selectedNode?.name ?? '')}
             showMeta={workspaceTab === 'data' && !!result}
@@ -938,7 +1190,8 @@
             ms={result ? compact(result.elapsed_ms) : ''}
             showRefresh={workspaceTab === 'data'}
             onRefresh={loadActiveData}
-            {loadingData}
+            onExport={openExport}
+            {loadingData} canExport={!!result} {exporting}
             inert={!!inspectorMode || tableExpanded}
           />
           <DatasetTabsBar
@@ -1059,15 +1312,18 @@
                       <DataGridTable
                         columns={visibleColumns} rows={result.rows}
                         caption={`Rows from ${currentDataset?.name ?? selectedDataset}`}
-                        {canQuery} {sorts} {filters} {columnLabelParts} {isColumnProtected}
+                        {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
                         onSort={cycleSort}
                         onFilter={(column, trigger) => openFilter(column, trigger)}
                         onProfile={(column, trigger) => openStats(column, trigger)}
                         onHide={hideColumn} {display} {cellTitle}
-                        {selectedCell} onExpandCell={expandCell} onFilterCategoricalCell={filterCategoricalCell}
-                        onCellKeydown={toggleCellFromKeyboard} onCollapseCell={collapseCell}
-                        {aggregateRowTones} setTableScroll={(el) => tableScroll = el}
+                        {selectedCell} {editingCell} editSaving={cellEditSaving}
+                        onSelectCell={selectCell} onExpandCell={expandCell} onFilterCategoricalCell={filterCategoricalCell}
+                        onCellKeydown={handleCellKeydown} onCollapseCell={collapseCell}
+                        onEditValue={setCellEditValue} onCommitEdit={commitCellEdit} onCancelEdit={cancelCellEdit}
+                        {aggregateRowTones} setTableScroll={(el) => tableScroll = el} onInsert={openMutation}
                       />
+                      {#if cellEditError}<div class="cell-edit-error" role="alert">{cellEditError}</div>{/if}
                       {#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}
                     {/if}
                   </div>
@@ -1151,6 +1407,32 @@
   />
 {/if}
 
+{#if mutationBoundary}
+  <FormulaMenu
+    columns={result?.columns ?? []}
+    boundaryLabel={mutationBoundary.right ? `Between ${mutationBoundary.left} and ${mutationBoundary.right}` : `After ${mutationBoundary.left}`}
+    applying={mutationApplying} error={mutationError}
+    setDialog={(element) => mutationDialog = element}
+    onClose={finishMutationClose}
+    onCancelAttempt={(event) => { if (mutationApplying) event.preventDefault(); }}
+    onApply={applyMutation}
+  />
+{/if}
+
+{#if exportOpen}
+  <ExportDialog
+    format={exportFormat} current={currentExportOption} options={exportOptions}
+    selectedKeys={exportSelectedKeys} loading={exportLoading} {exporting} error={exportError}
+    setDialog={(element) => exportDialog = element}
+    setFormat={setExportFormat} onToggle={toggleExportOption}
+    onClose={finishExportClose}
+    onCancelAttempt={(event) => { if (exporting) event.preventDefault(); }}
+    onBackdropClick={(event) => { if (event.target === exportDialog && !exporting) exportDialog?.close(); }}
+    onCancel={() => exportDialog?.close()}
+    onExport={runExport}
+  />
+{/if}
+
 <style>
   .workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .data-stage { flex: 1; min-height: 0; display: flex; position: relative; }
@@ -1164,6 +1446,7 @@
   .table-card { position: relative; min-height: 180px; flex: 1; overflow: hidden; }
   .table-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; padding: 40px; text-align: center; color: var(--muted); font-family: var(--font-ui); font-size: 13px; }
   .loading-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255, 255, 255, 0.7); font-size: 12.5px; color: var(--muted); }
+  .cell-edit-error { position: absolute; right: 10px; bottom: 10px; z-index: 7; max-width: min(460px, calc(100% - 20px)); padding: 8px 10px; border: 1px solid var(--error); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-popover); color: var(--error); font-size: 12px; }
   .banner { margin: 14px 20px; padding: 12px 14px; border-radius: var(--radius-lg); border: 1px solid var(--line); background: var(--surface-inset); font-size: 12.5px; color: var(--muted); }
   .banner strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 13px; }
   .banner p { margin: 0; }

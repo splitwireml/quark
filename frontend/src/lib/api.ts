@@ -1,4 +1,4 @@
-import type { CategoryValuesResponse, ColumnStats, DatasetInfo, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, QueryRequest, QueryResponse, SqlQueryRequest, WorkbookPreview } from './types';
+import type { CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, QueryRequest, QueryResponse, SqlQueryRequest, WorkbookPreview } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -55,6 +55,23 @@ export function querySql(nodeId: string, body: SqlQueryRequest): Promise<QueryRe
 
 export function previewJoinWorkspace(body: JoinWorkspaceRequest): Promise<JoinWorkspaceResponse> {
   return request('/api/join-workspaces', json(body));
+}
+
+export async function exportData(body: ExportRequest): Promise<ExportDownload> {
+  const response = await fetch('/api/exports', json(body));
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const detail = await response.json();
+      message = detail.detail ?? detail.message ?? message;
+    } catch { /* use HTTP status */ }
+    throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+  }
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const quoted = disposition.match(/filename="([^"]+)"/i)?.[1];
+  const plain = disposition.match(/filename=([^;\s]+)/i)?.[1];
+  return { blob: await response.blob(), filename: encoded ? decodeURIComponent(encoded) : quoted ?? plain ?? `quark-export.${body.format}` };
 }
 
 export function getSqlColumnStats(nodeId: string, column: string, body: SqlQueryRequest): Promise<ColumnStats> {

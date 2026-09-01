@@ -1,9 +1,11 @@
 import base64
+import csv
 import datetime as dt
 import json
 import math
 import os
 import re
+import tempfile
 import time
 import uuid
 import zipfile
@@ -16,9 +18,12 @@ from xml.etree import ElementTree
 
 import duckdb
 from fastapi import FastAPI, File, HTTPException, Query as QueryParam, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.background import BackgroundTask
 
 SUPPORTED = {".csv", ".tsv", ".parquet", ".json", ".ndjson", ".jsonl", ".xlsx", ".duckdb", ".db"}
 NUMERIC = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "REAL", "DOUBLE", "DECIMAL")
@@ -26,6 +31,10 @@ INTEGER = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "U
 TEXT = ("VARCHAR", "CHAR", "TEXT")
 DATE = ("DATE", "TIME", "TIMESTAMP")
 OPERATORS = {"=", "!=", "in", "is_null", "not_null", "contains", "starts_with", "ends_with", ">", ">=", "<", "<="}
+ILLEGAL_XML = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+INVALID_SHEET_NAME = re.compile(r"[\\/*?:\[\]]")
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+EXCEL_TEXT_LIMIT = 32767
 
 
 class AttachRequest(BaseModel):
@@ -67,6 +76,20 @@ class SQLRequest(BaseModel):
 
 class SQLQuery(SQLRequest, Query):
     pass
+
+
+class ExportSheet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: str
+    name: str
+    sql: str
+
+
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["csv", "xlsx"]
+    filename: str | None = None
+    sheets: list[ExportSheet] = Field(min_length=1, max_length=100)
 
 
 class JoinReference(BaseModel):
@@ -142,6 +165,91 @@ def safe(value: Any) -> Any:
     return value
 
 
+def export_nested(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, int) and not -(10**15 - 1) <= value <= 10**15 - 1:
+        return str(value)
+    if isinstance(value, float) and math.isnan(value):
+        return "NaN"
+    if isinstance(value, float) and math.isinf(value):
+        return "-Infinity" if value < 0 else "Infinity"
+    if isinstance(value, (dt.date, dt.time, dt.datetime)):
+        return value.isoformat()
+    if isinstance(value, dt.timedelta):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [export_nested(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): export_nested(item) for key, item in value.items()}
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return str(value)
+    return value
+
+
+def export_value(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).hex()
+    elif isinstance(value, (list, tuple, dict)):
+        value = json.dumps(export_nested(value), ensure_ascii=False)
+    elif isinstance(value, int) and not -(10**15 - 1) <= value <= 10**15 - 1:
+        value = str(value)
+    elif isinstance(value, Decimal) and (not value.is_finite() or len(value.as_tuple().digits) > 15):
+        value = str(value)
+    elif isinstance(value, float) and math.isnan(value):
+        value = "NaN"
+    elif isinstance(value, float) and math.isinf(value):
+        value = "-Infinity" if value < 0 else "Infinity"
+    elif isinstance(value, (dt.datetime, dt.time)) and value.tzinfo is not None:
+        value = value.isoformat()
+    elif not isinstance(value, (str, int, float, bool, Decimal, dt.date, dt.time, dt.timedelta)) and value is not None:
+        value = str(value)
+    return ILLEGAL_XML.sub("", value) if isinstance(value, str) else value
+
+
+def csv_value(value: Any) -> Any:
+    value = export_value(value)
+    return "'" + value if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES) else value
+
+
+def xlsx_row(worksheet: Any, values: Any) -> list[Any]:
+    row = []
+    for value in values:
+        value = export_value(value)
+        if isinstance(value, str):
+            if len(value) > EXCEL_TEXT_LIMIT:
+                raise HTTPException(422, f"Excel cell text exceeds {EXCEL_TEXT_LIMIT} characters")
+            cell = WriteOnlyCell(worksheet, value=value)
+            cell.data_type = "s"
+            value = cell
+        row.append(value)
+    return row
+
+
+def export_sheet_name(name: str, used: set[str]) -> str:
+    base = INVALID_SHEET_NAME.sub("_", ILLEGAL_XML.sub("", name)).strip().strip("'") or "Sheet"
+    base = base[:31].rstrip("'") or "Sheet"
+    if base.casefold() == "history":
+        base += "_"
+    candidate = base
+    number = 2
+    while candidate.casefold() in used:
+        suffix = f" ({number})"
+        candidate = (base[:31 - len(suffix)].rstrip("'") or "Sheet") + suffix
+        number += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
+def export_filename(name: str | None, extension: str) -> str:
+    basename = Path((name or "export").replace("\\", "/")).name
+    stem = Path(basename).stem
+    stem = re.sub(r"[\x00-\x1f\x7f]", "", stem).strip(" .") or "export"
+    return stem + extension
+
+
 def profile_kind(type_: str) -> str | None:
     type_upper = type_.upper()
     if type_upper.startswith(NUMERIC):
@@ -169,6 +277,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     join_workspace: dict[str, Any] = {}
     # ponytail: global lock; use per-node locks if category lookup throughput matters.
     category_values_lock = Lock()
+    # ponytail: global lock; use per-node locks if export throughput matters.
+    export_lock = Lock()
 
     def public(node: dict[str, Any]) -> dict[str, str]:
         return {key: node[key] for key in ("id", "name", "kind", "source")}
@@ -473,6 +583,73 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @api.get("/api/nodes")
     def list_nodes():
         return [public(node) for node in nodes.values()]
+
+    @api.post("/api/exports")
+    def export(request: ExportRequest):
+        if request.format == "csv" and len(request.sheets) != 1:
+            raise HTTPException(422, "CSV export requires exactly one sheet")
+        extension = ".csv" if request.format == "csv" else ".xlsx"
+        media_type = "text/csv" if request.format == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        with export_lock:
+            cursors: list[duckdb.DuckDBPyConnection] = []
+            try:
+                sheets = []
+                for sheet in request.sheets:
+                    con = get_connection(sheet.node_id).cursor()
+                    cursors.append(con)
+                    sheets.append((sheet, con, read_only_sql(con, sheet.sql)))
+                with tempfile.NamedTemporaryFile(dir=root, prefix=".export-", suffix=extension, delete=False) as temporary:
+                    path = Path(temporary.name)
+                try:
+                    if request.format == "csv":
+                        _, con, sql = sheets[0]
+                        with path.open("w", encoding="utf-8", newline="") as output:
+                            writer = csv.writer(output)
+                            result = con.execute(sql)
+                            writer.writerow([csv_value(column[0]) for column in result.description])
+                            while rows := result.fetchmany(1000):
+                                writer.writerows([csv_value(value) for value in row] for row in rows)
+                    else:
+                        workbook = Workbook(write_only=True)
+                        try:
+                            used_names: set[str] = set()
+                            for sheet, con, sql in sheets:
+                                worksheet = workbook.create_sheet(export_sheet_name(sheet.name, used_names))
+                                result = con.execute(sql)
+                                worksheet.append(xlsx_row(worksheet, (column[0] for column in result.description)))
+                                while rows := result.fetchmany(1000):
+                                    for row in rows:
+                                        worksheet.append(xlsx_row(worksheet, row))
+                            workbook.save(path)
+                        except Exception:
+                            for worksheet in workbook.worksheets:
+                                try:
+                                    worksheet.close()
+                                except Exception:
+                                    pass
+                                writer = getattr(worksheet, "_writer", None)
+                                if writer is not None:
+                                    try:
+                                        writer.cleanup()
+                                    except (FileNotFoundError, ValueError):
+                                        pass
+                            workbook.close()
+                            raise
+                except duckdb.Error as exc:
+                    path.unlink(missing_ok=True)
+                    raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    raise
+            finally:
+                for con in cursors:
+                    con.close()
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=export_filename(request.filename, extension),
+            background=BackgroundTask(path.unlink, missing_ok=True),
+        )
 
     @api.post("/api/join-workspaces")
     def create_join_workspace(request: JoinWorkspaceRequest):

@@ -1,3 +1,6 @@
+import csv
+import datetime as dt
+import io
 import json
 import sys
 import threading
@@ -5,6 +8,7 @@ import time
 import warnings
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -43,6 +47,250 @@ def join_payload(left_node, left_dataset, right_node, right_dataset, left_keys, 
         "left_keys": left_keys,
         "right_keys": right_keys,
     }
+
+
+def export_sheet(node, name, sql):
+    return {"node_id": node["id"], "name": name, "sql": sql}
+
+
+def test_export_csv_returns_every_row_with_headers_and_safe_filename(client, tmp_path):
+    content = b"value\n" + b"".join(f"{value}\n".encode() for value in range(1205))
+    node = upload(client, "numbers.csv", content)
+
+    response = client.post("/api/exports", json={
+        "format": "csv",
+        "filename": "../../all-data",
+        "sheets": [export_sheet(node, "Numbers", "SELECT * FROM numbers ORDER BY value")],
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/csv")
+    assert 'filename="all-data.csv"' in response.headers["content-disposition"]
+    assert list(csv.reader(io.StringIO(response.text))) == [
+        ["value"], *[[str(value)] for value in range(1205)],
+    ]
+    assert list(tmp_path.glob("*.csv")) == []
+
+
+def test_export_xlsx_writes_multiple_nodes_and_stream_safe_values(client, tmp_path):
+    people = upload(client, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
+    db = tmp_path / "metrics.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE metrics(day DATE, amount DECIMAL(10,2), nested INTEGER[], raw BLOB, note VARCHAR)")
+        con.execute(
+            "INSERT INTO metrics VALUES (?, ?, ?, ?, ?)",
+            [dt.date(2026, 9, 1), "12.34", [1, 2], b"\x00\xff", "a\x01b"],
+        )
+    metrics = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+
+    response = client.post("/api/exports", json={
+        "format": "xlsx",
+        "filename": "../report.csv",
+        "sheets": [
+            export_sheet(people, "People", "SELECT * FROM people ORDER BY id"),
+            export_sheet(metrics, "Metrics", "SELECT * FROM metrics"),
+        ],
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert 'filename="report.xlsx"' in response.headers["content-disposition"]
+    from openpyxl import load_workbook
+    workbook = load_workbook(io.BytesIO(response.content), read_only=True, data_only=True)
+    assert workbook.sheetnames == ["People", "Metrics"]
+    assert list(workbook["People"].values) == [("id", "name"), (1, "Ada"), (2, "Bob")]
+    header, values = list(workbook["Metrics"].values)
+    assert header == ("day", "amount", "nested", "raw", "note")
+    day, amount, nested, raw, note = values
+    assert (day.date() if isinstance(day, dt.datetime) else day) == dt.date(2026, 9, 1)
+    assert amount == 12.34
+    assert (nested, raw, note) == ("[1, 2]", "00ff", "ab")
+    workbook.close()
+    assert list(tmp_path.glob("*.xlsx")) == []
+
+
+def test_export_xlsx_sanitizes_and_uniquifies_sheet_names_case_insensitively(client):
+    node = upload(client, "items.csv", b"value\n1\n")
+    sql = "SELECT * FROM items"
+    response = client.post("/api/exports", json={
+        "format": "xlsx",
+        "sheets": [
+            export_sheet(node, "Bad/Name*", sql),
+            export_sheet(node, "bad_name_", sql),
+            export_sheet(node, "   ", sql),
+            export_sheet(node, "x" * 40, sql),
+            export_sheet(node, "a" * 30 + "'x", sql),
+            export_sheet(node, "a" * 26 + "'bcde", sql),
+            export_sheet(node, "a" * 26 + "'bcde", sql),
+            export_sheet(node, "History", sql),
+            export_sheet(node, "history", sql),
+        ],
+    })
+
+    assert response.status_code == 200, response.text
+    from openpyxl import load_workbook
+    workbook = load_workbook(io.BytesIO(response.content), read_only=True)
+    assert workbook.sheetnames == [
+        "Bad_Name_", "bad_name_ (2)", "Sheet", "x" * 31,
+        "a" * 30, "a" * 26 + "'bcde", "a" * 26 + " (2)",
+        "History_", "history_ (2)",
+    ]
+    workbook.close()
+
+
+def test_export_xlsx_preserves_excel_unsafe_scalars_headers_and_zoned_dates(client, tmp_path):
+    db = tmp_path / "edge-values.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("""
+            CREATE TABLE edge_values(
+              exact DECIMAL(38,18), special DOUBLE, zoned TIMESTAMPTZ,
+              formula_text VARCHAR, error_text VARCHAR, invalid_xml VARCHAR, exact_int HUGEINT,
+              nested DECIMAL(38,18)[]
+            )
+        """)
+        con.executemany(
+            "INSERT INTO edge_values VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("123456789012345678.123456789012345678", float("nan"), "2026-09-01 12:00:00+04", "=1+1", "#N/A", "bad\ufffevalue", 1000000000000001, [Decimal("123456789012345678.123456789012345678")]),
+                ("123456789012345678.123456789012345678", float("inf"), "2026-09-01 12:00:00+04", "=2+2", "#REF!", "clean", 999999999999999, [Decimal("123456789012345678.123456789012345678")]),
+            ],
+        )
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+
+    response = client.post("/api/exports", json={
+        "format": "xlsx",
+        "sheets": [export_sheet(node, "'Edges'", 'SELECT *, 1 AS "bad\u0001header", invalid_xml AS "bad\ufffeheader" FROM edge_values')],
+    })
+
+    assert response.status_code == 200, response.text
+    from openpyxl import load_workbook
+    workbook = load_workbook(io.BytesIO(response.content), read_only=True, data_only=True)
+    assert workbook.sheetnames == ["Edges"]
+    header, first, second = list(workbook["Edges"].values)
+    assert header == ("exact", "special", "zoned", "formula_text", "error_text", "invalid_xml", "exact_int", "nested", "badheader", "badheader")
+    assert first == (
+        "123456789012345678.123456789012345678", "NaN", "2026-09-01T12:00:00+04:00",
+        "=1+1", "#N/A", "badvalue", "1000000000000001",
+        '["123456789012345678.123456789012345678"]', 1, "badvalue",
+    )
+    assert second == (
+        "123456789012345678.123456789012345678", "Infinity", "2026-09-01T12:00:00+04:00",
+        "=2+2", "#REF!", "clean", 999999999999999,
+        '["123456789012345678.123456789012345678"]', 1, "clean",
+    )
+    workbook.close()
+
+
+def test_export_uses_an_independent_cursor_during_concurrent_metadata(tmp_path, monkeypatch):
+    original_connect = duckdb.connect
+    export_started = threading.Event()
+    metadata_done = threading.Event()
+
+    class ExportCursor:
+        def __init__(self, con):
+            self.con = con
+
+        def __getattr__(self, name):
+            return getattr(self.con, name)
+
+        def execute(self, sql, *args, **kwargs):
+            self.con.execute(sql, *args, **kwargs)
+            if "range(5001)" in str(sql):
+                export_started.set()
+                assert metadata_done.wait(2)
+            return self
+
+    class CoordinatedConnection:
+        def __init__(self, con):
+            self.con = con
+
+        def __getattr__(self, name):
+            return getattr(self.con, name)
+
+        def cursor(self):
+            return ExportCursor(self.con.cursor())
+
+    monkeypatch.setattr(backend_app.duckdb, "connect", lambda *args, **kwargs: CoordinatedConnection(original_connect(*args, **kwargs)))
+    with TestClient(create_app(tmp_path)) as client:
+        node = upload(client, "items.csv", b"value\n1\n")
+        payload = {
+            "format": "csv",
+            "sheets": [export_sheet(node, "Rows", "SELECT i FROM range(5001) t(i)")],
+        }
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future = executor.submit(client.post, "/api/exports", json=payload)
+            assert export_started.wait(2)
+            assert client.get(f"/api/nodes/{node['id']}/datasets").status_code == 200
+            metadata_done.set()
+            response = future.result(timeout=5)
+
+    assert response.status_code == 200, response.text
+    assert len(response.text.splitlines()) == 5002
+
+
+def test_export_csv_neutralizes_spreadsheet_formulas(client, tmp_path):
+    db = tmp_path / "formula-text.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE formula_text(value VARCHAR)")
+        con.executemany("INSERT INTO formula_text VALUES (?)", [("=1+1",), ("+1",), ("-1",), ("@SUM(1,1)",), ("plain",)])
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+
+    response = client.post("/api/exports", json={
+        "format": "csv", "sheets": [export_sheet(node, "Values", "SELECT * FROM formula_text")],
+    })
+
+    assert response.status_code == 200, response.text
+    assert list(csv.reader(io.StringIO(response.text))) == [
+        ["value"], ["'=1+1"], ["'+1"], ["'-1"], ["'@SUM(1,1)"], ["plain"],
+    ]
+
+
+def test_xlsx_rejects_oversized_cells_without_truncating_csv(client, tmp_path):
+    from openpyxl.worksheet._writer import ALL_TEMP_FILES
+
+    node = upload(client, "items.csv", b"value\n1\n")
+    sheet = export_sheet(node, "Long", "SELECT repeat('x', 40000) AS value")
+    existing_openpyxl_files = set(ALL_TEMP_FILES)
+
+    xlsx = client.post("/api/exports", json={"format": "xlsx", "sheets": [sheet]})
+    csv_response = client.post("/api/exports", json={"format": "csv", "sheets": [sheet]})
+
+    assert xlsx.status_code == 422
+    assert "exceeds 32767" in xlsx.json()["detail"]
+    assert len(list(csv.reader(io.StringIO(csv_response.text)))[1][0]) == 40000
+    assert not list(tmp_path.glob(".export-*"))
+    assert set(ALL_TEMP_FILES) == existing_openpyxl_files
+
+
+def test_export_rejects_non_read_only_unknown_and_external_sql(client, tmp_path):
+    node = upload(client, "items.csv", b"value\n1\n")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+    for sql in (
+        "DELETE FROM items",
+        "SELECT 1; SELECT 2",
+        "SELECT * FROM missing_table",
+        f"SELECT content FROM read_text('{secret}')",
+    ):
+        response = client.post("/api/exports", json={
+            "format": "xlsx", "sheets": [export_sheet(node, "Items", sql)],
+        })
+        assert response.status_code == 422, response.text
+    assert client.post("/api/exports", json={
+        "format": "csv",
+        "sheets": [{"node_id": "missing", "name": "Items", "sql": "SELECT 1"}],
+    }).status_code == 404
+    assert list(tmp_path.glob("*.xlsx")) == []
+
+
+def test_export_csv_requires_exactly_one_sheet_and_payload_bounds(client):
+    node = upload(client, "items.csv", b"value\n1\n")
+    sheet = export_sheet(node, "Items", "SELECT * FROM items")
+    for sheets in ([], [sheet, sheet]):
+        assert client.post("/api/exports", json={"format": "csv", "sheets": sheets}).status_code == 422
+    assert client.post("/api/exports", json={
+        "format": "xlsx", "sheets": [sheet] * 101,
+    }).status_code == 422
 
 
 def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
