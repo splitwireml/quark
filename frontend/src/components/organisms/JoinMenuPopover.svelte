@@ -99,7 +99,7 @@
                   type="button"
                   active={dataset.id === member.datasetId}
                   title={`${dataset.schema}.${dataset.name}`}
-                  style="height: 24px; max-width: 100%; padding: 0 8px; overflow: hidden; border-radius: 999px; font: 11px var(--font-mono); text-overflow: ellipsis;"
+                  style="height: 24px; max-width: 100%; padding: 0 8px; overflow: hidden; border-radius: var(--radius-lg); font: 11px var(--font-mono); text-overflow: ellipsis;"
                   onclick={() => selectJoinDataset(member.side, dataset.id)}
                 >{dataset.name}</Button>
               {/each}
@@ -194,7 +194,7 @@
   header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
   header span { font: 10px var(--font-mono); color: var(--faint); white-space: nowrap; }
   .members { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .member { min-width: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+  .member { min-width: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px; }
   .member > strong { font-size: 11px; color: var(--ink-2); }
   .sheet-pills { min-height: 24px; display: flex; align-items: center; align-content: flex-start; gap: 4px; flex-wrap: wrap; }
   .member-note { font-size: 10.5px; color: var(--faint); }
