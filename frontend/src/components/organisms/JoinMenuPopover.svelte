@@ -11,15 +11,19 @@
     open: boolean;
     ontoggle: (event: Event) => void;
     sources: NodeInfo[];
-    rightSourceId: string;
-    onSelectSource: (id: string) => void;
-    rightDatasets: DatasetInfo[];
-    datasetsLoading: boolean;
+    joinLeftNodeId: string;
+    joinRightNodeId: string;
+    onSelectSource: (side: Side, id: string) => void;
+    joinLeftDatasets: DatasetInfo[];
+    joinRightDatasets: DatasetInfo[];
+    joinLeftDatasetsLoading: boolean;
+    joinRightDatasetsLoading: boolean;
     joinSelectionError: string;
-    leftDataset: DatasetInfo | undefined;
-    rightDataset: DatasetInfo | undefined;
-    joinDataset: string;
-    onSelectDataset: (id: string) => void;
+    joinLeftDataset: DatasetInfo | undefined;
+    joinRightDataset: DatasetInfo | undefined;
+    joinLeftDatasetId: string;
+    joinRightDatasetId: string;
+    selectJoinDataset: (side: Side, id: string) => void;
     joinLeftKeys: string[];
     joinRightKeys: string[];
     onSetKeys: (side: Side, columns: string[]) => void;
@@ -45,8 +49,9 @@
   };
 
   let {
-    open, ontoggle, sources, rightSourceId, onSelectSource, rightDatasets, datasetsLoading,
-    joinSelectionError, leftDataset, rightDataset, joinDataset, onSelectDataset,
+    open, ontoggle, sources, joinLeftNodeId, joinRightNodeId, onSelectSource,
+    joinLeftDatasets, joinRightDatasets, joinLeftDatasetsLoading, joinRightDatasetsLoading,
+    joinSelectionError, joinLeftDataset, joinRightDataset, joinLeftDatasetId, joinRightDatasetId, selectJoinDataset,
     joinLeftKeys, joinRightKeys, onSetKeys, joinLeftColumns, joinRightColumns,
     onToggleColumn, onSelectAll, onSelectNone, joinPreview, previewLoading, previewError,
     onCheck, canCheck, count, crossSource, saveJoinView, setSaveJoinView,
@@ -54,9 +59,12 @@
   }: Props = $props();
 
   let sourceOptions = $derived(sources.map((source) => ({ value: source.id, label: source.name, description: source.source })));
-  let datasetOptions = $derived(rightDatasets.map((dataset) => ({ value: dataset.id, label: `${dataset.schema}.${dataset.name}`, description: dataset.type })));
-  let leftKeyOptions = $derived((leftDataset?.columns ?? []).map((column) => ({ value: column, label: column })));
-  let rightKeyOptions = $derived((rightDataset?.columns ?? []).map((column) => ({ value: column, label: column })));
+  let members = $derived([
+    { side: 'left' as Side, label: 'First member', sourceId: joinLeftNodeId, datasets: joinLeftDatasets, datasetId: joinLeftDatasetId, loading: joinLeftDatasetsLoading },
+    { side: 'right' as Side, label: 'Second member', sourceId: joinRightNodeId, datasets: joinRightDatasets, datasetId: joinRightDatasetId, loading: joinRightDatasetsLoading }
+  ]);
+  let leftKeyOptions = $derived((joinLeftDataset?.columns ?? []).map((column) => ({ value: column, label: column })));
+  let rightKeyOptions = $derived((joinRightDataset?.columns ?? []).map((column) => ({ value: column, label: column })));
   let keysValid = $derived(joinLeftKeys.length > 0 && joinLeftKeys.length === joinRightKeys.length);
 
   const relationshipLabels: Record<JoinRelationship, string> = {
@@ -73,13 +81,36 @@
   <div class="popover">
     <header><strong>INNER JOIN</strong><span>{crossSource ? 'cross source' : 'same source'}</span></header>
 
-    <div class="selectors">
-      <SelectDropdown label="Source" options={sourceOptions} value={rightSourceId} onchange={onSelectSource} placeholder="Choose a source" />
-      <SelectDropdown label="Sheet" options={datasetOptions} value={joinDataset} onchange={onSelectDataset} placeholder={datasetsLoading ? 'Loading sheets…' : 'Choose a sheet'} disabled={!rightSourceId || datasetsLoading} />
+    <div class="members">
+      {#each members as member (member.side)}
+        <section class="member">
+          <strong>{member.label}</strong>
+          <SelectDropdown label="Source" options={sourceOptions} value={member.sourceId} onchange={(id) => onSelectSource(member.side, id)} placeholder="Choose a source" />
+          <div class="sheet-pills" aria-label={`${member.label} sheets`}>
+            {#if member.loading}
+              <span class="member-note">Loading sheets…</span>
+            {:else if !member.sourceId}
+              <span class="member-note">Choose a source</span>
+            {:else if member.datasets.length === 0}
+              <span class="member-note">No sheets</span>
+            {:else}
+              {#each member.datasets as dataset (dataset.id)}
+                <Button
+                  type="button"
+                  active={dataset.id === member.datasetId}
+                  title={`${dataset.schema}.${dataset.name}`}
+                  style="height: 24px; max-width: 100%; padding: 0 8px; overflow: hidden; border-radius: 999px; font: 11px var(--font-mono); text-overflow: ellipsis;"
+                  onclick={() => selectJoinDataset(member.side, dataset.id)}
+                >{dataset.name}</Button>
+              {/each}
+            {/if}
+          </div>
+        </section>
+      {/each}
     </div>
     {#if joinSelectionError}<p class="error" role="alert">{joinSelectionError}</p>{/if}
 
-    {#if rightDataset && leftDataset}
+    {#if joinRightDataset && joinLeftDataset}
       <fieldset class="keys">
         <legend>Equality keys</legend>
         <div class="key-selectors">
@@ -92,19 +123,19 @@
 
       <div class="columns">
         <section>
-          <header><strong title={leftDataset.name}>{leftDataset.name}</strong><span>{joinLeftColumns.length} selected</span></header>
+          <header><strong title={joinLeftDataset.name}>{joinLeftDataset.name}</strong><span>{joinLeftColumns.length} selected</span></header>
           <div class="select-actions"><Button type="button" onclick={() => onSelectAll('left')}>All</Button><Button type="button" onclick={() => onSelectNone('left')}>None</Button></div>
           <div class="column-list">
-            {#each leftDataset.columns as column (column)}
+            {#each joinLeftDataset.columns as column (column)}
               <Checkbox checked={joinLeftColumns.includes(column)} label={column} title={column} onchange={(checked) => onToggleColumn('left', column, checked)} />
             {/each}
           </div>
         </section>
         <section>
-          <header><strong title={rightDataset.name}>{rightDataset.name}</strong><span>{joinRightColumns.length} selected</span></header>
+          <header><strong title={joinRightDataset.name}>{joinRightDataset.name}</strong><span>{joinRightColumns.length} selected</span></header>
           <div class="select-actions"><Button type="button" onclick={() => onSelectAll('right')}>All</Button><Button type="button" onclick={() => onSelectNone('right')}>None</Button></div>
           <div class="column-list">
-            {#each rightDataset.columns as column (column)}
+            {#each joinRightDataset.columns as column (column)}
               <Checkbox checked={joinRightColumns.includes(column)} label={column} title={column} onchange={(checked) => onToggleColumn('right', column, checked)} />
             {/each}
           </div>
@@ -142,7 +173,7 @@
 </details>
 
 <style>
-  .popover-host { position: relative; }
+  .popover-host { position: static; }
   summary { list-style: none; cursor: pointer; }
   summary::-webkit-details-marker { display: none; }
   .trigger {
@@ -153,15 +184,20 @@
   .trigger:hover { border-color: var(--faint); }
   .trigger.active { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
   .popover {
-    position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
-    width: min(620px, calc(100vw - 32px)); min-height: min(600px, 80vh); max-height: min(80vh, 680px); overflow-y: auto;
+    /* ponytail: fixed to the stable query-bar row; calculate from the trigger if the shell becomes dynamic. */
+    position: fixed; top: 125px; left: clamp(12px, calc((100vw - 620px) / 2), 245px); z-index: 10;
+    width: min(620px, calc(100vw - 24px)); min-height: min(600px, calc(100vh - 137px)); max-height: min(680px, calc(100vh - 137px)); overflow-y: auto;
     padding: 12px; border-radius: var(--radius-xl); background: var(--surface);
     border: 1px solid var(--line-strong); box-shadow: var(--shadow-popover-wide);
     display: flex; flex-direction: column; gap: 10px;
   }
   header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
   header span { font: 10px var(--font-mono); color: var(--faint); white-space: nowrap; }
-  .selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .members { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .member { min-width: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+  .member > strong { font-size: 11px; color: var(--ink-2); }
+  .sheet-pills { min-height: 24px; display: flex; align-items: center; align-content: flex-start; gap: 4px; flex-wrap: wrap; }
+  .member-note { font-size: 10.5px; color: var(--faint); }
   .field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
   .keys { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); }
   legend { padding: 0 4px; font-size: 11px; font-weight: 600; color: var(--muted); }
@@ -186,8 +222,8 @@
   .disabled { opacity: 0.5; }
   .session-note { margin-top: -7px; }
   @media (max-width: 760px) {
-    .popover { width: calc(100vw - 24px); }
-    .selectors, .columns { grid-template-columns: 1fr; }
+    .popover { width: calc(100% - 24px); }
+    .members, .columns { grid-template-columns: 1fr; }
     .column-list { max-height: 140px; }
     dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }

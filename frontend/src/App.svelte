@@ -54,11 +54,15 @@
   let aggregateMetrics = $state<AggregateMetric[]>([]);
   let aggregateSourceSql = $state('');
   let aggregateSourceColumns = $state.raw<ColumnInfo[]>([]);
+  let joinLeftNodeId = $state('');
   let joinRightNodeId = $state('');
+  let joinLeftDatasets = $state.raw<DatasetInfo[]>([]);
   let joinRightDatasets = $state.raw<DatasetInfo[]>([]);
+  let joinLeftDatasetsLoading = $state(false);
   let joinRightDatasetsLoading = $state(false);
   let joinSelectionError = $state('');
-  let joinDataset = $state('');
+  let joinLeftDatasetId = $state('');
+  let joinRightDatasetId = $state('');
   let joinLeftKeys = $state<string[]>([]);
   let joinRightKeys = $state<string[]>([]);
   let joinLeftColumns = $state<string[]>([]);
@@ -113,7 +117,8 @@
   let filterInput = $state<HTMLInputElement | HTMLSelectElement | null>(null);
   let requestId = 0;
   let datasetRequestId = 0;
-  let joinDatasetRequestId = 0;
+  let joinLeftDatasetRequestId = 0;
+  let joinRightDatasetRequestId = 0;
   let joinPreviewRequestId = 0;
   let categoryRequestId = 0;
   let statsRequestId = 0;
@@ -138,12 +143,12 @@
 
   let selectedNode = $derived(nodes.find((node) => node.id === selectedNodeId));
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
-  let joinDatasetChoices = $derived(joinRightNodeId === selectedNodeId ? joinRightDatasets.filter((dataset) => dataset.id !== selectedDataset) : joinRightDatasets);
-  let joinRightDataset = $derived(joinDatasetChoices.find((dataset) => dataset.id === joinDataset));
+  let joinLeftDataset = $derived(joinLeftDatasets.find((dataset) => dataset.id === joinLeftDatasetId));
+  let joinRightDataset = $derived(joinRightDatasets.find((dataset) => dataset.id === joinRightDatasetId));
   let joinKeyPairs = $derived(joinLeftKeys.map((left, index) => ({ left, right: joinRightKeys[index] ?? '' })));
   let joinKeysValid = $derived(joinLeftKeys.length > 0 && joinLeftKeys.length === joinRightKeys.length);
-  let joinIsCrossSource = $derived(!!joinRightNodeId && joinRightNodeId !== selectedNodeId);
-  let canPreviewJoin = $derived(!!currentDataset && !!joinRightDataset && !!joinRightNodeId && !joinRightDatasetsLoading);
+  let joinIsCrossSource = $derived(!!joinLeftNodeId && !!joinRightNodeId && joinLeftNodeId !== joinRightNodeId);
+  let canPreviewJoin = $derived(!!joinLeftDataset && !!joinRightDataset && !!joinLeftNodeId && !!joinRightNodeId && !joinLeftDatasetsLoading && !joinRightDatasetsLoading);
   let canRunJoin = $derived(canPreviewJoin && joinKeysValid && (joinLeftColumns.length > 0 || joinRightColumns.length > 0));
   let totalPages = $derived(pageLimit(result?.total_pages ?? 0));
   let visibleColumns = $derived(result?.columns.filter((column) => !hiddenColumns.includes(column.name)) ?? []);
@@ -186,50 +191,78 @@
   function clearAggregateDraft() { aggregateColumn = ''; aggregateColumnSearch = ''; aggregateColumns = []; aggregateMetrics = []; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
   function clearJoinPreview() { joinPreviewRequestId++; joinPreview = null; joinPreviewLoading = false; joinPreviewError = ''; }
   function clearJoinDraft() {
-    joinDatasetRequestId++;
+    joinLeftDatasetRequestId++;
+    joinRightDatasetRequestId++;
     clearJoinPreview();
-    joinRightNodeId = selectedNodeId;
-    joinRightDatasets = [...datasets];
+    joinLeftNodeId = selectedNodeId;
+    joinRightNodeId = '';
+    joinLeftDatasets = [...datasets];
+    joinRightDatasets = [];
+    joinLeftDatasetsLoading = false;
     joinRightDatasetsLoading = false;
     joinSelectionError = '';
-    joinDataset = '';
+    joinLeftDatasetId = selectedDataset;
+    joinRightDatasetId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
-    joinLeftColumns = [];
+    joinLeftColumns = [...(datasets.find((dataset) => dataset.id === selectedDataset)?.columns ?? [])];
     joinRightColumns = [];
     saveJoinView = false;
     joinViewName = '';
     if (queryMenuOpen === 'joins') queryMenuOpen = null;
   }
-  async function selectJoinSource(id: string) {
-    const generation = ++joinDatasetRequestId;
+  async function selectJoinSource(side: 'left' | 'right', id: string) {
+    const generation = side === 'left' ? ++joinLeftDatasetRequestId : ++joinRightDatasetRequestId;
     clearJoinPreview();
-    joinRightNodeId = id;
-    joinRightDatasets = [];
-    joinRightDatasetsLoading = false;
     joinSelectionError = '';
-    joinDataset = '';
     joinLeftKeys = [];
     joinRightKeys = [];
-    joinLeftColumns = [];
-    joinRightColumns = [];
-    if (id !== selectedNodeId) saveJoinView = false;
+    if (side === 'left') {
+      joinLeftNodeId = id;
+      joinLeftDatasets = [];
+      joinLeftDatasetId = '';
+      joinLeftColumns = [];
+      joinLeftDatasetsLoading = !!id;
+    } else {
+      joinRightNodeId = id;
+      joinRightDatasets = [];
+      joinRightDatasetId = '';
+      joinRightColumns = [];
+      joinRightDatasetsLoading = !!id;
+    }
+    const otherId = side === 'left' ? joinRightNodeId : joinLeftNodeId;
+    if (id && otherId && id !== otherId) saveJoinView = false;
     if (!id) return;
-    if (id === selectedNodeId) { joinRightDatasets = [...datasets]; return; }
-    joinRightDatasetsLoading = true;
     try {
-      const next = await api.listDatasets(id);
-      if (generation === joinDatasetRequestId) joinRightDatasets = next;
-    } catch (reason) { if (generation === joinDatasetRequestId) joinSelectionError = message(reason); }
-    finally { if (generation === joinDatasetRequestId) joinRightDatasetsLoading = false; }
+      const next = id === selectedNodeId ? [...datasets] : await api.listDatasets(id);
+      const currentGeneration = side === 'left' ? joinLeftDatasetRequestId : joinRightDatasetRequestId;
+      if (generation !== currentGeneration) return;
+      if (side === 'left') joinLeftDatasets = next;
+      else joinRightDatasets = next;
+    } catch (reason) {
+      const currentGeneration = side === 'left' ? joinLeftDatasetRequestId : joinRightDatasetRequestId;
+      if (generation === currentGeneration) joinSelectionError = message(reason);
+    } finally {
+      const currentGeneration = side === 'left' ? joinLeftDatasetRequestId : joinRightDatasetRequestId;
+      if (generation === currentGeneration) {
+        if (side === 'left') joinLeftDatasetsLoading = false;
+        else joinRightDatasetsLoading = false;
+      }
+    }
   }
-  function selectJoinDataset(id: string) {
+  function selectJoinDataset(side: 'left' | 'right', id: string) {
     clearJoinPreview();
-    joinDataset = id;
-    const right = joinDatasetChoices.find((dataset) => dataset.id === id);
-    joinLeftColumns = [...(currentDataset?.columns ?? [])];
-    joinRightColumns = [...(right?.columns ?? [])];
-    const common = currentDataset?.columns.find((column) => right?.columns.includes(column)) ?? '';
+    const selected = (side === 'left' ? joinLeftDatasets : joinRightDatasets).find((dataset) => dataset.id === id);
+    if (side === 'left') {
+      joinLeftDatasetId = id;
+      joinLeftColumns = [...(selected?.columns ?? [])];
+    } else {
+      joinRightDatasetId = id;
+      joinRightColumns = [...(selected?.columns ?? [])];
+    }
+    const left = side === 'left' ? selected : joinLeftDataset;
+    const right = side === 'right' ? selected : joinRightDataset;
+    const common = left?.columns.find((column) => right?.columns.includes(column)) ?? '';
     joinLeftKeys = common ? [common] : [];
     joinRightKeys = common ? [common] : [];
   }
@@ -241,14 +274,14 @@
   }
   function selectJoinColumns(side: 'left' | 'right', columns: string[]) { clearJoinPreview(); if (side === 'left') joinLeftColumns = columns; else joinRightColumns = columns; }
   async function checkJoin(): Promise<JoinWorkspaceResponse | null> {
-    if (!currentDataset || !joinRightDataset || !joinRightNodeId) { joinPreviewError = 'Choose a source and sheet to check the join.'; return null; }
+    if (!joinLeftDataset || !joinRightDataset || !joinLeftNodeId || !joinRightNodeId) { joinPreviewError = 'Choose both sources and sheets to check the join.'; return null; }
     const id = ++joinPreviewRequestId;
     joinPreview = null;
     joinPreviewLoading = true;
     joinPreviewError = '';
     try {
       const next = await api.previewJoinWorkspace({
-        left: { node_id: selectedNodeId, dataset: currentDataset.id },
+        left: { node_id: joinLeftNodeId, dataset: joinLeftDataset.id },
         right: { node_id: joinRightNodeId, dataset: joinRightDataset.id },
         left_keys: joinLeftKeys,
         right_keys: joinRightKeys
@@ -271,7 +304,7 @@
     queryMenuOpen = null;
     closeSql(false);
     await runSql(query, false, false, preview.node_id);
-    if (!joinIsCrossSource && saveJoinView && !sqlError && sqlBase === query) saveQuery(query, joinViewName);
+    if (!joinIsCrossSource && saveJoinView && !sqlError && sqlBase === query) saveQuery(query, joinViewName, joinLeftNodeId, joinLeftDatasetId);
   }
   function addAggregateColumn(column: string) { if (!column || aggregateColumns.includes(column)) return; aggregateColumns = [...aggregateColumns, column]; aggregateColumn = ''; aggregateMetrics = ['count']; }
   function removeAggregateColumn(column: string) { const next = aggregateColumns.filter((item) => item !== column); aggregateColumns = next; aggregateMetrics = next.length ? ['count'] : []; }
@@ -293,11 +326,11 @@
     catch { storageError = 'Saved queries could not be stored in this browser.'; }
   }
 
-  function saveQuery(value: string, displayName = '') {
+  function saveQuery(value: string, displayName = '', nodeId = selectedNodeId, dataset = selectedDataset) {
     const query = value.trim();
     if (!query) return;
     const firstLine = query.split(/\r?\n/, 1)[0].replace(/\s+/g, ' ').trim();
-    storeSavedQueries([...savedQueries, { id: crypto.randomUUID(), name: displayName.trim().slice(0, 64) || firstLine.slice(0, 64) || `Query ${savedQueries.length + 1}`, sql: query, nodeId: selectedNodeId, dataset: selectedDataset }]);
+    storeSavedQueries([...savedQueries, { id: crypto.randomUUID(), name: displayName.trim().slice(0, 64) || firstLine.slice(0, 64) || `Query ${savedQueries.length + 1}`, sql: query, nodeId, dataset }]);
   }
 
   function deleteQuery(id: string) { storeSavedQueries(savedQueries.filter((query) => query.id !== id)); }
@@ -962,13 +995,12 @@
                   {#if queryMode === 'builder'}
                     <JoinMenuPopover
                       open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
-                      sources={nodes} rightSourceId={joinRightNodeId} onSelectSource={(id) => { void selectJoinSource(id); }}
-                      rightDatasets={joinDatasetChoices} datasetsLoading={joinRightDatasetsLoading} {joinSelectionError}
-                      leftDataset={currentDataset} rightDataset={joinRightDataset}
-                      {joinDataset} onSelectDataset={selectJoinDataset}
+                      sources={nodes} {joinLeftNodeId} {joinRightNodeId} onSelectSource={(side, id) => { void selectJoinSource(side, id); }}
+                      {joinLeftDatasets} {joinRightDatasets} {joinLeftDatasetsLoading} {joinRightDatasetsLoading} {joinSelectionError}
+                      {joinLeftDataset} {joinRightDataset} {joinLeftDatasetId} {joinRightDatasetId} {selectJoinDataset}
                       {joinLeftKeys} {joinRightKeys} onSetKeys={setJoinKeys}
                       {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
-                      onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? currentDataset?.columns ?? [] : joinRightDataset?.columns ?? [])])}
+                      onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? joinLeftDataset?.columns ?? [] : joinRightDataset?.columns ?? [])])}
                       onSelectNone={(side) => selectJoinColumns(side, [])}
                       {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
                       onCheck={checkJoin} canCheck={canPreviewJoin} {count}
