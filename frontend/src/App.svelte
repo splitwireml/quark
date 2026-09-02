@@ -133,6 +133,7 @@
   let joinPreviewRequestId = 0;
   let categoryRequestId = 0;
   let statsRequestId = 0;
+  let replayRequestId = 0;
   let workbookDialog = $state<HTMLDialogElement | null>(null);
   let workbookPreview = $state<WorkbookPreview | null>(null);
   let workbookSheets = $state<string[]>([]);
@@ -168,6 +169,7 @@
   let activeJoin = $state.raw<JoinWorkspaceRequest | undefined>(undefined);
   let openDiff = $state.raw<VersionDiff | null>(null);
   let diffDialog = $state<HTMLDialogElement | null>(null);
+  let diffReturnFocus: HTMLElement | null = null;
   let editorHost = $state<HTMLDivElement | null>(null);
   let sqlTrigger = $state<HTMLButtonElement | null>(null);
   let editorView: EditorView | null = null;
@@ -198,6 +200,11 @@
     return names.filter((name, index) => byName.has(name) && names.indexOf(name) === index).map((name) => byName.get(name)!);
   });
   let visibleColumns = $derived(orderedColumns.filter((column) => !hiddenColumns.includes(column.name)));
+  let rowColumns = $derived.by(() => {
+    if (!reorderOrigin) return visibleColumns;
+    const byName = new Map((result?.columns ?? []).map((column) => [column.name, column]));
+    return reorderOrigin.map((name) => byName.get(name)).filter((column): column is ColumnInfo => !!column && !hiddenColumns.includes(column.name));
+  });
   let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
   let aggregateColumnMatches = $derived.by(() => { const query = aggregateColumnSearch.trim().toLowerCase(); return query ? aggregateFieldOptions.filter((column) => column.name.toLowerCase().includes(query)) : aggregateFieldOptions; });
   let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === aggregateColumns[aggregateColumns.length - 1]));
@@ -666,9 +673,16 @@
     const versions = value.versions.map(cleanVersion).filter((version): version is Version => version !== null);
     const views = value.views.map(cleanView).filter((view): view is View => view !== null);
     const pending = value.pendingChanges.map(cleanChange).filter((change): change is VersionChange => change !== null);
+    const versionIds = new Set(versions.map((version) => version.id));
+    const viewIds = new Set(views.map((view) => view.id));
     if (versions.length !== value.versions.length || views.length !== value.views.length || pending.length !== value.pendingChanges.length
+      || versionIds.size !== versions.length || viewIds.size !== views.length
       || versions.some((version) => version.nodeId !== value.nodeId || version.dataset !== value.dataset)
-      || views.some((view) => view.nodeId !== value.nodeId || view.dataset !== value.dataset)) return null;
+      || views.some((view) => view.nodeId !== value.nodeId || view.dataset !== value.dataset)
+      || versions.some((version, index) => version.number !== index + 1
+        || new Set(version.columns).size !== version.columns.length
+        || version.hiddenColumns.some((column) => !version.columns.includes(column))
+        || (index === 0 ? version.parentId !== undefined : !version.parentId || !versions.slice(0, index).some((parent) => parent.id === version.parentId)))) return null;
     const activeVersionId = versions.some((version) => version.id === value.activeVersionId) ? value.activeVersionId : versions[versions.length - 1].id;
     return {
       pendingCount: pending.length,
@@ -685,9 +699,9 @@
   }
 
   function persistHistories(next: DatasetVersionHistory[]): boolean {
-    versionHistories = next;
     try {
       localStorage.setItem(VERSIONING_STORAGE_KEY, JSON.stringify(next));
+      versionHistories = next;
       storageError = '';
       return true;
     } catch {
@@ -703,10 +717,15 @@
     try {
       const parsed: unknown = JSON.parse(localStorage.getItem(VERSIONING_STORAGE_KEY) ?? '[]');
       if (!Array.isArray(parsed)) throw new Error('Invalid version history');
-      const cleaned = parsed.map(cleanHistory).filter((item): item is NonNullable<ReturnType<typeof cleanHistory>> => item !== null);
-      if (cleaned.length !== parsed.length) readError = 'Some browser version history was invalid and was ignored.';
-      histories = cleaned.map((item) => item.history);
-      pendingCount = cleaned.reduce((total, item) => total + item.pendingCount, 0);
+      const seen = new Set<string>();
+      for (const value of parsed) {
+        const cleaned = cleanHistory(value);
+        const key = cleaned ? `${cleaned.history.nodeId}\0${cleaned.history.dataset}` : '';
+        if (!cleaned || seen.has(key)) { readError = 'Some browser version history was invalid and was ignored.'; continue; }
+        seen.add(key);
+        histories.push(cleaned.history);
+        pendingCount += cleaned.pendingCount;
+      }
     } catch {
       readError = 'Version history could not be read from this browser.';
     }
@@ -714,22 +733,30 @@
     if (readError && !storageError) storageError = readError;
     if (pendingCount) recordingNotice = `Cleared ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} because working SQL is not stored.`;
 
-    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (legacy === null) return;
     try {
+      const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (legacy === null) return;
       const parsed: unknown = JSON.parse(legacy);
       if (!Array.isArray(parsed)) throw new Error('Invalid legacy Views');
       legacyEntries = parsed;
-      migratedLegacyViews = migrateSavedQueries(parsed, new Date().toISOString());
+      const seen = new Set<string>();
+      migratedLegacyViews = migrateSavedQueries(parsed, new Date().toISOString()).filter((view) => {
+        const key = `${view.nodeId}\0${view.dataset}\0${view.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
     } catch {
       if (!storageError) storageError = 'Legacy Views could not be read from this browser.';
     }
   }
 
-  function replaceHistory(nextHistory: DatasetVersionHistory): boolean {
+  function replaceHistory(nextHistory: DatasetVersionHistory, retainOnFailure = false): boolean {
     const index = versionHistories.findIndex((history) => history.nodeId === nextHistory.nodeId && history.dataset === nextHistory.dataset);
     const next = index < 0 ? [...versionHistories, nextHistory] : versionHistories.map((history, itemIndex) => itemIndex === index ? nextHistory : history);
-    return persistHistories(next);
+    const saved = persistHistories(next);
+    if (!saved && retainOnFailure) versionHistories = next;
+    return saved;
   }
 
   function stageChange(change: VersionChange, viewSql = result?.sql ?? activeSql) {
@@ -746,7 +773,7 @@
     next = stageVersionChange(next, change);
     currentSurface = 'version';
     recordingNotice = '';
-    replaceHistory(next);
+    replaceHistory(next, true);
   }
 
   function blockViewExecutionWhileRecording(): boolean {
@@ -866,6 +893,7 @@
   }
 
   async function replayStored(sql: string, nodeId: string, join?: JoinWorkspaceRequest, columns?: string[], hidden: string[] = []): Promise<boolean> {
+    const replayId = ++replayRequestId;
     page = 1;
     pageInput = '1';
     let targetNodeId = nodeId;
@@ -875,6 +903,7 @@
       sqlError = message(reason);
       return false;
     }
+    if (replayId !== replayRequestId) return false;
     if (!await runSql(sql, false, false, targetNodeId)) return false;
     activeJoin = join;
     if (result) reconcileColumns(result, columns);
@@ -919,12 +948,20 @@
     if (history) replaceHistory(activateVersion(history, version.id));
   }
 
-  async function showDiff(history: DatasetVersionHistory, version: Version) {
+  async function showDiff(history: DatasetVersionHistory, version: Version, returnFocus: HTMLElement | null = null) {
     const diff = versionDiff(history, version.id);
     if (!diff) return;
+    diffReturnFocus = returnFocus;
     openDiff = diff;
     await tick();
     diffDialog?.showModal();
+  }
+
+  function closeDiff() {
+    const target = diffReturnFocus;
+    diffReturnFocus = null;
+    openDiff = null;
+    void tick().then(() => target?.focus());
   }
 
   async function stopRecording() {
@@ -939,7 +976,7 @@
     });
     if (!replaceHistory(next)) return;
     const version = next.versions.find((item) => item.id === next.activeVersionId);
-    if (version) await showDiff(next, version);
+    if (version) await showDiff(next, version, tableScroll);
   }
 
   async function initializeHistory() {
@@ -1058,6 +1095,7 @@
   async function selectNode(id: string, preferredDataset = '') {
     if (id === selectedNodeId && result) { railOpen = false; return; }
     if (!discardPending()) return;
+    replayRequestId++;
     const datasetId = ++datasetRequestId;
     requestId++;
     closeInspector();
@@ -1092,6 +1130,7 @@
   async function selectDataset(name: string) {
     if (name === selectedDataset && result) { workspaceTab = 'data'; return; }
     if (!discardPending()) return;
+    replayRequestId++;
     closeInspector();
     selectedDataset = name;
     resetSql(datasets.find((dataset) => dataset.id === name));
@@ -1716,7 +1755,7 @@
             <VersionsViewsPane
               history={currentHistory} {storageError}
               onRestore={restoreVersion}
-              onDiff={(version) => currentHistory && showDiff(currentHistory, version)}
+              onDiff={(version, trigger) => currentHistory && showDiff(currentHistory, version, trigger)}
               onOpenView={openView}
             />
           {:else}
@@ -1826,7 +1865,7 @@
                       <div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
                     {:else if result}
                       <DataGridTable
-                        columns={visibleColumns} rows={result.rows}
+                        columns={visibleColumns} bodyColumns={rowColumns} rows={result.rows}
                         caption={`Rows from ${currentDataset?.name ?? selectedDataset}`}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
                         onSort={cycleSort}
@@ -1956,7 +1995,7 @@
 {/if}
 
 {#if openDiff}
-  <VersionDiffDialog diff={openDiff} setDialog={(element) => diffDialog = element} onClose={() => openDiff = null} />
+  <VersionDiffDialog diff={openDiff} setDialog={(element) => diffDialog = element} onClose={closeDiff} />
 {/if}
 
 <style>

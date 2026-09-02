@@ -12,6 +12,7 @@
 
   type Props = {
     columns: ColumnInfo[];
+    bodyColumns: ColumnInfo[];
     rows: Record<string, unknown>[];
     caption: string;
     canQuery: boolean;
@@ -56,7 +57,7 @@
   };
 
   let {
-    columns, rows, caption, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
+    columns, bodyColumns, rows, caption, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
@@ -263,7 +264,7 @@
     <tbody>
       {#each rows as row, index (row)}
         <tr class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
-          {#each columns as column (column.name)}
+          {#each bodyColumns as column (column.name)}
             {@const selected = selectedCell?.row === index && selectedCell.column === column.name}
             {@const expanded = selected && selectedCell?.expanded}
             {@const editing = editingCell?.row === index && editingCell.column === column.name}

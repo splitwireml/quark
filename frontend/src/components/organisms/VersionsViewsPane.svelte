@@ -6,7 +6,7 @@
     history: DatasetVersionHistory | undefined;
     storageError: string;
     onRestore: (version: Version) => void;
-    onDiff: (version: Version) => void;
+    onDiff: (version: Version, trigger: HTMLButtonElement) => void;
     onOpenView: (view: View) => void;
   };
   let { history, storageError, onRestore, onDiff, onOpenView }: Props = $props();
@@ -19,12 +19,12 @@
       <h2 id="versions-title">Versions</h2>
       <div class="list">
         {#each [...history.versions].reverse() as version (version.id)}
-          <article class:active={version.id === history.activeVersionId}>
+          <article class:active={version.id === history.activeVersionId} aria-current={version.id === history.activeVersionId ? 'true' : undefined}>
             <div><strong>Version {version.number}</strong><time datetime={version.timestamp}>{new Date(version.timestamp).toLocaleString()}</time></div>
             <p>{version.changes.length ? version.changes.map((change) => change.summary).join(' · ') : 'Source'}</p>
             <footer>
               <Button onclick={() => onRestore(version)}>Restore</Button>
-              {#if version.number > 1}<Button onclick={() => onDiff(version)}>View diff</Button>{/if}
+              {#if version.number > 1}<Button onclick={(event: MouseEvent) => onDiff(version, event.currentTarget as HTMLButtonElement)}>View diff</Button>{/if}
             </footer>
           </article>
         {/each}
