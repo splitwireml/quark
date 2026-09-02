@@ -18,8 +18,8 @@ type ViewInput = Omit<View, 'nodeId' | 'dataset'>;
 
 function copyJoin(join: JoinWorkspaceRequest): JoinWorkspaceRequest {
   return {
-    left: { ...join.left },
-    right: { ...join.right },
+    left: { node_id: join.left.node_id, dataset: join.left.dataset },
+    right: { node_id: join.right.node_id, dataset: join.right.dataset },
     left_keys: [...join.left_keys],
     right_keys: [...join.right_keys]
   };
@@ -66,10 +66,15 @@ export function activateVersion(history: DatasetVersionHistory, versionId: strin
 }
 
 export function stageVersionChange(history: DatasetVersionHistory, change: VersionChange): DatasetVersionHistory {
+  const metadata = {
+    kind: change.kind,
+    summary: change.summary,
+    ...(change.details ? { details: { ...change.details } } : {})
+  };
   return {
     ...history,
     pendingParentId: history.pendingParentId ?? history.activeVersionId,
-    pendingChanges: [...history.pendingChanges, change]
+    pendingChanges: [...history.pendingChanges, metadata]
   };
 }
 

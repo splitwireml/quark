@@ -153,3 +153,19 @@ test('migrates only valid legacy saved queries into views', () => {
     timestamp: '2026-09-02T08:15:00.000Z'
   }]);
 });
+
+test('strips runtime payload fields from joins and staged changes', () => {
+  const unsafeJoin = {
+    ...join,
+    left: { ...join.left, rows: [{ make: 'BMW' }] },
+    right: { ...join.right, rows: [{ name: 'BMW' }] }
+  };
+  const history = stageVersionChange(createSourceHistory({ ...source, join: unsafeJoin }), {
+    kind: 'join',
+    summary: 'Join makers',
+    rows: [{ make: 'BMW' }]
+  });
+
+  assert.deepEqual(history.versions[0].join, join);
+  assert.deepEqual(history.pendingChanges, [{ kind: 'join', summary: 'Join makers' }]);
+});
