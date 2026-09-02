@@ -178,6 +178,65 @@ export interface SavedQuery {
   dataset: string;
 }
 
+export type SerializableValue = null | boolean | number | string | SerializableValue[] | { [key: string]: SerializableValue };
+
+export interface VersionChange {
+  kind: string;
+  summary: string;
+  details?: Record<string, SerializableValue>;
+}
+
+export interface Version {
+  id: string;
+  parentId?: string;
+  number: number;
+  nodeId: string;
+  dataset: string;
+  sql: string;
+  columns: string[];
+  hiddenColumns: string[];
+  timestamp: string;
+  changes: VersionChange[];
+  join?: JoinWorkspaceRequest;
+}
+
+export interface View {
+  id: string;
+  name: string;
+  nodeId: string;
+  dataset: string;
+  sql: string;
+  timestamp: string;
+  join?: JoinWorkspaceRequest;
+}
+
+export interface DatasetVersionHistory {
+  nodeId: string;
+  dataset: string;
+  versions: Version[];
+  views: View[];
+  activeVersionId: string;
+  pendingParentId: string | null;
+  pendingChanges: VersionChange[];
+}
+
+export interface VersionRestoreMetadata {
+  nodeId: string;
+  dataset: string;
+  sql: string;
+  columns: string[];
+  hiddenColumns: string[];
+  join?: JoinWorkspaceRequest;
+}
+
+export interface VersionDiff {
+  parentId: string;
+  versionId: string;
+  before: VersionRestoreMetadata;
+  after: VersionRestoreMetadata;
+  changes: VersionChange[];
+}
+
 export type ExportFormat = 'csv' | 'xlsx';
 
 export interface ExportSheetRequest {

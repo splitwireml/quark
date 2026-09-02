@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "node --experimental-strip-types --test tests/mutation-sql.test.js tests/versioning.test.js",
     "test:mutation": "node --experimental-strip-types --test tests/mutation-sql.test.js"
   },
   "devDependencies": {
