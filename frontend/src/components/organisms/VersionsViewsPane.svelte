@@ -23,7 +23,7 @@
             <div><strong>Version {version.number}</strong><time datetime={version.timestamp}>{new Date(version.timestamp).toLocaleString()}</time></div>
             <p>{version.changes.length ? version.changes.map((change) => change.summary).join(' · ') : 'Source'}</p>
             <footer>
-              <Button onclick={() => onRestore(version)} disabled={version.id === history.activeVersionId}>Restore</Button>
+              <Button onclick={() => onRestore(version)}>Restore</Button>
               {#if version.number > 1}<Button onclick={() => onDiff(version)}>View diff</Button>{/if}
             </footer>
           </article>

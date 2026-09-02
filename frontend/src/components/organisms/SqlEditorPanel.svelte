@@ -26,7 +26,7 @@
   <div use:hostRef class="editor" class:has-error={hasError}></div>
   {#if sqlError}<p class="error" role="alert">{sqlError}</p>{/if}
   <footer>
-    <Button variant="primary" title="Run SQL and save View (Shift+Enter)" onclick={onRun} disabled={!canRun}>{running ? 'Running…' : 'Run &amp; save View'}</Button>
+    <Button variant="primary" title="Run SQL and save View (Shift+Enter)" onclick={onRun} disabled={!canRun}>{running ? 'Running…' : 'Run & save View'}</Button>
   </footer>
 </aside>
 

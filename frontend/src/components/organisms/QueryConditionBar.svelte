@@ -76,7 +76,7 @@
       <Button onclick={onSaveView} disabled={!canSaveView}>Save View</Button>
       <button type="button" class="link" onclick={onClearConditions}>Clear conditions</button>
     {/if}
-    {#if isSqlMode}<Button onclick={onBackToFullTable}>Back to full table</Button>{/if}
+    {#if isSqlMode}<Button onclick={onBackToFullTable}>Back to active Version</Button>{/if}
   {:else}
     <div class="tokens"><Chip title={activeSql}>SQL view</Chip></div>
     <Button onclick={onSaveView} disabled={!activeSql}>Save View</Button>

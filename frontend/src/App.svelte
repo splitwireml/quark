@@ -859,6 +859,29 @@
     return true;
   }
 
+  async function replayVersionSnapshot(version: Version): Promise<boolean> {
+    workspaceTab = 'data';
+    filters = [];
+    sorts = [];
+    dedupeColumns = [];
+    dedupeDraft = [];
+    page = 1;
+    pageInput = '1';
+    if (version.number === 1 && !version.join) {
+      resetSql(currentDataset);
+      activeJoin = undefined;
+      if (!await loadData()) return false;
+      if (result) reconcileColumns(result, version.columns);
+      hiddenColumns = version.hiddenColumns.filter((column) => columnOrder.includes(column));
+      shownColumnTypes = [];
+      currentSurface = 'version';
+      return true;
+    }
+    const replayed = await replayStored(version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns);
+    if (replayed) currentSurface = 'version';
+    return replayed;
+  }
+
   async function openView(view: View) {
     if (!discardPending()) return;
     workspaceTab = 'data';
@@ -867,11 +890,9 @@
 
   async function restoreVersion(version: Version) {
     if (!discardPending()) return;
-    workspaceTab = 'data';
-    if (!await replayStored(version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns)) return;
+    if (!await replayVersionSnapshot(version)) return;
     const history = versionHistories.find((item) => item.nodeId === version.nodeId && item.dataset === version.dataset);
     if (history) replaceHistory(activateVersion(history, version.id));
-    currentSurface = 'version';
   }
 
   async function showDiff(history: DatasetVersionHistory, version: Version) {
@@ -914,6 +935,12 @@
     if (!replaceHistory(history)) return;
     removeMigratedLegacy(legacyViews);
     const active = history.versions.find((version) => version.id === history.activeVersionId) ?? history.versions[history.versions.length - 1];
+    if (active.number === 1 && !active.join) {
+      if (result) reconcileColumns(result, active.columns);
+      hiddenColumns = active.hiddenColumns.filter((column) => columnOrder.includes(column));
+      currentSurface = 'version';
+      return;
+    }
     if (await replayStored(active.sql, active.nodeId, active.join, active.columns, active.hiddenColumns)) currentSurface = 'version';
   }
 
@@ -1264,19 +1291,12 @@
   async function removeSort(column: string) { sorts = sorts.filter((sort) => sort.column !== column); page = 1; await loadData(); }
   async function clearQuery() { filters = []; sorts = []; dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
   async function backToBuilder() {
-    queryMode = 'builder';
-    activeSqlNodeId = '';
-    activeJoin = undefined;
-    currentSurface = 'version';
+    if (!discardPending()) return;
+    const version = currentHistory?.versions.find((item) => item.id === currentHistory.activeVersionId);
+    if (!version) return;
     clearAggregateDraft();
     clearJoinDraft();
-    filters = [];
-    sorts = [];
-    dedupeColumns = [];
-    dedupeDraft = [];
-    page = 1;
-    pageInput = '1';
-    await loadData();
+    await replayVersionSnapshot(version);
   }
   function toggleDedupe(column: string, checked: boolean) { dedupeDraft = checked ? [...dedupeDraft, column] : dedupeDraft.filter((item) => item !== column); }
   async function applyDedupe() { dedupeColumns = [...dedupeDraft]; page = 1; await loadData(); }
@@ -1611,7 +1631,7 @@
                 onRemoveFilter={removeFilter} onRemoveSort={removeSort} onClearDedupe={clearDedupe}
                 onSaveView={() => addView(result?.sql ?? activeSql)} canSaveView={!!result?.sql}
                 onClearConditions={clearQuery}
-                isSqlMode={queryMode === 'sql'}
+                isSqlMode={currentSurface === 'view'}
                 onBackToFullTable={backToBuilder}
                 onBackToBuilder={backToBuilder}
                 {columnSearch} setColumnSearch={(value) => columnSearch = value}
