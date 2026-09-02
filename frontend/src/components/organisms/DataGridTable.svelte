@@ -40,13 +40,22 @@
     aggregateRowTones: boolean[];
     setTableScroll: (el: HTMLDivElement | null) => void;
     onInsert: (left: ColumnInfo, right: ColumnInfo | null, trigger: HTMLButtonElement) => void;
+    onModify: (column: ColumnInfo) => void;
+    onDuplicate: (column: ColumnInfo) => void;
+    onRename: (column: ColumnInfo) => void;
+    renamingColumn: { original: string; value: string } | null;
+    onStartRename: (column: ColumnInfo) => void;
+    onRenameValue: (value: string) => void;
+    onCommitRename: () => void;
+    onCancelRename: () => void;
   };
 
   let {
     columns, rows, caption, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
-    onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert
+    onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
+    renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
@@ -99,10 +108,17 @@
             {canQuery}
             protectedColumn={isColumnProtected(column.name)}
             canHide={columns.length > 1}
+            renaming={renamingColumn?.original === column.name}
+            renameValue={renamingColumn?.original === column.name ? renamingColumn.value : column.name}
+            renameSaving={!canEdit}
             onsort={() => onSort(column)}
             onfilter={(trigger) => onFilter(column, trigger)}
             onprofile={(trigger) => onProfile(column, trigger)}
             onhide={() => onHide(column.name)}
+            onstartrename={() => onStartRename(column)}
+            onrenamevalue={onRenameValue}
+            oncommitrename={onCommitRename}
+            oncancelrename={onCancelRename}
             oncontextmenu={(event) => openContextMenu(event, column)}
           />
           <th class="insertion-slot" scope="col"><InsertionHandle left={column.name} right={columns[columnIndex + 1]?.name ?? null} disabled={!canInsert} onclick={(event) => onInsert(column, columns[columnIndex + 1] ?? null, event.currentTarget as HTMLButtonElement)} /></th>
@@ -163,6 +179,9 @@
       <button role="menuitem" onclick={() => runContextAction(() => onFilter(contextMenu!.column))}>Filter</button>
       {#if contextMenu.column.profile_kind}<button role="menuitem" onclick={() => runContextAction(() => onProfile(contextMenu!.column))}>Profile</button>{/if}
     {/if}
+    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onModify(contextMenu!.column))}>Modify</button>
+    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onDuplicate(contextMenu!.column))}>Duplicate</button>
+    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onRename(contextMenu!.column))}>Rename</button>
     <button role="menuitem" disabled={isColumnProtected(contextMenu.column.name) || columns.length <= 1} onclick={() => runContextAction(() => onHide(contextMenu!.column.name))}>Hide</button>
   </div>
 {/if}

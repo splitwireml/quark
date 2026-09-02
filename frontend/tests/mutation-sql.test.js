@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildCellEditSql, buildMutationSql, hasVolatileRowOrder, quoteIdentifier, quoteLiteral, stripTerminalSemicolon } from '../src/lib/mutation-sql.ts';
+import { buildCellEditSql, buildColumnReplacementSql, buildIfExpression, buildMutationSql, buildSwitchExpression, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier, quoteLiteral, stripTerminalSemicolon } from '../src/lib/mutation-sql.ts';
 
 test('quotes SQL identifiers and literals', () => {
   assert.equal(quoteIdentifier('a"b'), '"a""b"');
@@ -36,6 +36,33 @@ test('keeps a trailing line comment away from the wrapper close', () => {
     buildMutationSql('SELECT 1 AS first; -- trailing', ['first'], 1, '2', 'second'),
     'SELECT "first", 2 AS "second" FROM (\nSELECT 1 AS first -- trailing\n) AS mutation_source'
   );
+});
+
+test('replaces a column in place with its current name', () => {
+  assert.equal(
+    buildColumnReplacementSql('SELECT * FROM cars;', ['first', 'amount', 'last'], 'amount', 'try_cast("amount" AS DOUBLE)', 'amount'),
+    'SELECT "first", try_cast("amount" AS DOUBLE) AS "amount", "last" FROM (\nSELECT * FROM cars\n) AS mutation_source'
+  );
+});
+
+test('renames a column in place and rejects case-insensitive collisions', () => {
+  assert.equal(
+    buildColumnReplacementSql('SELECT * FROM cars', ['first', 'amount', 'last'], 'amount', '"amount"', 'total'),
+    'SELECT "first", "amount" AS "total", "last" FROM (\nSELECT * FROM cars\n) AS mutation_source'
+  );
+  assert.equal(buildColumnReplacementSql('SELECT * FROM cars', ['first', 'amount', 'last'], 'amount', '"amount"', 'LAST'), '');
+});
+
+test('chooses the next case-insensitive duplicate column suffix', () => {
+  assert.equal(nextDuplicateColumnName('value', ['value']), 'value_2');
+  assert.equal(nextDuplicateColumnName('Value', ['value', 'VALUE_2', 'value_3']), 'Value_4');
+});
+
+test('builds non-nested IF and switch expressions only when every operand is filled', () => {
+  assert.equal(buildIfExpression('"active" = TRUE', "'yes'", "'no'"), `CASE WHEN "active" = TRUE THEN 'yes' ELSE 'no' END`);
+  assert.equal(buildIfExpression('', "'yes'", "'no'"), '');
+  assert.equal(buildSwitchExpression('"status"', [{ match: "'open'", thenValue: '1' }, { match: "'closed'", thenValue: '2' }], '0'), `CASE "status" WHEN 'open' THEN 1 WHEN 'closed' THEN 2 ELSE 0 END`);
+  assert.equal(buildSwitchExpression('"status"', [{ match: '', thenValue: '1' }], '0'), '');
 });
 
 test('replaces one absolute row cell while preserving column order', () => {

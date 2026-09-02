@@ -20,7 +20,7 @@
   let { pageSizes, pageSize, onChangePageSize, rangeStart, rangeEnd, totalRows, page, pageInput, totalPages, loadingData, onPrev, onNext, onJump, setPageInput }: Props = $props();
 </script>
 
-<footer class="pagination">
+<footer class="pagination" inert={loadingData}>
   <label>Rows per page
     <select value={pageSize} onchange={onChangePageSize}>
       {#each pageSizes as size (size)}<option value={size}>{size}</option>{/each}

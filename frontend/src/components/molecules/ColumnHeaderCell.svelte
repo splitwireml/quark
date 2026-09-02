@@ -12,25 +12,43 @@
     canQuery: boolean;
     protectedColumn: boolean;
     canHide: boolean;
+    renaming: boolean;
+    renameValue: string;
+    renameSaving: boolean;
     onsort: () => void;
     onfilter: (trigger: HTMLButtonElement) => void;
     onprofile: (trigger: HTMLButtonElement) => void;
     onhide: () => void;
+    onstartrename: () => void;
+    onrenamevalue: (value: string) => void;
+    oncommitrename: () => void;
+    oncancelrename: () => void;
     oncontextmenu: (event: MouseEvent) => void;
   };
 
-  let { column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, onsort, onfilter, onprofile, onhide, oncontextmenu }: Props = $props();
+  let { column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onstartrename, onrenamevalue, oncommitrename, oncancelrename, oncontextmenu }: Props = $props();
   let width = $derived(Math.max(168, Math.min(360, column.name.length * 9 + (column.profile_kind ? 150 : 118))));
+
+  function focusRename(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.select(); }); }
+  function renameKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); oncancelrename(); }
+    else if (event.key === 'Enter') { event.preventDefault(); oncommitrename(); }
+  }
 </script>
 
 <th data-column={column.name} tabindex="-1" scope="col" {oncontextmenu} style:min-width={`${width}px`}>
   <div class="head">
     <div class="label">
-      <strong title={column.name}>
-        {#each labelParts as part, index ((part.match ? 'm' : 't') + index + part.text)}
-          {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
-        {/each}
-      </strong>
+      {#if renaming}
+        <input use:focusRename value={renameValue} disabled={renameSaving} aria-label={`Rename column ${column.name}`} oninput={(event) => onrenamevalue(event.currentTarget.value)} onkeydown={renameKeydown} onblur={oncommitrename} onclick={(event) => event.stopPropagation()} ondblclick={(event) => event.stopPropagation()} />
+      {:else}
+        <strong title={`${column.name} — Double-click to rename`} ondblclick={(event) => { event.stopPropagation(); onstartrename(); }}>
+          {#each labelParts as part, index ((part.match ? 'm' : 't') + index + part.text)}
+            {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
+          {/each}
+        </strong>
+      {/if}
       <small>{column.type}</small>
     </div>
     <div class="actions">
@@ -73,6 +91,7 @@
     text-overflow: ellipsis;
   }
   strong mark { background: var(--action-tint); color: var(--action-dark); }
+  .label input { min-width: 0; width: 100%; height: 24px; padding: 0 6px; border: 1px solid var(--action); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); font: 11.5px var(--font-mono); }
   small { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); flex: none; }
   .actions { display: flex; align-items: center; gap: 3px; height: 16px; }
   .actions button {

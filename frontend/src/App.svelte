@@ -7,7 +7,7 @@
   import * as api from './lib/api';
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
-  import { buildCellEditSql, buildMutationSql, hasVolatileRowOrder, quoteIdentifier } from './lib/mutation-sql';
+  import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
   import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceResponse, NodeInfo, QueryResponse, RowDensity, SavedQuery, SortCondition, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
@@ -100,6 +100,8 @@
   let editingCell = $state<{ row: number; column: string; value: string; original: string } | null>(null);
   let cellEditSaving = $state(false);
   let cellEditError = $state('');
+  let columnMutationError = $state('');
+  let renamingColumn = $state<{ original: string; value: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
   let categoryValues = $state.raw<CategoryValue[]>([]);
   let categorySearch = $state('');
@@ -134,7 +136,7 @@
   let workbookSheets = $state<string[]>([]);
   let confirmingWorkbook = $state(false);
   let mutationDialog = $state<HTMLDialogElement | null>(null);
-  let mutationBoundary = $state<{ insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | null>(null);
+  let mutationTarget = $state<{ kind: 'insert'; insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | { kind: 'modify'; column: ColumnInfo } | null>(null);
   let mutationApplying = $state(false);
   let mutationError = $state('');
   let exportDialog = $state<HTMLDialogElement | null>(null);
@@ -345,7 +347,7 @@
     if (!result || loadingData) return;
     const insertIndex = right ? result.columns.findIndex((column) => column.name === right.name) : result.columns.length;
     if (insertIndex < 0) return;
-    mutationBoundary = { insertIndex, left: left.name, right: right?.name ?? null, trigger };
+    mutationTarget = { kind: 'insert', insertIndex, left: left.name, right: right?.name ?? null, trigger };
     mutationError = '';
     mutationApplying = false;
     await tick();
@@ -354,26 +356,28 @@
   }
 
   function finishMutationClose() {
-    const trigger = mutationBoundary?.trigger;
-    mutationBoundary = null;
+    const trigger = mutationTarget?.kind === 'insert' ? mutationTarget.trigger : null;
+    const restoreTable = mutationTarget?.kind === 'modify';
+    mutationTarget = null;
     mutationError = '';
     mutationApplying = false;
-    tick().then(() => trigger?.focus());
+    tick().then(() => { if (trigger) trigger.focus(); else if (restoreTable) tableScroll?.focus(); });
   }
 
-  async function applyMutation(name: string, expression: string) {
-    const boundary = mutationBoundary;
+  async function applyColumnQuery(query: string, closeDialog: boolean): Promise<boolean> {
     const current = result;
     const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
-    if (!boundary || !current || !targetNodeId || mutationApplying) return;
-    const query = buildMutationSql(current.sql, current.columns.map((column) => column.name), boundary.insertIndex, expression, name);
-    if (!query) { mutationError = 'Could not build the formula query.'; return; }
+    if (!current || !targetNodeId || mutationApplying) return false;
+    if (!query) { if (mutationTarget) mutationError = 'Could not build the column query.'; else columnMutationError = 'Could not build the column query.'; return false; }
     const id = ++requestId;
     mutationApplying = true;
+    loadingData = true;
     mutationError = '';
+    columnMutationError = '';
+    error = '';
     try {
       const next = await api.querySql(targetNodeId, { sql: query, page: 1, page_size: pageSize, filters: [], sorts: [], dedupe_columns: [] });
-      if (id !== requestId) return;
+      if (id !== requestId) return false;
       closeSql(false);
       clearAggregateDraft();
       filters = [];
@@ -391,9 +395,86 @@
       cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
-      mutationDialog?.close();
-    } catch (reason) { if (id === requestId) mutationError = message(reason); }
-    finally { mutationApplying = false; }
+      if (closeDialog) mutationDialog?.close();
+      return true;
+    } catch (reason) {
+      if (id === requestId) { if (mutationTarget) mutationError = message(reason); else columnMutationError = message(reason); }
+      return false;
+    } finally { if (id === requestId) loadingData = false; mutationApplying = false; }
+  }
+
+  async function applyMutation(name: string, expression: string) {
+    const target = mutationTarget;
+    const current = result;
+    if (!target || !current) return;
+    const columns = current.columns.map((column) => column.name);
+    const query = target.kind === 'insert'
+      ? buildMutationSql(current.sql, columns, target.insertIndex, expression, name)
+      : buildColumnReplacementSql(current.sql, columns, target.column.name, expression, name);
+    await applyColumnQuery(query, true);
+  }
+
+  async function modifyColumn(column: ColumnInfo) {
+    if (!result || loadingData || mutationApplying) return;
+    mutationTarget = { kind: 'modify', column };
+    mutationError = '';
+    await tick();
+    mutationDialog?.showModal();
+    mutationDialog?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+  }
+
+  async function duplicateColumn(column: ColumnInfo) {
+    const current = result;
+    if (!current || loadingData || mutationApplying) return;
+    const columns = current.columns.map((item) => item.name);
+    const index = columns.indexOf(column.name);
+    const name = nextDuplicateColumnName(column.name, columns);
+    await applyColumnQuery(buildMutationSql(current.sql, columns, index + 1, quoteIdentifier(column.name), name), false);
+    await tick();
+    tableScroll?.focus();
+  }
+
+  async function renameColumn(column: ColumnInfo) {
+    if (!result || loadingData || mutationApplying) return;
+    try {
+      const requested = window.prompt('Rename column', column.name);
+      if (requested === null) return;
+      await renameColumnTo(column, requested);
+    } finally {
+      await tick();
+      tableScroll?.focus();
+    }
+  }
+
+  async function renameColumnTo(column: ColumnInfo, requested: string): Promise<boolean> {
+    const current = result;
+    const name = requested.trim();
+    if (!current || !name) { columnMutationError = 'Column name cannot be blank.'; return false; }
+    if (name === column.name) return true;
+    const columns = current.columns.map((item) => item.name);
+    if (columns.some((item) => item !== column.name && item.toLocaleLowerCase() === name.toLocaleLowerCase())) { columnMutationError = 'Column names must be unique.'; return false; }
+    return applyColumnQuery(buildColumnReplacementSql(current.sql, columns, column.name, quoteIdentifier(column.name), name), false);
+  }
+
+  function startColumnRename(column: ColumnInfo) {
+    if (loadingData || mutationApplying) return;
+    renamingColumn = { original: column.name, value: column.name };
+    columnMutationError = '';
+  }
+  function setColumnRenameValue(value: string) { if (renamingColumn) renamingColumn = { ...renamingColumn, value }; }
+  function cancelColumnRename() { renamingColumn = null; columnMutationError = ''; void tick().then(() => tableScroll?.focus()); }
+  async function commitColumnRename() {
+    const edit = renamingColumn;
+    const column = result?.columns.find((item) => item.name === edit?.original);
+    if (!edit || !column || loadingData || mutationApplying) return;
+    if (await renameColumnTo(column, edit.value)) {
+      renamingColumn = null;
+      await tick();
+      tableScroll?.focus();
+    } else {
+      await tick();
+      tableScroll?.querySelector<HTMLInputElement>('th input[aria-label^="Rename column"]')?.focus();
+    }
   }
 
   async function openExport(trigger: HTMLButtonElement) {
@@ -1212,7 +1293,7 @@
               <div class="banner"><strong>No datasets found</strong><p>This source has no tables or views to browse.</p></div>
             {:else if selectedDataset}
               <QueryConditionBar
-                inert={!!inspectorMode || tableExpanded}
+                inert={!!inspectorMode || tableExpanded || loadingData}
                 showBuilder={canQuery}
                 {filters} {sorts} {dedupeColumns}
                 {activeSql} {filterSummary}
@@ -1322,8 +1403,11 @@
                         onCellKeydown={handleCellKeydown} onCollapseCell={collapseCell}
                         onEditValue={setCellEditValue} onCommitEdit={commitCellEdit} onCancelEdit={cancelCellEdit}
                         {aggregateRowTones} setTableScroll={(el) => tableScroll = el} onInsert={openMutation}
+                        onModify={modifyColumn} onDuplicate={duplicateColumn} onRename={renameColumn}
+                        {renamingColumn} onStartRename={startColumnRename} onRenameValue={setColumnRenameValue}
+                        onCommitRename={commitColumnRename} onCancelRename={cancelColumnRename}
                       />
-                      {#if cellEditError}<div class="cell-edit-error" role="alert">{cellEditError}</div>{/if}
+                      {#if cellEditError || columnMutationError}<div class="cell-edit-error" role="alert">{cellEditError || columnMutationError}</div>{/if}
                       {#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}
                     {/if}
                   </div>
@@ -1407,10 +1491,11 @@
   />
 {/if}
 
-{#if mutationBoundary}
+{#if mutationTarget}
   <FormulaMenu
     columns={result?.columns ?? []}
-    boundaryLabel={mutationBoundary.right ? `Between ${mutationBoundary.left} and ${mutationBoundary.right}` : `After ${mutationBoundary.left}`}
+    targetColumn={mutationTarget.kind === 'modify' ? mutationTarget.column : null}
+    boundaryLabel={mutationTarget.kind === 'modify' ? mutationTarget.column.name : mutationTarget.right ? `Between ${mutationTarget.left} and ${mutationTarget.right}` : `After ${mutationTarget.left}`}
     applying={mutationApplying} error={mutationError}
     setDialog={(element) => mutationDialog = element}
     onClose={finishMutationClose}

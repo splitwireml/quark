@@ -24,6 +24,35 @@ export function buildMutationSql(sourceSql: string, columns: string[], insertInd
   return `SELECT ${select.join(', ')} FROM (\n${source}\n) AS mutation_source`;
 }
 
+export function buildColumnReplacementSql(sourceSql: string, columns: string[], targetColumn: string, expression: string, alias: string): string {
+  const index = columns.indexOf(targetColumn);
+  const remaining = columns.filter((_, columnIndex) => columnIndex !== index);
+  const name = alias.trim().toLowerCase();
+  if (index < 0 || remaining.some((column) => column.toLowerCase() === name)) return '';
+  return buildMutationSql(sourceSql, remaining, index, expression, alias);
+}
+
+export function nextDuplicateColumnName(name: string, columns: string[]): string {
+  const existing = new Set(columns.map((column) => column.toLowerCase()));
+  let suffix = 2;
+  while (existing.has(`${name}_${suffix}`.toLowerCase())) suffix++;
+  return `${name}_${suffix}`;
+}
+
+export function buildIfExpression(condition: string, thenValue: string, elseValue: string): string {
+  const operands = [condition, thenValue, elseValue].map((value) => value.trim());
+  return operands.every(Boolean) ? `CASE WHEN ${operands[0]} THEN ${operands[1]} ELSE ${operands[2]} END` : '';
+}
+
+export function buildSwitchExpression(value: string, cases: { match: string; thenValue: string }[], elseValue: string): string {
+  const selector = value.trim();
+  const fallback = elseValue.trim();
+  const branches = cases.map((item) => ({ match: item.match.trim(), thenValue: item.thenValue.trim() }));
+  return selector && fallback && branches.length && branches.every((item) => item.match && item.thenValue)
+    ? `CASE ${selector} ${branches.map((item) => `WHEN ${item.match} THEN ${item.thenValue}`).join(' ')} ELSE ${fallback} END`
+    : '';
+}
+
 export function buildCellEditSql(sourceSql: string, columns: string[], rowNumber: number, targetColumn: string, value: string): string {
   const source = stripTerminalSemicolon(sourceSql);
   const normalizedColumns = columns.map((column) => column.toLowerCase());
