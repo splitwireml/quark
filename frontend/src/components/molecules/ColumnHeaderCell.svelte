@@ -3,6 +3,7 @@
   import type { ColumnInfo, SortCondition } from '../../lib/types';
 
   type LabelPart = { text: string; match: boolean };
+  type Placement = 'before' | 'after';
 
   type Props = {
     column: ColumnInfo;
@@ -12,6 +13,9 @@
     canQuery: boolean;
     protectedColumn: boolean;
     canHide: boolean;
+    canReorder: boolean;
+    dragging: boolean;
+    dropPlacement: Placement | null;
     renaming: boolean;
     renameValue: string;
     renameSaving: boolean;
@@ -24,9 +28,16 @@
     oncommitrename: () => void;
     oncancelrename: () => void;
     oncontextmenu: (event: MouseEvent) => void;
+    ondragstart: (event: DragEvent) => void;
+    ondragover: (event: DragEvent) => void;
+    ondragend: (event: DragEvent) => void;
   };
 
-  let { column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onstartrename, onrenamevalue, oncommitrename, oncancelrename, oncontextmenu }: Props = $props();
+  let {
+    column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, dropPlacement,
+    renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onstartrename, onrenamevalue,
+    oncommitrename, oncancelrename, oncontextmenu, ondragstart, ondragover, ondragend
+  }: Props = $props();
   let width = $derived(Math.max(168, Math.min(360, column.name.length * 9 + (column.profile_kind ? 150 : 118))));
 
   function focusRename(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.select(); }); }
@@ -37,7 +48,17 @@
   }
 </script>
 
-<th data-column={column.name} tabindex="-1" scope="col" {oncontextmenu} style:min-width={`${width}px`}>
+<th
+  data-column={column.name}
+  tabindex="-1"
+  scope="col"
+  {oncontextmenu}
+  {ondragover}
+  class:dragging
+  class:drop-before={dropPlacement === 'before'}
+  class:drop-after={dropPlacement === 'after'}
+  style:min-width={`${width}px`}
+>
   <div class="head">
     <div class="label">
       {#if renaming}
@@ -52,6 +73,18 @@
       <small>{column.type}</small>
     </div>
     <div class="actions">
+      <button
+        type="button"
+        class="drag-handle"
+        draggable={canReorder && !renaming}
+        disabled={!canReorder || renaming}
+        aria-label={`Drag to reorder column ${column.name}`}
+        aria-pressed={dragging}
+        title={`Drag to reorder ${column.name}`}
+        {ondragstart}
+        {ondragend}
+        onclick={(event) => event.stopPropagation()}
+      >⋮⋮</button>
       {#if canQuery}
         <button class:on={!!sort} onclick={onsort} aria-label={`Sort ${column.name}`} title="Sort">{sort?.direction === 'asc' ? '↑' : sort?.direction === 'desc' ? '↓' : '↕'}</button>
         <button class:on={filtered} onclick={(event) => onfilter(event.currentTarget as HTMLButtonElement)} aria-label={`Filter ${column.name}`} title="Filter">⌕</button>
@@ -79,6 +112,9 @@
     text-align: left;
     vertical-align: top;
   }
+  th.dragging { opacity: 0.55; }
+  th.drop-before { box-shadow: inset 3px 0 var(--action); }
+  th.drop-after { box-shadow: inset -3px 0 var(--action); }
   .head { display: flex; flex-direction: column; gap: 4px; height: 100%; }
   .label { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
   strong {
@@ -105,6 +141,8 @@
     line-height: 1;
   }
   .actions button:hover:not(:disabled) { border-color: var(--faint); color: var(--ink); }
-  .actions button.on { color: var(--action); border-color: var(--action-tint-border); background: var(--action-tint); }
+  .actions button.on, .actions .drag-handle[aria-pressed="true"] { color: var(--action); border-color: var(--action-tint-border); background: var(--action-tint); }
   .actions button:disabled { opacity: 0.35; }
+  .drag-handle { cursor: grab; letter-spacing: -3px; padding-right: 3px; }
+  .drag-handle:active { cursor: grabbing; }
 </style>

@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import InsertionHandle from '../atoms/InsertionHandle.svelte';
   import ColumnHeaderCell from '../molecules/ColumnHeaderCell.svelte';
   import type { ColumnInfo, FilterCondition, SortCondition } from '../../lib/types';
 
   type LabelPart = { text: string; match: boolean };
   type CellMove = 'up' | 'down' | 'left' | 'right';
+  type Placement = 'before' | 'after';
   type SelectedCell = { row: number; column: string; expanded?: boolean };
   type EditingCell = { row: number; column: string; value: string; original: string };
 
@@ -48,6 +49,10 @@
     onRenameValue: (value: string) => void;
     onCommitRename: () => void;
     onCancelRename: () => void;
+    onBeginReorder: () => void;
+    onPreviewReorder: (dragged: string, target: string, placement: Placement) => void;
+    onCommitReorder: () => void;
+    onCancelReorder: () => void;
   };
 
   let {
@@ -55,13 +60,21 @@
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
-    renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename
+    renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename,
+    onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
 
   let contextMenu = $state<{ column: ColumnInfo; x: number; y: number } | null>(null);
   let contextMenuElement = $state<HTMLDivElement | null>(null);
+  let scrollElement: HTMLDivElement | null = null;
+  let draggedName = $state<string | null>(null);
+  let dropTarget = $state<{ name: string; placement: Placement } | null>(null);
+  let lastPlacement = '';
+  let lastClientX = 0;
+  let edgeFrame = 0;
+  let animations: Animation[] = [];
 
   async function openContextMenu(event: MouseEvent, column: ColumnInfo) {
     event.preventDefault();
@@ -74,12 +87,128 @@
   }
   function runContextAction(action: () => void) { action(); contextMenu = null; }
   function closeContextMenuOnClick(event: MouseEvent) { if (contextMenu && !contextMenuElement?.contains(event.target as Node)) contextMenu = null; }
-  function closeContextMenuOnKeydown(event: KeyboardEvent) { if (event.key === 'Escape') contextMenu = null; }
+  function closeContextMenuOnKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    contextMenu = null;
+    if (draggedName) {
+      event.preventDefault();
+      onCancelReorder();
+      clearDrag();
+    }
+  }
 
   function scrollHost(node: HTMLDivElement) {
+    scrollElement = node;
     setTableScroll(node);
-    return { destroy: () => setTableScroll(null) };
+    return { destroy: () => { scrollElement = null; setTableScroll(null); } };
   }
+
+  function headerPositions(): Map<string, number> {
+    return new Map([...(scrollElement?.querySelectorAll<HTMLTableCellElement>('th[data-column]') ?? [])].map((header) => [header.dataset.column!, header.getBoundingClientRect().left]));
+  }
+
+  function cancelAnimations() {
+    for (const animation of animations) animation.cancel();
+    animations = [];
+  }
+
+  function animateHeaders(before: Map<string, number>) {
+    cancelAnimations();
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    for (const header of scrollElement?.querySelectorAll<HTMLTableCellElement>('th[data-column]') ?? []) {
+      const previous = before.get(header.dataset.column!);
+      if (previous === undefined) continue;
+      const delta = previous - header.getBoundingClientRect().left;
+      if (Math.abs(delta) < 0.5) continue;
+      animations.push(header.animate([{ transform: `translateX(${delta}px)` }, { transform: 'translateX(0)' }], { duration: 160, easing: 'ease-out' }));
+    }
+  }
+
+  function startEdgeScroll() {
+    if (!edgeFrame) edgeFrame = requestAnimationFrame(edgeScroll);
+  }
+
+  function edgeScroll() {
+    edgeFrame = 0;
+    if (!draggedName || !scrollElement) return;
+    const rect = scrollElement.getBoundingClientRect();
+    const edge = 48;
+    const speed = lastClientX < rect.left + edge
+      ? -18 * Math.min(1, (rect.left + edge - lastClientX) / edge)
+      : lastClientX > rect.right - edge
+        ? 18 * Math.min(1, (lastClientX - rect.right + edge) / edge)
+        : 0;
+    if (speed) scrollElement.scrollLeft += speed;
+    edgeFrame = requestAnimationFrame(edgeScroll);
+  }
+
+  function stopEdgeScroll() {
+    if (edgeFrame) cancelAnimationFrame(edgeFrame);
+    edgeFrame = 0;
+  }
+
+  function startHeaderDrag(event: DragEvent, name: string) {
+    if (!canEdit || !event.dataTransfer) { event.preventDefault(); return; }
+    draggedName = name;
+    dropTarget = null;
+    lastPlacement = '';
+    lastClientX = event.clientX;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', name);
+    onBeginReorder();
+    startEdgeScroll();
+  }
+
+  async function previewHeader(event: DragEvent, target: string) {
+    if (!draggedName || draggedName === target) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    lastClientX = event.clientX;
+    const rect = (event.currentTarget as HTMLTableCellElement).getBoundingClientRect();
+    const placement: Placement = event.clientX < rect.left + rect.width / 2 ? 'before' : 'after';
+    const key = `${target}:${placement}`;
+    dropTarget = { name: target, placement };
+    if (key === lastPlacement) return;
+    lastPlacement = key;
+    const before = headerPositions();
+    onPreviewReorder(draggedName, target, placement);
+    await tick();
+    if (draggedName) animateHeaders(before);
+  }
+
+  function tableDragOver(event: DragEvent) {
+    if (!draggedName) return;
+    event.preventDefault();
+    lastClientX = event.clientX;
+    startEdgeScroll();
+  }
+
+  function dropHeader(event: DragEvent) {
+    if (!draggedName) return;
+    event.preventDefault();
+    onCommitReorder();
+    clearDrag();
+  }
+
+  function endHeaderDrag() {
+    if (!draggedName) return;
+    onCancelReorder();
+    clearDrag();
+  }
+
+  function clearDrag() {
+    draggedName = null;
+    dropTarget = null;
+    lastPlacement = '';
+    stopEdgeScroll();
+    cancelAnimations();
+  }
+
+  onDestroy(() => {
+    if (draggedName) onCancelReorder();
+    stopEdgeScroll();
+    cancelAnimations();
+  });
 
   function focusEditor(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.setSelectionRange(node.value.length, node.value.length); }); }
   function editorKeydown(event: KeyboardEvent) {
@@ -94,7 +223,7 @@
 <svelte:window onclick={closeContextMenuOnClick} onkeydown={closeContextMenuOnKeydown} />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable dataset table">
+<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable dataset table" ondragover={tableDragOver} ondrop={dropHeader}>
   <table>
     <caption class="sr-only">{caption}</caption>
     <thead>
@@ -108,6 +237,9 @@
             {canQuery}
             protectedColumn={isColumnProtected(column.name)}
             canHide={columns.length > 1}
+            canReorder={canEdit}
+            dragging={draggedName === column.name}
+            dropPlacement={dropTarget?.name === column.name ? dropTarget.placement : null}
             renaming={renamingColumn?.original === column.name}
             renameValue={renamingColumn?.original === column.name ? renamingColumn.value : column.name}
             renameSaving={!canEdit}
@@ -120,13 +252,16 @@
             oncommitrename={onCommitRename}
             oncancelrename={onCancelRename}
             oncontextmenu={(event) => openContextMenu(event, column)}
+            ondragstart={(event) => startHeaderDrag(event, column.name)}
+            ondragover={(event) => previewHeader(event, column.name)}
+            ondragend={endHeaderDrag}
           />
           <th class="insertion-slot" scope="col"><InsertionHandle left={column.name} right={columns[columnIndex + 1]?.name ?? null} disabled={!canInsert} onclick={(event) => onInsert(column, columns[columnIndex + 1] ?? null, event.currentTarget as HTMLButtonElement)} /></th>
         {/each}
       </tr>
     </thead>
     <tbody>
-      {#each rows as row, index (index)}
+      {#each rows as row, index (row)}
         <tr class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
           {#each columns as column (column.name)}
             {@const selected = selectedCell?.row === index && selectedCell.column === column.name}

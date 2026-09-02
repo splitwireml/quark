@@ -8,7 +8,7 @@
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
-  import { LEGACY_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, migrateSavedQueries, stageVersionChange, versionDiff } from './lib/versioning';
+  import { LEGACY_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateSavedQueries, stageVersionChange, versionDiff } from './lib/versioning';
   import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, Version, VersionChange, VersionDiff, View, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
@@ -78,6 +78,7 @@
   let joinPreviewError = $state('');
   let hiddenColumns = $state<string[]>([]);
   let columnOrder = $state<string[]>([]);
+  let reorderOrigin = $state.raw<string[] | null>(null);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
   let tableExpanded = $state(false);
@@ -190,13 +191,19 @@
   let canPreviewJoin = $derived(!!joinLeftDataset && !!joinRightDataset && !!joinLeftNodeId && !!joinRightNodeId && !joinLeftDatasetsLoading && !joinRightDatasetsLoading);
   let canRunJoin = $derived(canPreviewJoin && joinKeysValid && (joinLeftColumns.length > 0 || joinRightColumns.length > 0));
   let totalPages = $derived(pageLimit(result?.total_pages ?? 0));
-  let visibleColumns = $derived(columnOrder.map((name) => result?.columns.find((column) => column.name === name)).filter((column): column is ColumnInfo => !!column && !hiddenColumns.includes(column.name)));
+  let orderedColumns = $derived.by(() => {
+    const columns = result?.columns ?? [];
+    const byName = new Map(columns.map((column) => [column.name, column]));
+    const names = [...columnOrder, ...columns.map((column) => column.name)];
+    return names.filter((name, index) => byName.has(name) && names.indexOf(name) === index).map((name) => byName.get(name)!);
+  });
+  let visibleColumns = $derived(orderedColumns.filter((column) => !hiddenColumns.includes(column.name)));
   let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
   let aggregateColumnMatches = $derived.by(() => { const query = aggregateColumnSearch.trim().toLowerCase(); return query ? aggregateFieldOptions.filter((column) => column.name.toLowerCase().includes(query)) : aggregateFieldOptions; });
   let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === aggregateColumns[aggregateColumns.length - 1]));
   let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
-  let columnMenuItems = $derived.by(() => { const query = columnMenuSearch.trim().toLowerCase(); return query ? (result?.columns ?? []).filter((column) => column.name.toLowerCase().includes(query)) : result?.columns ?? []; });
+  let columnMenuItems = $derived.by(() => { const query = columnMenuSearch.trim().toLowerCase(); return query ? orderedColumns.filter((column) => column.name.toLowerCase().includes(query)) : orderedColumns; });
   let columnTypes = $derived([...new Set((result?.columns ?? []).map((column) => column.type))]);
   let columnTypeCounts = $derived.by(() => { const counts: Record<string, number> = Object.create(null); for (const column of result?.columns ?? []) counts[column.type] = (counts[column.type] ?? 0) + 1; return counts; });
   let aggregateRowTones = $derived.by(() => {
@@ -329,6 +336,7 @@
   }
   async function runJoin() {
     if (!canRunJoin || !joinLeftDataset || !joinRightDataset) return;
+    const startingSql = result?.sql ?? activeSql;
     const request: JoinWorkspaceRequest = {
       left: { node_id: joinLeftNodeId, dataset: joinLeftDataset.id },
       right: { node_id: joinRightNodeId, dataset: joinRightDataset.id },
@@ -346,12 +354,11 @@
     closeSql(false);
     if (await runSql(query, false, false, preview.node_id)) {
       activeJoin = request;
-      currentSurface = 'version';
       stageChange({
         kind: 'join',
         summary: `Join ${joinLeftDataset.name} and ${joinRightDataset.name}`,
         details: { left: joinLeftDataset.name, right: joinRightDataset.name, leftKeys: [...joinLeftKeys], rightKeys: [...joinRightKeys] }
-      });
+      }, startingSql);
     }
   }
   function addAggregateColumn(column: string) { if (!column || aggregateColumns.includes(column)) return; aggregateColumns = [...aggregateColumns, column]; aggregateColumn = ''; aggregateMetrics = ['count']; }
@@ -402,8 +409,9 @@
       sorts = [];
       dedupeColumns = [];
       dedupeDraft = [];
+      const preferredOrder = mutationColumnOrder(current, next, change);
       result = next;
-      reconcileColumns(next, next.columns.map((column) => column.name));
+      reconcileColumns(next, preferredOrder);
       queryMode = 'sql';
       sqlText = query;
       sqlBase = query;
@@ -414,7 +422,7 @@
       cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
-      stageChange(change);
+      stageChange(change, current.sql);
       if (closeDialog) mutationDialog?.close();
       return true;
     } catch (reason) {
@@ -724,11 +732,27 @@
     return persistHistories(next);
   }
 
-  function stageChange(change: VersionChange) {
-    if (!currentHistory) return;
+  function stageChange(change: VersionChange, viewSql = result?.sql ?? activeSql) {
+    const history = currentHistory;
+    if (!history) return;
+    let next = history;
+    if (currentSurface === 'view' && !history.pendingChanges.length) {
+      next = stageVersionChange(next, {
+        kind: 'view-base',
+        summary: 'Start from current View',
+        details: { sql: viewSql }
+      });
+    }
+    next = stageVersionChange(next, change);
     currentSurface = 'version';
     recordingNotice = '';
-    replaceHistory(stageVersionChange(currentHistory, change));
+    replaceHistory(next);
+  }
+
+  function blockViewExecutionWhileRecording(): boolean {
+    if (!currentHistory?.pendingChanges.length) return false;
+    recordingNotice = 'Stop recording before creating a View.';
+    return true;
   }
 
   function addView(value: string, join = activeJoin, displayName = '') {
@@ -1114,6 +1138,7 @@
   }
 
   async function createAggregateView() {
+    if (blockViewExecutionWhileRecording()) return;
     const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql || sqlBase || activeSql;
     const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? [];
     if (!selectedAggregateColumn || aggregateMetrics.length === 0 || !source) return;
@@ -1136,6 +1161,65 @@
     const names = next.columns.map((column) => column.name);
     columnOrder = [...preferred.filter((column, index) => names.includes(column) && preferred.indexOf(column) === index), ...names.filter((column) => !preferred.includes(column))];
     hiddenColumns = hiddenColumns.filter((column) => names.includes(column));
+  }
+
+  function mutationColumnOrder(current: QueryResponse, next: QueryResponse, change: VersionChange): string[] {
+    const before = current.columns.map((column) => column.name);
+    const after = next.columns.map((column) => column.name);
+    const removed = before.filter((name) => !after.includes(name));
+    const added = after.filter((name) => !before.includes(name));
+    let preferred = columnOrder.length ? [...columnOrder] : [...before];
+    if (removed.length === 1 && added.length === 1) {
+      preferred = preferred.map((name) => name === removed[0] ? added[0] : name);
+      hiddenColumns = hiddenColumns.map((name) => name === removed[0] ? added[0] : name);
+      if (lastHiddenColumn === removed[0]) lastHiddenColumn = added[0];
+    } else if (added.length) {
+      const detail = change.details?.after ?? change.details?.column;
+      const anchor = typeof detail === 'string' ? preferred.indexOf(detail) : -1;
+      preferred.splice(anchor < 0 ? preferred.length : anchor + 1, 0, ...added);
+    }
+    return preferred;
+  }
+
+  function beginColumnReorder() {
+    if (reorderOrigin) return;
+    const names = orderedColumns.map((column) => column.name);
+    reorderOrigin = names;
+    columnOrder = names;
+  }
+
+  function previewColumnReorder(dragged: string, target: string, placement: 'before' | 'after') {
+    if (!reorderOrigin || dragged === target) return;
+    const next = columnOrder.filter((name) => name !== dragged);
+    const targetIndex = next.indexOf(target);
+    if (targetIndex < 0) return;
+    next.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, dragged);
+    if (!next.every((name, index) => name === columnOrder[index])) columnOrder = next;
+  }
+
+  function commitColumnReorder() {
+    const before = reorderOrigin ? [...reorderOrigin] : null;
+    if (!before) return;
+    const after = [...columnOrder];
+    reorderOrigin = null;
+    if (before.length === after.length && before.every((name, index) => name === after[index])) return;
+    stageChange({ kind: 'reorder', summary: 'Reorder columns', details: { before, after } });
+  }
+
+  function cancelColumnReorder() {
+    if (!reorderOrigin) return;
+    columnOrder = [...reorderOrigin];
+    reorderOrigin = null;
+  }
+
+  function moveColumnOneStep(name: string, direction: -1 | 1) {
+    const names = orderedColumns.map((column) => column.name);
+    const index = names.indexOf(name);
+    const target = names[index + direction];
+    if (index < 0 || !target) return;
+    beginColumnReorder();
+    previewColumnReorder(name, target, direction < 0 ? 'before' : 'after');
+    commitColumnReorder();
   }
 
   async function runSql(value = sqlText, keepSqlBase = false, keepAggregateBuilder = false, nodeId?: string): Promise<boolean> {
@@ -1180,6 +1264,7 @@
   }
 
   async function runSqlAndAddView(): Promise<boolean> {
+    if (blockViewExecutionWhileRecording()) return false;
     page = 1;
     pageInput = '1';
     const query = sqlText;
@@ -1339,6 +1424,25 @@
     showColumnsOfTypes(next);
   }
   function toggleColumn(column: string, checked: boolean) { if (checked) restoreColumn(column); else hideColumn(column); }
+  function applyRegexVisibility(pattern: string, invert: boolean, action: 'show' | 'hide'): string {
+    const names = [...columnOrder];
+    const result = matchColumnsByRegex(columnOrder, pattern);
+    if (result.error) return result.error;
+    const matches = new Set(result.matches);
+    const selected = names.filter((name) => invert !== matches.has(name));
+    const columns = action === 'show'
+      ? selected.filter((name) => hiddenColumns.includes(name))
+      : selected.filter((name) => !hiddenColumns.includes(name) && !isColumnProtected(name)).slice(0, Math.max(0, visibleColumns.length - 1));
+    if (!columns.length) return '';
+    const chosen = new Set(columns);
+    const next = action === 'show' ? hiddenColumns.filter((name) => !chosen.has(name)) : [...hiddenColumns, ...columns];
+    if (setHidden(next, {
+      kind: 'visibility',
+      summary: `${action === 'show' ? 'Show' : 'Hide'} ${columns.length} regex-selected column${columns.length === 1 ? '' : 's'}`,
+      details: { pattern, invert, action, columns }
+    })) lastHiddenColumn = action === 'hide' ? columns[columns.length - 1] : null;
+    return '';
+  }
   async function changePage(next: number) { if (next < 1 || next > totalPages || next === page) return; page = next; await loadActiveData(); }
   async function jumpPage() { const next = Math.min(Math.max(1, Number.parseInt(pageInput) || 1), Math.max(totalPages, 1)); pageInput = String(next); await changePage(next); }
   async function changePageSize(event: Event) { pageSize = Number((event.currentTarget as HTMLSelectElement).value); page = 1; await loadActiveData(); }
@@ -1516,7 +1620,7 @@
       editingCell = null;
       page = next.page;
       pageInput = String(next.page);
-      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } });
+      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } }, current.sql);
       if (move) moveCell(edit.row, edit.column, move);
       else void focusCell(selectedCell?.row ?? edit.row, selectedCell?.column ?? edit.column);
     } catch (reason) {
@@ -1653,6 +1757,10 @@
                     onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
                     {columnMenuItems} {hiddenColumns} {isColumnProtected}
                     visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
+                    orderedColumnNames={orderedColumns.map((column) => column.name)}
+                    onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
+                    onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
+                    onMoveColumn={moveColumnOneStep} onRegexVisibility={applyRegexVisibility}
                   />
                 {/snippet}
                 {#snippet joinMenu()}
@@ -1733,6 +1841,8 @@
                         onModify={modifyColumn} onDuplicate={duplicateColumn} onRename={renameColumn}
                         {renamingColumn} onStartRename={startColumnRename} onRenameValue={setColumnRenameValue}
                         onCommitRename={commitColumnRename} onCancelRename={cancelColumnRename}
+                        onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
+                        onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
                       />
                       {#if cellEditError || columnMutationError}<div class="cell-edit-error" role="alert">{cellEditError || columnMutationError}</div>{/if}
                       {#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}
