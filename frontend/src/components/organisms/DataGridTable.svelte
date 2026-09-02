@@ -15,6 +15,7 @@
     bodyColumns: ColumnInfo[];
     rows: Record<string, unknown>[];
     caption: string;
+    rowDensity: string;
     canQuery: boolean;
     canInsert: boolean;
     canEdit: boolean;
@@ -57,7 +58,7 @@
   };
 
   let {
-    columns, bodyColumns, rows, caption, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
+    columns, bodyColumns, rows, caption, rowDensity, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
@@ -66,6 +67,27 @@
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
+
+  // Only the rows near the viewport are rendered; the rest are represented by two spacer rows
+  // that hold the scrollbar at full height. Rows are a uniform height per density, so the
+  // window is pure arithmetic and needs no per-row measurement.
+  const OVERSCAN = 8;
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
+  // Keep in step with the `--row-height` fallback on td below.
+  const DEFAULT_ROW_HEIGHT = 34;
+  let rowHeight = $state(DEFAULT_ROW_HEIGHT);
+
+  const firstRow = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
+  const lastRow = $derived(Math.min(rows.length, firstRow + Math.ceil(viewportHeight / rowHeight) + OVERSCAN * 2));
+  const windowRows = $derived(rows.slice(firstRow, lastRow));
+  const padTop = $derived(firstRow * rowHeight);
+  const padBottom = $derived(Math.max(0, (rows.length - lastRow) * rowHeight));
+  const bodyCellCount = $derived(bodyColumns.length * 2);
+
+  // Mirrors the --row-height values set per density in App.svelte.
+  const ROW_HEIGHTS: Record<string, number> = { compact: 26, default: DEFAULT_ROW_HEIGHT, comfortable: 42 };
+  $effect(() => { rowHeight = ROW_HEIGHTS[rowDensity] ?? DEFAULT_ROW_HEIGHT; });
 
   let contextMenu = $state<{ column: ColumnInfo; x: number; y: number } | null>(null);
   let contextMenuElement = $state<HTMLDivElement | null>(null);
@@ -101,7 +123,19 @@
   function scrollHost(node: HTMLDivElement) {
     scrollElement = node;
     setTableScroll(node);
-    return { destroy: () => { scrollElement = null; setTableScroll(null); } };
+    viewportHeight = node.clientHeight;
+    const onScroll = () => { scrollTop = node.scrollTop; };
+    node.addEventListener('scroll', onScroll, { passive: true });
+    const observer = new ResizeObserver(() => { viewportHeight = node.clientHeight; });
+    observer.observe(node);
+    return {
+      destroy: () => {
+        node.removeEventListener('scroll', onScroll);
+        observer.disconnect();
+        scrollElement = null;
+        setTableScroll(null);
+      },
+    };
   }
 
   function headerPositions(): Map<string, number> {
@@ -262,8 +296,12 @@
       </tr>
     </thead>
     <tbody>
-      {#each rows as row, index (row)}
-        <tr class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
+      {#if padTop > 0}
+        <tr class="spacer" aria-hidden="true"><td colspan={bodyCellCount} style:height={`${padTop}px`}></td></tr>
+      {/if}
+      {#each windowRows as row, windowIndex (row)}
+        {@const index = firstRow + windowIndex}
+        <tr class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
           {#each bodyColumns as column (column.name)}
             {@const selected = selectedCell?.row === index && selectedCell.column === column.name}
             {@const expanded = selected && selectedCell?.expanded}
@@ -303,6 +341,9 @@
           {/each}
         </tr>
       {/each}
+      {#if padBottom > 0}
+        <tr class="spacer" aria-hidden="true"><td colspan={bodyCellCount} style:height={`${padBottom}px`}></td></tr>
+      {/if}
     </tbody>
   </table>
 </div>
@@ -339,8 +380,10 @@
     text-overflow: ellipsis;
     background: var(--surface);
   }
-  tbody tr:nth-child(even) td { background: var(--surface-inset); }
+  tbody tr.striped td { background: var(--surface-inset); }
   tbody tr:hover td { background: var(--action-tint); }
+  tbody tr.spacer td { padding: 0; border: 0; background: var(--surface); }
+  tbody tr.spacer:hover td { background: var(--surface); }
   tbody tr.aggregate-row td { background: var(--surface); }
   tbody tr.aggregate-row.aggregate-row-alt td { background: var(--surface-inset); }
   td.expanded-cell { white-space: normal; overflow: visible; position: relative; z-index: 2; box-shadow: var(--shadow-popover); }

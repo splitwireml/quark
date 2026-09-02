@@ -1965,6 +1965,7 @@
                       <DataGridTable
                         columns={visibleColumns} bodyColumns={rowColumns} rows={result.rows}
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
+                        {rowDensity}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
                         onSort={cycleSort}
                         onFilter={(column, trigger) => openFilter(column, trigger)}
