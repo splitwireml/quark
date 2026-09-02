@@ -54,7 +54,7 @@ An attached DuckDB path is opened read-only. Only attach paths you trust; Quark 
 
 ```bash
 uv run pytest -q
-cd frontend && npm run check && npm run build
+cd frontend && npm test && npm run check && npm run build
 ```
 
 See [`docs/SPEC.md`](docs/SPEC.md) for behavior and limits.
