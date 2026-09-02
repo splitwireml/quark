@@ -6,23 +6,23 @@
   type Props = {
     datasets: DatasetInfo[];
     selectedDataset: string;
-    workspaceTab: 'data' | 'queries';
+    workspaceTab: 'data' | 'history';
     tableExpanded: boolean;
     rowDensity: RowDensity;
-    savedQueryCount: number;
+    historyCount: number;
     onSelectDataset: (id: string) => void;
-    onSelectQueries: () => void;
+    onSelectHistory: () => void;
     setRowDensity: (density: RowDensity) => void;
     onToggleExpanded: () => void;
   };
-  let { datasets, selectedDataset, workspaceTab, tableExpanded, rowDensity, savedQueryCount, onSelectDataset, onSelectQueries, setRowDensity, onToggleExpanded }: Props = $props();
+  let { datasets, selectedDataset, workspaceTab, tableExpanded, rowDensity, historyCount, onSelectDataset, onSelectHistory, setRowDensity, onToggleExpanded }: Props = $props();
 </script>
 
-<nav class:expanded={tableExpanded} class="tabs" aria-label="Datasets and saved queries">
+<nav class:expanded={tableExpanded} class="tabs" aria-label="Datasets, versions, and views">
   {#each datasets as dataset (dataset.id)}
     <DatasetTab active={workspaceTab === 'data' && dataset.id === selectedDataset} disabled={tableExpanded} onselect={() => onSelectDataset(dataset.id)}>{dataset.name}</DatasetTab>
   {/each}
-  <DatasetTab active={workspaceTab === 'queries'} disabled={tableExpanded} onselect={onSelectQueries}>Queries ({savedQueryCount})</DatasetTab>
+  <DatasetTab active={workspaceTab === 'history'} disabled={tableExpanded} onselect={onSelectHistory}>Versions &amp; Views ({historyCount})</DatasetTab>
   <div class="toolbar">
     <div class="density" role="group" aria-label="Row density">
       <Button active={rowDensity === 'compact'} onclick={() => setRowDensity('compact')}>Compact</Button>

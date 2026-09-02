@@ -6,13 +6,11 @@
     hasError: boolean;
     sqlError: string;
     onClose: () => void;
-    onSave: () => void;
-    canSave: boolean;
     onRun: () => void;
     canRun: boolean;
     running: boolean;
   };
-  let { setEditorHost, hasError, sqlError, onClose, onSave, canSave, onRun, canRun, running }: Props = $props();
+  let { setEditorHost, hasError, sqlError, onClose, onRun, canRun, running }: Props = $props();
 
   function hostRef(node: HTMLDivElement) {
     setEditorHost(node);
@@ -22,14 +20,13 @@
 
 <aside class="panel" aria-labelledby="sql-editor-title">
   <header>
-    <div><strong id="sql-editor-title">SQL query</strong><span>DuckDB SQL</span></div>
+    <div><strong id="sql-editor-title">SQL view</strong><span>DuckDB SQL</span></div>
     <button class="close" onclick={onClose} aria-label="Close SQL editor" title="Close SQL editor">×</button>
   </header>
   <div use:hostRef class="editor" class:has-error={hasError}></div>
   {#if sqlError}<p class="error" role="alert">{sqlError}</p>{/if}
   <footer>
-    <Button onclick={onSave} disabled={!canSave}>Save</Button>
-    <Button variant="primary" title="Run SQL (Shift+Enter)" onclick={onRun} disabled={!canRun}>{running ? 'Running…' : 'Run SQL'}</Button>
+    <Button variant="primary" title="Run SQL and save View (Shift+Enter)" onclick={onRun} disabled={!canRun}>{running ? 'Running…' : 'Run &amp; save View'}</Button>
   </footer>
 </aside>
 

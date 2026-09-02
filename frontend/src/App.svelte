@@ -8,7 +8,8 @@
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
-  import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceResponse, NodeInfo, QueryResponse, RowDensity, SavedQuery, SortCondition, WorkbookPreview } from './lib/types';
+  import { LEGACY_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, migrateSavedQueries, stageVersionChange, versionDiff } from './lib/versioning';
+  import type { AggregateCount, AggregateMetric, CategoryValue, ColumnInfo, ColumnStats, DatasetInfo, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, Version, VersionChange, VersionDiff, View, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
   import TitleBar from './components/organisms/TitleBar.svelte';
@@ -17,7 +18,8 @@
   import WelcomeScreen from './components/organisms/WelcomeScreen.svelte';
   import DatasetHead from './components/organisms/DatasetHead.svelte';
   import DatasetTabsBar from './components/organisms/DatasetTabsBar.svelte';
-  import SavedQueriesPane from './components/organisms/SavedQueriesPane.svelte';
+  import VersionsViewsPane from './components/organisms/VersionsViewsPane.svelte';
+  import VersionDiffDialog from './components/organisms/VersionDiffDialog.svelte';
   import QueryConditionBar from './components/organisms/QueryConditionBar.svelte';
   import ColumnsMenuPopover from './components/organisms/ColumnsMenuPopover.svelte';
   import JoinMenuPopover from './components/organisms/JoinMenuPopover.svelte';
@@ -35,7 +37,7 @@
   import AppShell from './components/templates/AppShell.svelte';
 
   const pageSizes = [50, 100, 250, 500, 1000];
-  const savedQueriesKey = 'quark.savedQueries';
+
   const baseOperators: { value: FilterOperator; label: string }[] = [{ value: '=', label: 'equals' }, { value: '!=', label: 'not equal' }, { value: 'is_null', label: 'is null' }, { value: 'not_null', label: 'is not null' }];
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
   const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
@@ -74,9 +76,8 @@
   let joinPreview = $state.raw<JoinWorkspaceResponse | null>(null);
   let joinPreviewLoading = $state(false);
   let joinPreviewError = $state('');
-  let saveJoinView = $state(false);
-  let joinViewName = $state('');
   let hiddenColumns = $state<string[]>([]);
+  let columnOrder = $state<string[]>([]);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
   let tableExpanded = $state(false);
@@ -149,7 +150,8 @@
   let exportError = $state('');
   let exportTrigger = $state<HTMLButtonElement | null>(null);
   let exportRequestId = 0;
-  let workspaceTab = $state<'data' | 'queries'>('data');
+  let workspaceTab = $state<'data' | 'history'>('data');
+  let currentSurface = $state<'version' | 'view'>('version');
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
   let sqlText = $state('');
@@ -158,7 +160,13 @@
   let activeSqlNodeId = $state('');
   let sqlError = $state('');
   let storageError = $state('');
-  let savedQueries = $state<SavedQuery[]>([]);
+  let recordingNotice = $state('');
+  let versionHistories = $state.raw<DatasetVersionHistory[]>([]);
+  let legacyEntries = $state.raw<unknown[]>([]);
+  let migratedLegacyViews = $state.raw<View[]>([]);
+  let activeJoin = $state.raw<JoinWorkspaceRequest | undefined>(undefined);
+  let openDiff = $state.raw<VersionDiff | null>(null);
+  let diffDialog = $state<HTMLDialogElement | null>(null);
   let editorHost = $state<HTMLDivElement | null>(null);
   let sqlTrigger = $state<HTMLButtonElement | null>(null);
   let editorView: EditorView | null = null;
@@ -166,6 +174,7 @@
 
   let selectedNode = $derived(nodes.find((node) => node.id === selectedNodeId));
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
+  let currentHistory = $derived(versionHistories.find((history) => history.nodeId === selectedNodeId && history.dataset === selectedDataset));
   let currentExportOption = $derived(result ? {
     key: 'current',
     node_id: queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId,
@@ -181,7 +190,7 @@
   let canPreviewJoin = $derived(!!joinLeftDataset && !!joinRightDataset && !!joinLeftNodeId && !!joinRightNodeId && !joinLeftDatasetsLoading && !joinRightDatasetsLoading);
   let canRunJoin = $derived(canPreviewJoin && joinKeysValid && (joinLeftColumns.length > 0 || joinRightColumns.length > 0));
   let totalPages = $derived(pageLimit(result?.total_pages ?? 0));
-  let visibleColumns = $derived(result?.columns.filter((column) => !hiddenColumns.includes(column.name)) ?? []);
+  let visibleColumns = $derived(columnOrder.map((name) => result?.columns.find((column) => column.name === name)).filter((column): column is ColumnInfo => !!column && !hiddenColumns.includes(column.name)));
   let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
   let aggregateColumnMatches = $derived.by(() => { const query = aggregateColumnSearch.trim().toLowerCase(); return query ? aggregateFieldOptions.filter((column) => column.name.toLowerCase().includes(query)) : aggregateFieldOptions; });
   let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === aggregateColumns[aggregateColumns.length - 1]));
@@ -201,7 +210,7 @@
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
   let querySummary = $derived(result ? queryMode === 'sql' ? `${count(result.total_rows)} SQL result rows, page ${result.page} of ${count(result.total_pages)}.` : `${count(result.total_rows)} rows, page ${result.page} of ${count(result.total_pages)}, ${filters.length} filters, ${sorts.length} sorts, and ${dedupeColumns.length} dedupe keys.` : '');
 
-  onMount(() => { loadSavedQueries(); loadNodes(); return () => editorView?.destroy(); });
+  onMount(() => { loadVersioning(); loadNodes(); return () => editorView?.destroy(); });
 
   function message(reason: unknown): string { return reason instanceof Error ? reason.message : 'Something went wrong'; }
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
@@ -237,8 +246,6 @@
     joinRightKeys = [];
     joinLeftColumns = [...(datasets.find((dataset) => dataset.id === selectedDataset)?.columns ?? [])];
     joinRightColumns = [];
-    saveJoinView = false;
-    joinViewName = '';
     if (queryMenuOpen === 'joins') queryMenuOpen = null;
   }
   async function selectJoinSource(side: 'left' | 'right', id: string) {
@@ -260,8 +267,6 @@
       joinRightColumns = [];
       joinRightDatasetsLoading = !!id;
     }
-    const otherId = side === 'left' ? joinRightNodeId : joinLeftNodeId;
-    if (id && otherId && id !== otherId) saveJoinView = false;
     if (!id) return;
     try {
       const next = id === selectedNodeId ? [...datasets] : await api.listDatasets(id);
@@ -322,8 +327,14 @@
     } catch (reason) { if (id === joinPreviewRequestId) joinPreviewError = message(reason); return null; }
     finally { if (id === joinPreviewRequestId) joinPreviewLoading = false; }
   }
-  async function createJoinView() {
-    if (!canRunJoin) return;
+  async function runJoin() {
+    if (!canRunJoin || !joinLeftDataset || !joinRightDataset) return;
+    const request: JoinWorkspaceRequest = {
+      left: { node_id: joinLeftNodeId, dataset: joinLeftDataset.id },
+      right: { node_id: joinRightNodeId, dataset: joinRightDataset.id },
+      left_keys: [...joinLeftKeys],
+      right_keys: [...joinRightKeys]
+    };
     const preview = joinPreview ?? await checkJoin();
     if (!preview) return;
     const query = buildJoinSql(preview.left, preview.right, joinKeyPairs, joinLeftColumns, joinRightColumns);
@@ -333,8 +344,15 @@
     sqlText = query;
     queryMenuOpen = null;
     closeSql(false);
-    await runSql(query, false, false, preview.node_id);
-    if (!joinIsCrossSource && saveJoinView && !sqlError && sqlBase === query) saveQuery(query, joinViewName, joinLeftNodeId, joinLeftDatasetId);
+    if (await runSql(query, false, false, preview.node_id)) {
+      activeJoin = request;
+      currentSurface = 'version';
+      stageChange({
+        kind: 'join',
+        summary: `Join ${joinLeftDataset.name} and ${joinRightDataset.name}`,
+        details: { left: joinLeftDataset.name, right: joinRightDataset.name, leftKeys: [...joinLeftKeys], rightKeys: [...joinRightKeys] }
+      });
+    }
   }
   function addAggregateColumn(column: string) { if (!column || aggregateColumns.includes(column)) return; aggregateColumns = [...aggregateColumns, column]; aggregateColumn = ''; aggregateMetrics = ['count']; }
   function removeAggregateColumn(column: string) { const next = aggregateColumns.filter((item) => item !== column); aggregateColumns = next; aggregateMetrics = next.length ? ['count'] : []; }
@@ -364,7 +382,7 @@
     tick().then(() => { if (trigger) trigger.focus(); else if (restoreTable) tableScroll?.focus(); });
   }
 
-  async function applyColumnQuery(query: string, closeDialog: boolean): Promise<boolean> {
+  async function applyColumnQuery(query: string, closeDialog: boolean, change: VersionChange): Promise<boolean> {
     const current = result;
     const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
     if (!current || !targetNodeId || mutationApplying) return false;
@@ -385,6 +403,7 @@
       dedupeColumns = [];
       dedupeDraft = [];
       result = next;
+      reconcileColumns(next, next.columns.map((column) => column.name));
       queryMode = 'sql';
       sqlText = query;
       sqlBase = query;
@@ -395,6 +414,7 @@
       cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
+      stageChange(change);
       if (closeDialog) mutationDialog?.close();
       return true;
     } catch (reason) {
@@ -411,7 +431,10 @@
     const query = target.kind === 'insert'
       ? buildMutationSql(current.sql, columns, target.insertIndex, expression, name)
       : buildColumnReplacementSql(current.sql, columns, target.column.name, expression, name);
-    await applyColumnQuery(query, true);
+    const change: VersionChange = target.kind === 'insert'
+      ? { kind: 'add', summary: `Add ${name}`, details: { column: name, expression, after: target.left } }
+      : { kind: 'modify', summary: `Modify ${target.column.name}`, details: { column: target.column.name, expression, output: name } };
+    await applyColumnQuery(query, true, change);
   }
 
   async function modifyColumn(column: ColumnInfo) {
@@ -429,7 +452,11 @@
     const columns = current.columns.map((item) => item.name);
     const index = columns.indexOf(column.name);
     const name = nextDuplicateColumnName(column.name, columns);
-    await applyColumnQuery(buildMutationSql(current.sql, columns, index + 1, quoteIdentifier(column.name), name), false);
+    await applyColumnQuery(
+      buildMutationSql(current.sql, columns, index + 1, quoteIdentifier(column.name), name),
+      false,
+      { kind: 'duplicate', summary: `Duplicate ${column.name}`, details: { column: column.name, copy: name } }
+    );
     await tick();
     tableScroll?.focus();
   }
@@ -453,7 +480,11 @@
     if (name === column.name) return true;
     const columns = current.columns.map((item) => item.name);
     if (columns.some((item) => item !== column.name && item.toLocaleLowerCase() === name.toLocaleLowerCase())) { columnMutationError = 'Column names must be unique.'; return false; }
-    return applyColumnQuery(buildColumnReplacementSql(current.sql, columns, column.name, quoteIdentifier(column.name), name), false);
+    return applyColumnQuery(
+      buildColumnReplacementSql(current.sql, columns, column.name, quoteIdentifier(column.name), name),
+      false,
+      { kind: 'rename', summary: `Rename ${column.name} to ${name}`, details: { from: column.name, to: name } }
+    );
   }
 
   function startColumnRename(column: ColumnInfo) {
@@ -550,26 +581,184 @@
     finally { exporting = false; }
   }
 
-  function loadSavedQueries() {
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  function stringArray(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((item) => typeof item === 'string');
+  }
+
+  function cleanJoin(value: unknown): JoinWorkspaceRequest | undefined {
+    if (!isRecord(value) || !isRecord(value.left) || !isRecord(value.right)
+      || typeof value.left.node_id !== 'string' || typeof value.left.dataset !== 'string'
+      || typeof value.right.node_id !== 'string' || typeof value.right.dataset !== 'string'
+      || !stringArray(value.left_keys) || !stringArray(value.right_keys)) return undefined;
+    return {
+      left: { node_id: value.left.node_id, dataset: value.left.dataset },
+      right: { node_id: value.right.node_id, dataset: value.right.dataset },
+      left_keys: [...value.left_keys],
+      right_keys: [...value.right_keys]
+    };
+  }
+
+  function cleanChange(value: unknown): VersionChange | null {
+    if (!isRecord(value) || typeof value.kind !== 'string' || typeof value.summary !== 'string') return null;
+    if (value.details !== undefined && !isRecord(value.details)) return null;
+    return {
+      kind: value.kind,
+      summary: value.summary,
+      ...(value.details ? { details: structuredClone(value.details) as Record<string, SerializableValue> } : {})
+    };
+  }
+
+  function cleanVersion(value: unknown): Version | null {
+    if (!isRecord(value) || typeof value.id !== 'string' || !Number.isInteger(value.number) || Number(value.number) < 1
+      || typeof value.nodeId !== 'string' || typeof value.dataset !== 'string' || typeof value.sql !== 'string'
+      || typeof value.timestamp !== 'string' || !stringArray(value.columns) || !stringArray(value.hiddenColumns)
+      || !Array.isArray(value.changes) || value.parentId !== undefined && typeof value.parentId !== 'string') return null;
+    const changes = value.changes.map(cleanChange).filter((change): change is VersionChange => change !== null);
+    const join = value.join === undefined ? undefined : cleanJoin(value.join);
+    if (changes.length !== value.changes.length || value.join !== undefined && !join) return null;
+    return {
+      id: value.id,
+      ...(value.parentId ? { parentId: value.parentId } : {}),
+      number: Number(value.number),
+      nodeId: value.nodeId,
+      dataset: value.dataset,
+      sql: value.sql,
+      columns: [...value.columns],
+      hiddenColumns: [...value.hiddenColumns],
+      timestamp: value.timestamp,
+      changes,
+      ...(join ? { join } : {})
+    };
+  }
+
+  function cleanView(value: unknown): View | null {
+    if (!isRecord(value) || !['id', 'name', 'nodeId', 'dataset', 'sql', 'timestamp'].every((key) => typeof value[key] === 'string')) return null;
+    const join = value.join === undefined ? undefined : cleanJoin(value.join);
+    if (value.join !== undefined && !join) return null;
+    return {
+      id: value.id as string,
+      name: value.name as string,
+      nodeId: value.nodeId as string,
+      dataset: value.dataset as string,
+      sql: value.sql as string,
+      timestamp: value.timestamp as string,
+      ...(join ? { join } : {})
+    };
+  }
+
+  function cleanHistory(value: unknown): { history: DatasetVersionHistory; pendingCount: number } | null {
+    if (!isRecord(value) || typeof value.nodeId !== 'string' || typeof value.dataset !== 'string'
+      || typeof value.activeVersionId !== 'string' || !Array.isArray(value.versions) || !value.versions.length
+      || !Array.isArray(value.views) || !Array.isArray(value.pendingChanges)
+      || value.pendingParentId !== null && typeof value.pendingParentId !== 'string') return null;
+    const versions = value.versions.map(cleanVersion).filter((version): version is Version => version !== null);
+    const views = value.views.map(cleanView).filter((view): view is View => view !== null);
+    const pending = value.pendingChanges.map(cleanChange).filter((change): change is VersionChange => change !== null);
+    if (versions.length !== value.versions.length || views.length !== value.views.length || pending.length !== value.pendingChanges.length
+      || versions.some((version) => version.nodeId !== value.nodeId || version.dataset !== value.dataset)
+      || views.some((view) => view.nodeId !== value.nodeId || view.dataset !== value.dataset)) return null;
+    const activeVersionId = versions.some((version) => version.id === value.activeVersionId) ? value.activeVersionId : versions[versions.length - 1].id;
+    return {
+      pendingCount: pending.length,
+      history: {
+        nodeId: value.nodeId,
+        dataset: value.dataset,
+        versions,
+        views,
+        activeVersionId,
+        pendingParentId: null,
+        pendingChanges: []
+      }
+    };
+  }
+
+  function persistHistories(next: DatasetVersionHistory[]): boolean {
+    versionHistories = next;
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem(savedQueriesKey) ?? '[]');
-      savedQueries = Array.isArray(stored) ? stored.filter((item): item is SavedQuery => typeof item === 'object' && item !== null && ['id', 'name', 'sql', 'nodeId', 'dataset'].every((key) => typeof (item as Record<string, unknown>)[key] === 'string')) : [];
-    } catch { savedQueries = []; storageError = 'Saved queries could not be read from this browser.'; }
+      localStorage.setItem(VERSIONING_STORAGE_KEY, JSON.stringify(next));
+      storageError = '';
+      return true;
+    } catch {
+      storageError = 'Versions and Views could not be stored in this browser.';
+      return false;
+    }
   }
 
-  function storeSavedQueries(next: SavedQuery[]) {
-    try { localStorage.setItem(savedQueriesKey, JSON.stringify(next)); savedQueries = next; storageError = ''; }
-    catch { storageError = 'Saved queries could not be stored in this browser.'; }
+  function loadVersioning() {
+    let histories: DatasetVersionHistory[] = [];
+    let pendingCount = 0;
+    let readError = '';
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(VERSIONING_STORAGE_KEY) ?? '[]');
+      if (!Array.isArray(parsed)) throw new Error('Invalid version history');
+      const cleaned = parsed.map(cleanHistory).filter((item): item is NonNullable<ReturnType<typeof cleanHistory>> => item !== null);
+      if (cleaned.length !== parsed.length) readError = 'Some browser version history was invalid and was ignored.';
+      histories = cleaned.map((item) => item.history);
+      pendingCount = cleaned.reduce((total, item) => total + item.pendingCount, 0);
+    } catch {
+      readError = 'Version history could not be read from this browser.';
+    }
+    persistHistories(histories);
+    if (readError && !storageError) storageError = readError;
+    if (pendingCount) recordingNotice = `Cleared ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} because working SQL is not stored.`;
+
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy === null) return;
+    try {
+      const parsed: unknown = JSON.parse(legacy);
+      if (!Array.isArray(parsed)) throw new Error('Invalid legacy Views');
+      legacyEntries = parsed;
+      migratedLegacyViews = migrateSavedQueries(parsed, new Date().toISOString());
+    } catch {
+      if (!storageError) storageError = 'Legacy Views could not be read from this browser.';
+    }
   }
 
-  function saveQuery(value: string, displayName = '', nodeId = selectedNodeId, dataset = selectedDataset) {
+  function replaceHistory(nextHistory: DatasetVersionHistory): boolean {
+    const index = versionHistories.findIndex((history) => history.nodeId === nextHistory.nodeId && history.dataset === nextHistory.dataset);
+    const next = index < 0 ? [...versionHistories, nextHistory] : versionHistories.map((history, itemIndex) => itemIndex === index ? nextHistory : history);
+    return persistHistories(next);
+  }
+
+  function stageChange(change: VersionChange) {
+    if (!currentHistory) return;
+    currentSurface = 'version';
+    recordingNotice = '';
+    replaceHistory(stageVersionChange(currentHistory, change));
+  }
+
+  function addView(value: string, join = activeJoin, displayName = '') {
     const query = value.trim();
-    if (!query) return;
+    if (!currentHistory || !query) return;
     const firstLine = query.split(/\r?\n/, 1)[0].replace(/\s+/g, ' ').trim();
-    storeSavedQueries([...savedQueries, { id: crypto.randomUUID(), name: displayName.trim().slice(0, 64) || firstLine.slice(0, 64) || `Query ${savedQueries.length + 1}`, sql: query, nodeId, dataset }]);
+    replaceHistory(createView(currentHistory, {
+      id: crypto.randomUUID(),
+      name: displayName.trim().slice(0, 64) || firstLine.slice(0, 64) || `View ${currentHistory.views.length + 1}`,
+      sql: query,
+      timestamp: new Date().toISOString(),
+      ...(join ? { join } : {})
+    }));
+    currentSurface = 'view';
   }
 
-  function deleteQuery(id: string) { storeSavedQueries(savedQueries.filter((query) => query.id !== id)); }
+  function removeMigratedLegacy(views: View[]) {
+    if (!views.length) return;
+    const migrated = new Set(views.map((view) => `${view.nodeId}\0${view.dataset}\0${view.id}`));
+    const remaining = legacyEntries.filter((entry) => !migrateSavedQueries([entry], '').some((view) => migrated.has(`${view.nodeId}\0${view.dataset}\0${view.id}`)));
+    if (remaining.length === legacyEntries.length) return;
+    legacyEntries = remaining;
+    migratedLegacyViews = migratedLegacyViews.filter((view) => !migrated.has(`${view.nodeId}\0${view.dataset}\0${view.id}`));
+    try {
+      if (remaining.length) localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(remaining));
+      else localStorage.removeItem(LEGACY_STORAGE_KEY);
+    } catch {
+      storageError = 'Migrated legacy Views could not be removed from this browser.';
+    }
+  }
 
   function editorSchema(): SQLNamespace {
     const schema: Record<string, Record<string, SQLNamespace>> = {};
@@ -605,7 +794,7 @@
           if (!loadingData && sqlText.trim()) {
             page = 1;
             pageInput = '1';
-            void runSql().then(() => editorView?.focus());
+            void runSqlAndAddView().then(() => editorView?.focus());
           }
           return true;
         } }]),
@@ -643,24 +832,89 @@
   function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; } tableExpanded = !tableExpanded; }
   function resetSql(dataset: DatasetInfo | undefined) { closeSql(); queryMode = 'builder'; sqlText = seedSql(dataset); sqlBase = ''; activeSql = ''; activeSqlNodeId = ''; sqlError = ''; }
 
-  async function runSavedQuery(saved: SavedQuery) {
-    workspaceTab = 'data';
-    const node = nodes.find((item) => item.id === saved.nodeId);
-    if (!node) { await openSql(saved.sql); sqlError = 'The source for this saved query is no longer available.'; return; }
-    if (node.id !== selectedNodeId) {
-      await selectNode(node.id, saved.dataset);
-      if (selectedNodeId !== saved.nodeId || (datasets.some((dataset) => dataset.id === saved.dataset) && selectedDataset !== saved.dataset)) { await openSql(saved.sql); sqlError = 'Selection changed while opening this saved query. Review it before running.'; return; }
-    }
-    if (!datasets.some((dataset) => dataset.id === saved.dataset)) { await openSql(saved.sql); sqlError = 'The dataset for this saved query is no longer available.'; return; }
-    if (saved.dataset !== selectedDataset) {
-      await selectDataset(saved.dataset);
-      if (selectedNodeId !== saved.nodeId || selectedDataset !== saved.dataset) { await openSql(saved.sql); sqlError = 'Selection changed while opening this saved query. Review it before running.'; return; }
-    }
-    await openSql(saved.sql);
-    if (selectedNodeId !== saved.nodeId || selectedDataset !== saved.dataset) { sqlError = 'Selection changed while opening this saved query. Review it before running.'; return; }
+  function discardPending(): boolean {
+    const history = currentHistory;
+    if (!history?.pendingChanges.length) return true;
+    if (!window.confirm(`Discard ${history.pendingChanges.length} pending change${history.pendingChanges.length === 1 ? '' : 's'}?`)) return false;
+    replaceHistory({ ...history, pendingParentId: null, pendingChanges: [] });
+    recordingNotice = 'Pending changes discarded.';
+    return true;
+  }
+
+  async function replayStored(sql: string, nodeId: string, join?: JoinWorkspaceRequest, columns?: string[], hidden: string[] = []): Promise<boolean> {
     page = 1;
     pageInput = '1';
-    await runSql(saved.sql, false, false, saved.nodeId);
+    let targetNodeId = nodeId;
+    try {
+      if (join) targetNodeId = (await api.previewJoinWorkspace(join)).node_id;
+    } catch (reason) {
+      sqlError = message(reason);
+      return false;
+    }
+    if (!await runSql(sql, false, false, targetNodeId)) return false;
+    activeJoin = join;
+    if (result) reconcileColumns(result, columns);
+    hiddenColumns = hidden.filter((column) => columnOrder.includes(column));
+    shownColumnTypes = [];
+    return true;
+  }
+
+  async function openView(view: View) {
+    if (!discardPending()) return;
+    workspaceTab = 'data';
+    if (await replayStored(view.sql, view.nodeId, view.join)) currentSurface = 'view';
+  }
+
+  async function restoreVersion(version: Version) {
+    if (!discardPending()) return;
+    workspaceTab = 'data';
+    if (!await replayStored(version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns)) return;
+    const history = versionHistories.find((item) => item.nodeId === version.nodeId && item.dataset === version.dataset);
+    if (history) replaceHistory(activateVersion(history, version.id));
+    currentSurface = 'version';
+  }
+
+  async function showDiff(history: DatasetVersionHistory, version: Version) {
+    const diff = versionDiff(history, version.id);
+    if (!diff) return;
+    openDiff = diff;
+    await tick();
+    diffDialog?.showModal();
+  }
+
+  async function stopRecording() {
+    const history = currentHistory;
+    if (!history || !result || !history.pendingChanges.length) return;
+    const next = finalizeVersion(history, {
+      sql: result.sql,
+      columns: [...columnOrder],
+      hiddenColumns: [...hiddenColumns],
+      timestamp: new Date().toISOString(),
+      ...(activeJoin ? { join: activeJoin } : {})
+    });
+    if (!replaceHistory(next)) return;
+    const version = next.versions.find((item) => item.id === next.activeVersionId);
+    if (version) await showDiff(next, version);
+  }
+
+  async function initializeHistory() {
+    if (!result || !selectedNodeId || !selectedDataset) return;
+    const existing = versionHistories.find((item) => item.nodeId === selectedNodeId && item.dataset === selectedDataset);
+    let history: DatasetVersionHistory = existing ?? createSourceHistory({
+      nodeId: selectedNodeId,
+      dataset: selectedDataset,
+      sql: result.sql,
+      columns: result.columns.map((column) => column.name),
+      hiddenColumns: [...hiddenColumns],
+      timestamp: new Date().toISOString()
+    });
+    const legacyViews = migratedLegacyViews.filter((view) => view.nodeId === history.nodeId && view.dataset === history.dataset);
+    const newLegacyViews = legacyViews.filter((view) => !history.views.some((item) => item.id === view.id));
+    history = newLegacyViews.reduce((next, view) => createView(next, view), history);
+    if (!replaceHistory(history)) return;
+    removeMigratedLegacy(legacyViews);
+    const active = history.versions.find((version) => version.id === history.activeVersionId) ?? history.versions[history.versions.length - 1];
+    if (await replayStored(active.sql, active.nodeId, active.join, active.columns, active.hiddenColumns)) currentSurface = 'version';
   }
 
   async function discardWorkbook() {
@@ -752,6 +1006,7 @@
 
   async function selectNode(id: string, preferredDataset = '') {
     if (id === selectedNodeId && result) { railOpen = false; return; }
+    if (!discardPending()) return;
     const datasetId = ++datasetRequestId;
     requestId++;
     closeInspector();
@@ -768,6 +1023,9 @@
     clearAggregateDraft();
     clearJoinDraft();
     hiddenColumns = [];
+    columnOrder = [];
+    activeJoin = undefined;
+    currentSurface = 'version';
     lastHiddenColumn = null;
     shownColumnTypes = [];
     error = '';
@@ -781,6 +1039,8 @@
   }
 
   async function selectDataset(name: string) {
+    if (name === selectedDataset && result) { workspaceTab = 'data'; return; }
+    if (!discardPending()) return;
     closeInspector();
     selectedDataset = name;
     resetSql(datasets.find((dataset) => dataset.id === name));
@@ -792,23 +1052,27 @@
     clearAggregateDraft();
     clearJoinDraft();
     hiddenColumns = [];
+    columnOrder = [];
+    activeJoin = undefined;
+    currentSurface = 'version';
     lastHiddenColumn = null;
     shownColumnTypes = [];
     page = 1;
     pageInput = '1';
-    await loadData();
+    if (await loadData()) await initializeHistory();
   }
 
-  async function loadData() {
-    if (queryMode === 'sql') { await runSql(sqlBase || activeSql, true); return; }
-    if (!selectedNodeId || !selectedDataset) return;
+  async function loadData(): Promise<boolean> {
+    if (queryMode === 'sql') return runSql(sqlBase || activeSql, true);
+    if (!selectedNodeId || !selectedDataset) return false;
     const id = ++requestId;
     loadingData = true;
     error = '';
     try {
       const next = await api.queryDataset(selectedNodeId, selectedDataset, { page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns });
-      if (id !== requestId) return;
+      if (id !== requestId) return false;
       result = next;
+      reconcileColumns(next);
       queryMode = 'builder';
       sqlError = '';
       selectedCell = null;
@@ -817,7 +1081,8 @@
       cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
-    } catch (reason) { if (id === requestId) error = message(reason); }
+      return true;
+    } catch (reason) { if (id === requestId) error = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
   }
 
@@ -837,13 +1102,19 @@
     pageInput = '1';
     sqlText = query;
     closeSql(false);
-    await runSql(query, false, true);
+    if (await runSql(query, false, true)) addView(result?.sql ?? query);
   }
 
-  async function runSql(value = sqlText, keepSqlBase = false, keepAggregateBuilder = false, nodeId?: string) {
+  function reconcileColumns(next: QueryResponse, preferred = columnOrder.length ? columnOrder : next.columns.map((column) => column.name)) {
+    const names = next.columns.map((column) => column.name);
+    columnOrder = [...preferred.filter((column, index) => names.includes(column) && preferred.indexOf(column) === index), ...names.filter((column) => !preferred.includes(column))];
+    hiddenColumns = hiddenColumns.filter((column) => names.includes(column));
+  }
+
+  async function runSql(value = sqlText, keepSqlBase = false, keepAggregateBuilder = false, nodeId?: string): Promise<boolean> {
     const query = value.trim();
     const targetNodeId = nodeId || activeSqlNodeId || selectedNodeId;
-    if (!targetNodeId || !query) { sqlError = 'Enter a SQL query to run.'; return; }
+    if (!targetNodeId || !query) { sqlError = 'Enter SQL to run.'; return false; }
     const source = keepSqlBase ? sqlBase || query : query;
     if (!keepSqlBase) {
       filters = [];
@@ -858,8 +1129,9 @@
     sqlError = '';
     try {
       const next = await api.querySql(targetNodeId, { sql: source, page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns });
-      if (id !== requestId) return;
+      if (id !== requestId) return false;
       result = next;
+      reconcileColumns(next, keepSqlBase && columnOrder.length ? columnOrder : next.columns.map((column) => column.name));
       sqlBase = source;
       activeSql = next.sql;
       activeSqlNodeId = targetNodeId;
@@ -868,13 +1140,25 @@
       editingCell = null;
       cellEditSaving = false;
       cellEditError = '';
-      hiddenColumns = [];
-      shownColumnTypes = [];
+      if (!keepSqlBase) {
+        hiddenColumns = [];
+        shownColumnTypes = [];
+      }
       page = next.page;
       pageInput = String(next.page);
       if (sqlOpen) { await tick(); createSqlEditor(); }
-    } catch (reason) { if (id === requestId) sqlError = message(reason); }
+      return true;
+    } catch (reason) { if (id === requestId) sqlError = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
+  }
+
+  async function runSqlAndAddView(): Promise<boolean> {
+    page = 1;
+    pageInput = '1';
+    const query = sqlText;
+    const ran = await runSql(query);
+    if (ran) addView(result?.sql ?? query);
+    return ran;
   }
 
   async function loadActiveData() { if (queryMode === 'sql') await runSql(sqlBase || activeSql, true); else await loadData(); }
@@ -982,6 +1266,8 @@
   async function backToBuilder() {
     queryMode = 'builder';
     activeSqlNodeId = '';
+    activeJoin = undefined;
+    currentSurface = 'version';
     clearAggregateDraft();
     clearJoinDraft();
     filters = [];
@@ -996,19 +1282,34 @@
   async function applyDedupe() { dedupeColumns = [...dedupeDraft]; page = 1; await loadData(); }
   async function clearDedupe() { dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
   function isColumnProtected(column: string): boolean { return [...dedupeColumns, ...dedupeDraft].includes(column); }
-  function hideColumn(column: string) { if (!isColumnProtected(column) && visibleColumns.length > 1) { hiddenColumns = [...hiddenColumns, column]; lastHiddenColumn = column; } }
+  function setHidden(next: string[], change: VersionChange): boolean {
+    const columns = new Set((result?.columns ?? []).map((column) => column.name));
+    const normalized = [...new Set(next)].filter((column) => columns.has(column));
+    if (normalized.length === hiddenColumns.length && normalized.every((column, index) => column === hiddenColumns[index])) return false;
+    hiddenColumns = normalized;
+    stageChange(change);
+    return true;
+  }
+  function hideColumn(column: string) {
+    if (!isColumnProtected(column) && visibleColumns.length > 1 && setHidden([...hiddenColumns, column], { kind: 'hide', summary: `Hide ${column}`, details: { columns: [column] } })) lastHiddenColumn = column;
+  }
   function hideColumnsAtNullFraction(fraction: number) {
     const columns = visibleColumns.filter((column) => !isColumnProtected(column.name) && column.null_fraction >= fraction).slice(0, visibleColumns.length - 1);
-    if (columns.length) { hiddenColumns = [...hiddenColumns, ...columns.map((column) => column.name)]; lastHiddenColumn = columns[columns.length - 1].name; }
+    if (columns.length && setHidden([...hiddenColumns, ...columns.map((column) => column.name)], { kind: 'hide', summary: `Hide ${columns.length} column${columns.length === 1 ? '' : 's'}`, details: { columns: columns.map((column) => column.name) } })) lastHiddenColumn = columns[columns.length - 1].name;
   }
-  function restoreColumn(column: string) { hiddenColumns = hiddenColumns.filter((item) => item !== column); if (lastHiddenColumn === column) lastHiddenColumn = null; }
-  function showAllColumns() { hiddenColumns = []; lastHiddenColumn = null; shownColumnTypes = []; }
+  function restoreColumn(column: string) {
+    if (setHidden(hiddenColumns.filter((item) => item !== column), { kind: 'show', summary: `Show ${column}`, details: { columns: [column] } }) && lastHiddenColumn === column) lastHiddenColumn = null;
+  }
+  function showAllColumns() {
+    if (setHidden([], { kind: 'show', summary: 'Show all columns', details: { columns: [...hiddenColumns] } })) lastHiddenColumn = null;
+    shownColumnTypes = [];
+  }
   function isTypeShown(type: string): boolean { return shownColumnTypes.length === 0 || shownColumnTypes.includes(type); }
   function showColumnsOfTypes(types: string[]) {
     const columns = result?.columns ?? [];
     if (!columns.some((column) => types.includes(column.type) || isColumnProtected(column.name))) return;
-    hiddenColumns = columns.filter((column) => !types.includes(column.type) && !isColumnProtected(column.name)).map((column) => column.name);
-    lastHiddenColumn = null;
+    const next = columns.filter((column) => !types.includes(column.type) && !isColumnProtected(column.name)).map((column) => column.name);
+    if (setHidden(next, { kind: 'visibility', summary: `Show ${types.join(', ')} columns`, details: { types: [...types] } })) lastHiddenColumn = null;
   }
   function toggleShownType(type: string, checked: boolean) {
     const selected = shownColumnTypes.length ? shownColumnTypes : [...columnTypes];
@@ -1186,6 +1487,7 @@
       dedupeColumns = [];
       dedupeDraft = [];
       result = next;
+      reconcileColumns(next);
       queryMode = 'sql';
       sqlText = query;
       sqlBase = query;
@@ -1194,6 +1496,7 @@
       editingCell = null;
       page = next.page;
       pageInput = String(next.page);
+      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } });
       if (move) moveCell(edit.row, edit.column, move);
       else void focusCell(selectedCell?.row ?? edit.row, selectedCell?.column ?? edit.column);
     } catch (reason) {
@@ -1265,7 +1568,7 @@
       {:else}
         <section class="workspace" inert={cellEditSaving}>
           <DatasetHead
-            title={workspaceTab === 'queries' ? 'Saved queries' : (currentDataset?.name ?? selectedNode?.name ?? '')}
+            title={workspaceTab === 'history' ? 'Versions & Views' : (currentDataset?.name ?? selectedNode?.name ?? '')}
             showMeta={workspaceTab === 'data' && !!result}
             rows={result ? count(result.total_rows) : ''}
             ms={result ? compact(result.elapsed_ms) : ''}
@@ -1273,19 +1576,27 @@
             onRefresh={loadActiveData}
             onExport={openExport}
             {loadingData} canExport={!!result} {exporting}
+            pendingCount={currentHistory?.pendingChanges.length ?? 0}
+            onStopRecording={stopRecording}
             inert={!!inspectorMode || tableExpanded}
           />
           <DatasetTabsBar
             {datasets} {selectedDataset} {workspaceTab} {tableExpanded} {rowDensity}
-            savedQueryCount={savedQueries.length}
+            historyCount={(currentHistory?.versions.length ?? 0) + (currentHistory?.views.length ?? 0)}
             onSelectDataset={(id) => selectDataset(id)}
-            onSelectQueries={() => { closeSql(); workspaceTab = 'queries'; }}
+            onSelectHistory={() => { closeSql(); workspaceTab = 'history'; }}
             setRowDensity={(density) => rowDensity = density}
             onToggleExpanded={toggleTableExpanded}
           />
-          {#if workspaceTab === 'queries'}
-            <SavedQueriesPane {savedQueries} {storageError} onRun={runSavedQuery} onDelete={deleteQuery} />
+          {#if workspaceTab === 'history'}
+            <VersionsViewsPane
+              history={currentHistory} {storageError}
+              onRestore={restoreVersion}
+              onDiff={(version) => currentHistory && showDiff(currentHistory, version)}
+              onOpenView={openView}
+            />
           {:else}
+            {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
             {#if error}
               <div class="banner error-banner" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => selectedDataset ? loadData() : loadNodes()}>Retry</button></div>
             {/if}
@@ -1298,11 +1609,10 @@
                 {filters} {sorts} {dedupeColumns}
                 {activeSql} {filterSummary}
                 onRemoveFilter={removeFilter} onRemoveSort={removeSort} onClearDedupe={clearDedupe}
-                onSaveQuery={() => saveQuery(result?.sql ?? '')} canSaveBuilderQuery={!!result?.sql}
-                onClearQuery={clearQuery}
+                onSaveView={() => addView(result?.sql ?? activeSql)} canSaveView={!!result?.sql}
+                onClearConditions={clearQuery}
                 isSqlMode={queryMode === 'sql'}
                 onBackToFullTable={backToBuilder}
-                onSaveView={() => saveQuery(activeSql)}
                 onBackToBuilder={backToBuilder}
                 {columnSearch} setColumnSearch={(value) => columnSearch = value}
                 onFindColumn={findColumn} onColumnSearchKeydown={cycleColumnMatch}
@@ -1339,9 +1649,7 @@
                       {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
                       onCheck={checkJoin} canCheck={canPreviewJoin} {count}
                       crossSource={joinIsCrossSource}
-                      {saveJoinView} setSaveJoinView={(value) => saveJoinView = joinIsCrossSource ? false : value}
-                      {joinViewName} setJoinViewName={(value) => joinViewName = value}
-                      onRun={createJoinView} canRun={canRunJoin} running={loadingData}
+                      onRun={runJoin} canRun={canRunJoin} running={loadingData}
                     />
                   {/if}
                 {/snippet}
@@ -1371,8 +1679,7 @@
                   setEditorHost={(el) => editorHost = el}
                   hasError={!!sqlError} {sqlError}
                   onClose={() => closeSql()}
-                  onSave={() => saveQuery(sqlText)} canSave={!!sqlText.trim()}
-                  onRun={() => { page = 1; pageInput = '1'; runSql(); }}
+                  onRun={runSqlAndAddView}
                   canRun={!loadingData && !!sqlText.trim()} running={loadingData}
                 />
               {/if}
@@ -1516,6 +1823,10 @@
     onCancel={() => exportDialog?.close()}
     onExport={runExport}
   />
+{/if}
+
+{#if openDiff}
+  <VersionDiffDialog diff={openDiff} setDialog={(element) => diffDialog = element} onClose={() => openDiff = null} />
 {/if}
 
 <style>

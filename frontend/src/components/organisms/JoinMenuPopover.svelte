@@ -1,7 +1,7 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
   import Checkbox from '../atoms/Checkbox.svelte';
-  import TextInput from '../atoms/TextInput.svelte';
+
   import MultiSelectDropdown from '../molecules/MultiSelectDropdown.svelte';
   import SelectDropdown from '../molecules/SelectDropdown.svelte';
   import type { AggregateCount, DatasetInfo, JoinRelationship, JoinWorkspaceResponse, NodeInfo } from '../../lib/types';
@@ -39,10 +39,7 @@
     canCheck: boolean;
     count: (value: AggregateCount) => string;
     crossSource: boolean;
-    saveJoinView: boolean;
-    setSaveJoinView: (value: boolean) => void;
-    joinViewName: string;
-    setJoinViewName: (value: string) => void;
+
     onRun: () => void;
     canRun: boolean;
     running: boolean;
@@ -54,8 +51,7 @@
     joinSelectionError, joinLeftDataset, joinRightDataset, joinLeftDatasetId, joinRightDatasetId, selectJoinDataset,
     joinLeftKeys, joinRightKeys, onSetKeys, joinLeftColumns, joinRightColumns,
     onToggleColumn, onSelectAll, onSelectNone, joinPreview, previewLoading, previewError,
-    onCheck, canCheck, count, crossSource, saveJoinView, setSaveJoinView,
-    joinViewName, setJoinViewName, onRun, canRun, running
+    onCheck, canCheck, count, crossSource, onRun, canRun, running
   }: Props = $props();
 
   let sourceOptions = $derived(sources.map((source) => ({ value: source.id, label: source.name, description: source.source })));
@@ -159,15 +155,7 @@
         </section>
       {/if}
 
-      <div class:disabled={crossSource} inert={crossSource} aria-disabled={crossSource}>
-        <Checkbox checked={crossSource ? false : saveJoinView} label="Save view in this browser" onchange={setSaveJoinView} />
-      </div>
-      {#if crossSource}<p class="session-note">Session-only cross-source view</p>{/if}
-      {#if saveJoinView && !crossSource}
-        <label class="field">Optional view name
-          <TextInput type="text" maxlength="64" value={joinViewName} oninput={(event: Event) => setJoinViewName((event.currentTarget as HTMLInputElement).value)} placeholder="Joined view" />
-        </label>
-      {/if}
+
     {/if}
   </div>
 </details>
@@ -198,12 +186,12 @@
   .member > strong { font-size: 11px; color: var(--ink-2); }
   .sheet-pills { min-height: 24px; display: flex; align-items: center; align-content: flex-start; gap: 4px; flex-wrap: wrap; }
   .member-note { font-size: 10.5px; color: var(--faint); }
-  .field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
+
   .keys { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); }
   legend { padding: 0 4px; font-size: 11px; font-weight: 600; color: var(--muted); }
   .key-selectors { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: end; gap: 7px; }
   .key-selectors > span { padding-bottom: 8px; color: var(--muted); }
-  .keys p, .error, .session-note { margin: 0; font-size: 10.5px; color: var(--muted); }
+  .keys p, .error { margin: 0; font-size: 10.5px; color: var(--muted); }
   .keys p.invalid, .error { color: var(--error); }
   .columns { min-height: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .columns section { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
@@ -219,8 +207,7 @@
   dl div { min-width: 0; }
   dt { margin-bottom: 2px; font-size: 10px; color: var(--muted); }
   dd { margin: 0; overflow-wrap: anywhere; font: 11px var(--font-mono); color: var(--ink); }
-  .disabled { opacity: 0.5; }
-  .session-note { margin-top: -7px; }
+
   @media (max-width: 760px) {
     .popover { width: calc(100% - 24px); }
     .members, .columns { grid-template-columns: 1fr; }

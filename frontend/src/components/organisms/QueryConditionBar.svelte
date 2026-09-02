@@ -16,12 +16,11 @@
     onRemoveFilter: (index: number) => void;
     onRemoveSort: (column: string) => void;
     onClearDedupe: () => void;
-    onSaveQuery: () => void;
-    canSaveBuilderQuery: boolean;
-    onClearQuery: () => void;
+    onSaveView: () => void;
+    canSaveView: boolean;
+    onClearConditions: () => void;
     isSqlMode: boolean;
     onBackToFullTable: () => void;
-    onSaveView: () => void;
     onBackToBuilder: () => void;
     columnSearch: string;
     setColumnSearch: (value: string) => void;
@@ -40,8 +39,8 @@
 
   let {
     inert = false, showBuilder, filters, sorts, dedupeColumns, activeSql, filterSummary,
-    onRemoveFilter, onRemoveSort, onClearDedupe, onSaveQuery, canSaveBuilderQuery, onClearQuery,
-    isSqlMode, onBackToFullTable, onSaveView, onBackToBuilder,
+    onRemoveFilter, onRemoveSort, onClearDedupe, onSaveView, canSaveView, onClearConditions,
+    isSqlMode, onBackToFullTable, onBackToBuilder,
     columnSearch, setColumnSearch, onFindColumn, onColumnSearchKeydown, columnMatchCount,
     sqlOpen, onToggleSql, setSqlTrigger, storageError,
     columnsMenu, joinMenu, aggregateMenu, dedupeMenu
@@ -53,13 +52,13 @@
   }
 </script>
 
-<section class="bar" aria-label="Query controls" {inert}>
+<section class="bar" aria-label="Dataset controls" {inert}>
   {@render columnsMenu()}
   {@render joinMenu()}
   {#if showBuilder}
     {@render aggregateMenu()}
     {@render dedupeMenu()}
-    <div class="tokens" aria-label="Active query conditions">
+    <div class="tokens" aria-label="Active conditions">
       {#each filters as filter, index (filter.column + index)}
         <Chip onRemove={() => onRemoveFilter(index)} removeLabel={`Remove filter ${filter.column}`} title={filterSummary(filter)}><b>{filter.column}</b></Chip>
       {/each}
@@ -74,18 +73,18 @@
       {/if}
     </div>
     {#if filters.length || sorts.length || dedupeColumns.length}
-      <Button onclick={onSaveQuery} disabled={!canSaveBuilderQuery}>Save query</Button>
-      <button type="button" class="link" onclick={onClearQuery}>Clear query</button>
+      <Button onclick={onSaveView} disabled={!canSaveView}>Save View</Button>
+      <button type="button" class="link" onclick={onClearConditions}>Clear conditions</button>
     {/if}
     {#if isSqlMode}<Button onclick={onBackToFullTable}>Back to full table</Button>{/if}
   {:else}
-    <div class="tokens"><Chip title={activeSql}>SQL</Chip></div>
-    <Button onclick={onSaveView} disabled={!activeSql}>Save view</Button>
+    <div class="tokens"><Chip title={activeSql}>SQL view</Chip></div>
+    <Button onclick={onSaveView} disabled={!activeSql}>Save View</Button>
     <Button onclick={onBackToBuilder}>Back to builder</Button>
   {/if}
   <TextInput type="search" glyph="⌕" value={columnSearch} oninput={(event: Event) => { setColumnSearch((event.currentTarget as HTMLInputElement).value); onFindColumn(); }} onkeydown={onColumnSearchKeydown} placeholder="Find column" aria-label="Find column" />
   <span class="match-count" aria-live="polite" aria-label={`${columnMatchCount} matching columns`}>{columnMatchCount}</span>
-  <button use:trigger class="sql-trigger" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={onToggleSql}>SQL <small>⌘K</small></button>
+  <button use:trigger class="sql-trigger" class:active={sqlOpen} aria-expanded={sqlOpen} onclick={onToggleSql}>SQL view <small>⌘K</small></button>
   {#if storageError}<span class="error" role="alert">{storageError}</span>{/if}
 </section>
 

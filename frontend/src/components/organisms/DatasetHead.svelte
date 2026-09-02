@@ -10,9 +10,11 @@
     loadingData: boolean;
     canExport: boolean;
     exporting: boolean;
+    pendingCount: number;
+    onStopRecording: () => void;
     inert?: boolean;
   };
-  let { title, showMeta, rows, ms, showRefresh, onRefresh, onExport, loadingData, canExport, exporting, inert = false }: Props = $props();
+  let { title, showMeta, rows, ms, showRefresh, onRefresh, onExport, loadingData, canExport, exporting, pendingCount, onStopRecording, inert = false }: Props = $props();
 </script>
 
 <header class="head" {inert}>
@@ -20,10 +22,13 @@
     <h1>{title}</h1>
     {#if showMeta}<p class="meta"><span>{rows} rows</span><span>{ms} ms</span></p>{/if}
   </div>
-  {#if showRefresh}
+  {#if showRefresh || pendingCount}
     <div class="actions">
-      <button class="export" onclick={(event) => onExport(event.currentTarget as HTMLButtonElement)} disabled={!canExport || exporting} aria-label="Export data" title="Export data">{exporting ? 'Exporting…' : 'Export'}</button>
-      <button class="refresh" onclick={onRefresh} disabled={loadingData} aria-label="Refresh data" title="Refresh data">↻</button>
+      {#if pendingCount}<button class="recording" onclick={onStopRecording} disabled={loadingData}>Stop recording ({pendingCount})</button>{/if}
+      {#if showRefresh}
+        <button class="export" onclick={(event) => onExport(event.currentTarget as HTMLButtonElement)} disabled={!canExport || exporting} aria-label="Export data" title="Export data">{exporting ? 'Exporting…' : 'Export'}</button>
+        <button class="refresh" onclick={onRefresh} disabled={loadingData} aria-label="Refresh data" title="Refresh data">↻</button>
+      {/if}
     </div>
   {/if}
 </header>
@@ -37,5 +42,6 @@
   .actions button:hover:not(:disabled) { border-color: var(--faint); color: var(--ink); }
   .actions button:disabled { opacity: 0.5; }
   .export { padding: 0 10px; font-size: 11.5px; }
+  .recording { padding: 0 10px; border-color: var(--action-tint-border) !important; background: var(--action-tint) !important; color: var(--action-dark) !important; font-size: 11.5px; }
   .refresh { width: 26px; }
 </style>
