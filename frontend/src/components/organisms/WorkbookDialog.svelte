@@ -25,7 +25,7 @@
 <dialog use:dialogRef aria-labelledby="workbook-title" onclose={onClose} oncancel={onCancelAttempt} onclick={onBackdropClick}>
   <section class="workbook-dialog">
     <h2 id="workbook-title">Workbook detected</h2>
-    <p>Choose the worksheets to add before continuing.</p>
+    <p>Choose worksheets. Each selected worksheet becomes a View.</p>
     <div class="sheets">
       {#each preview.sheets as sheet (sheet)}
         <label class="row">

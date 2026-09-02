@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
 
   type Props = {
-    tone?: 'default' | 'accent' | 'muted' | 'dark' | 'dashed';
+    tone?: 'default' | 'accent' | 'muted' | 'dark' | 'dashed' | 'filter' | 'sort';
     onRemove?: () => void;
     removeLabel?: string;
     children: Snippet;
@@ -35,6 +35,8 @@
     white-space: nowrap;
   }
   .chip.accent { border-color: var(--action-tint-border); background: var(--action-tint); color: var(--action-dark); }
+  .chip.filter { border-color: var(--action-tint-border); background: var(--action-tint); color: var(--action-dark); }
+  .chip.sort { border-color: var(--warning); background: var(--surface); color: var(--warning); }
   .chip.muted { border-color: var(--control-border); background: var(--surface-2); color: var(--ink-2); }
   .chip.dark { border-color: var(--ink-fill); background: var(--ink-fill); color: #FFFFFF; }
   .chip.dashed { border-style: dashed; border-color: var(--faint); color: var(--faint); background: transparent; }

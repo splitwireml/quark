@@ -1,15 +1,15 @@
 <script lang="ts">
   import StatusDot from '../atoms/StatusDot.svelte';
-  import type { NodeInfo } from '../../lib/types';
+  import type { SourceSummary } from '../../lib/types';
 
-  type Props = { node: NodeInfo; active: boolean; onselect: () => void };
-  let { node, active, onselect }: Props = $props();
+  type Props = { node: SourceSummary; active: boolean; loading: boolean; loaded: boolean; onselect: () => void };
+  let { node, active, loading, loaded, onselect }: Props = $props();
 </script>
 
-<button class="row" class:active aria-current={active ? 'page' : undefined} onclick={onselect}>
-  <StatusDot tone="success" />
+<button type="button" class="row" class:active aria-current={active ? 'page' : undefined} aria-expanded={loaded} disabled={loading} onclick={onselect}>
+  <StatusDot tone={loading ? 'warning' : loaded ? 'success' : 'muted'} />
   <span class="name" title={node.name}>{node.name}</span>
-  <small>{node.kind}</small>
+  <small>{loading ? 'loading' : loaded ? 'loaded' : ''}</small>
 </button>
 
 <style>
@@ -27,6 +27,7 @@
   }
   .row:hover { background: var(--surface-hover); }
   .row.active { background: var(--surface-hover); }
+  .row:disabled { cursor: wait; }
   .name {
     flex: 1;
     min-width: 0;

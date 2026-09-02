@@ -38,3 +38,24 @@ test('returns empty SQL without keys or output columns', () => {
   assert.equal(buildJoinSql(orders, customers, [], ['id'], ['name']), '');
   assert.equal(buildJoinSql(orders, customers, [{ left: 'id', right: 'id' }], [], []), '');
 });
+
+test('wraps arbitrary View SQL and quotes aliases and columns', () => {
+  const recentOrders = { name: 'Recent "orders"', sql: 'SELECT id, customer_id FROM orders WHERE created_at > current_date - 7' };
+  const activeCustomers = { name: 'Active customers', sql: 'SELECT id, name FROM customers WHERE active' };
+
+  assert.equal(
+    buildJoinSql(recentOrders, activeCustomers, [{ left: 'customer_id', right: 'id' }], ['id'], ['id', 'name']),
+    'SELECT "left"."id" AS "Recent ""orders"".id", "right"."id" AS "Active customers.id", "right"."name" FROM (SELECT id, customer_id FROM orders WHERE created_at > current_date - 7) AS "left" INNER JOIN (SELECT id, name FROM customers WHERE active) AS "right" ON "left"."customer_id" = "right"."id"'
+  );
+});
+
+test('strips a terminal semicolon before wrapping View SQL', () => {
+  assert.match(
+    buildJoinSql(
+      { name: 'Left', sql: 'SELECT 1 AS id; -- saved query\n' },
+      { name: 'Right', sql: 'SELECT 1 AS id' },
+      [{ left: 'id', right: 'id' }], ['id'], ['id']
+    ),
+    /FROM \(SELECT 1 AS id -- saved query\n\) AS "left"/
+  );
+});

@@ -51,7 +51,7 @@
 
     {#if format === 'csv'}
       <section class="current">
-        <strong>Current view</strong>
+        <strong>Current View</strong>
         <span>{current?.name ?? 'No result available'}</span>
         <small>Includes current filters, sorting, joins, aggregates, and computed columns.</small>
       </section>
@@ -59,13 +59,13 @@
       <div class="sheets" aria-busy={loading}>
         {#if current}
           <section>
-            <h3>Current view</h3>
+            <h3>Current View</h3>
             <Checkbox checked={selectedKeys.includes(current.key)} label={current.name} disabled={exporting} onchange={(checked) => onToggle(current.key, checked)} />
           </section>
         {/if}
 
         {#if loading}
-          <p class="state">Loading datasets from all sources…</p>
+          <p class="state">Loading project Views…</p>
         {:else}
           {#each sources as source (source)}
             <section>
@@ -75,14 +75,14 @@
               {/each}
             </section>
           {/each}
-          {#if options.length === 0}<p class="state">No additional datasets are available.</p>{/if}
+          {#if options.length === 0}<p class="state">No additional Views are available.</p>{/if}
         {/if}
       </div>
     {/if}
 
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <footer>
-      <span>{selectionCount} {selectionCount === 1 ? 'sheet' : 'sheets'}</span>
+      <span>{selectionCount} {selectionCount === 1 ? 'View' : 'Views'}</span>
       <Button type="button" onclick={onCancel} disabled={exporting}>Cancel</Button>
       <Button type="submit" variant="primary" disabled={!canExport}>{exporting ? 'Exporting…' : 'Export'}</Button>
     </footer>

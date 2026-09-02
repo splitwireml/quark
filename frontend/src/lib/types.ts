@@ -3,11 +3,22 @@ export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
 export type AggregateCount = number | string;
 
-export interface NodeInfo {
+export interface SourceSummary {
   id: string;
   name: string;
-  source: string;
+}
+
+export interface NodeInfo extends SourceSummary {
+  source?: string;
   kind: string;
+  project_id?: string;
+}
+
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  node_id: string;
+  source_count: number;
 }
 
 export interface WorkbookPreview {
@@ -23,6 +34,19 @@ export interface DatasetInfo {
   schema: string;
   type: string;
   columns: string[];
+}
+
+export interface BaseViewInfo extends DatasetInfo {
+  project_id: string;
+  source_id: string;
+  source_name: string;
+  node_id: string;
+  sql: string;
+}
+
+export interface ProjectSourceInfo extends NodeInfo {
+  project_id: string;
+  views: BaseViewInfo[];
 }
 
 export interface CategoryValue {
@@ -54,6 +78,7 @@ export interface ColumnInfo {
 export interface FilterCondition {
   column: string;
   operator: FilterOperator;
+  connector?: 'and' | 'or';
   value?: string | number | boolean | (string | number | boolean)[];
 }
 
@@ -85,14 +110,13 @@ export interface SqlQueryRequest extends QueryRequest {
   sql: string;
 }
 
-export interface JoinWorkspaceSideRequest {
-  node_id: string;
-  dataset: string;
-}
+export type JoinReference =
+  | { node_id: string; dataset: string; sql?: never; name?: never }
+  | { node_id: string; dataset?: never; sql: string; name?: string };
 
 export interface JoinWorkspaceRequest {
-  left: JoinWorkspaceSideRequest;
-  right: JoinWorkspaceSideRequest;
+  left: JoinReference;
+  right: JoinReference;
   left_keys: string[];
   right_keys: string[];
 }
@@ -190,6 +214,7 @@ export interface Version {
   id: string;
   parentId?: string;
   number: number;
+  fork?: number;
   nodeId: string;
   dataset: string;
   sql: string;
@@ -208,6 +233,22 @@ export interface View {
   sql: string;
   timestamp: string;
   join?: JoinWorkspaceRequest;
+}
+
+export type ViewKind = 'source' | 'derived';
+
+export interface ViewHistory {
+  id: string;
+  projectId: string;
+  name: string;
+  kind: ViewKind;
+  sourceId?: string;
+  nodeId: string;
+  dataset: string;
+  versions: Version[];
+  activeVersionId: string;
+  pendingParentId: string | null;
+  pendingChanges: VersionChange[];
 }
 
 export interface DatasetVersionHistory {

@@ -1,6 +1,8 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
+  import Checkbox from '../atoms/Checkbox.svelte';
   import Chip from '../atoms/Chip.svelte';
+  import IconButton from '../atoms/IconButton.svelte';
   import type { AggregateMetric, ColumnInfo } from '../../lib/types';
 
   type Props = {
@@ -9,11 +11,14 @@
     label: string;
     aggregateColumnSearch: string;
     setAggregateColumnSearch: (value: string) => void;
-    aggregateColumn: string;
     aggregateColumnMatches: ColumnInfo[];
     aggregateColumns: string[];
-    onAddColumn: (name: string) => void;
+    aggregateFields: string[];
+    focusedAggregateColumn: string;
+    onToggleColumn: (name: string, checked: boolean) => void;
     onRemoveColumn: (name: string) => void;
+    onFocusAggregate: (name: string) => void;
+    onToggleRole: (name: string) => void;
     selectedAggregateColumn: ColumnInfo | undefined;
     availableMetrics: { value: AggregateMetric; label: string }[];
     aggregateMetrics: AggregateMetric[];
@@ -23,10 +28,17 @@
   };
 
   let {
-    open, ontoggle, label, aggregateColumnSearch, setAggregateColumnSearch, aggregateColumn,
-    aggregateColumnMatches, aggregateColumns, onAddColumn, onRemoveColumn, selectedAggregateColumn,
-    availableMetrics, aggregateMetrics, onToggleMetric, onCreateView, creating
+    open, ontoggle, label, aggregateColumnSearch, setAggregateColumnSearch,
+    aggregateColumnMatches, aggregateColumns, aggregateFields, focusedAggregateColumn,
+    onToggleColumn, onRemoveColumn, onFocusAggregate, onToggleRole,
+    selectedAggregateColumn, availableMetrics, aggregateMetrics, onToggleMetric, onCreateView, creating
   }: Props = $props();
+
+  function promoteWithKeyboard(event: KeyboardEvent, column: string) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onToggleRole(column);
+  }
 </script>
 
 <details class="popover-host" {open} {ontoggle}>
@@ -35,23 +47,39 @@
     <label class="search">Find a column
       <input type="search" value={aggregateColumnSearch} oninput={(event) => setAggregateColumnSearch((event.currentTarget as HTMLInputElement).value)} placeholder="Type to filter columns" />
     </label>
-    <label class="search">Add column
-      <select value={aggregateColumn} onchange={(event) => onAddColumn((event.currentTarget as HTMLSelectElement).value)}>
-        <option value="">Choose index or aggregate column</option>
+    <fieldset class="field-picker">
+      <legend>Columns</legend>
+      <div class="field-list">
         {#each aggregateColumnMatches as column (column.name)}
-          {#if !aggregateColumns.includes(column.name)}<option value={column.name}>{column.name}</option>{/if}
-        {/each}
-      </select>
-    </label>
-    {#if aggregateColumns.length}
-      <div class="columns">
-        {#each aggregateColumns as column, index (column)}
-          <Chip tone="accent" onRemove={() => onRemoveColumn(column)} removeLabel={`Remove aggregate column ${column}`}>
-            <b>{index < aggregateColumns.length - 1 || aggregateColumns.length === 1 ? 'Index' : 'Aggregate'}</b> {column}
-          </Chip>
+          <Checkbox checked={aggregateColumns.includes(column.name)} label={column.name} title={column.name} onchange={(checked) => onToggleColumn(column.name, checked)} />
+        {:else}
+          <p class="empty">No matching columns</p>
         {/each}
       </div>
-      <p class="note">Earlier columns are indexes. One column + Count shows its distribution.</p>
+    </fieldset>
+    {#if aggregateColumns.length}
+      <div class="columns" aria-label="Selected aggregation fields">
+        {#each aggregateColumns as column (column)}
+          {@const isAggregate = aggregateFields.includes(column)}
+          <div class="column-role">
+            <button
+              type="button"
+              class="role-pill"
+              class:focused={isAggregate && focusedAggregateColumn === column}
+              aria-label={isAggregate ? `Focus metrics for aggregate ${column}; double-click to make index` : `Promote index ${column} to aggregate`}
+              aria-pressed={isAggregate ? focusedAggregateColumn === column : undefined}
+              title={isAggregate ? 'Click to edit metrics · Double-click to make Index' : 'Double-click or press Enter to make Aggregate'}
+              onclick={() => isAggregate && onFocusAggregate(column)}
+              ondblclick={() => onToggleRole(column)}
+              onkeydown={(event) => !isAggregate && promoteWithKeyboard(event, column)}
+            >
+              <Chip tone={isAggregate ? 'accent' : 'muted'}><b>{isAggregate ? 'Aggregate' : 'Index'}</b> {column}</Chip>
+            </button>
+            <IconButton type="button" glyph="×" label={`Remove ${isAggregate ? 'aggregate' : 'index'} field ${column}`} onclick={() => onRemoveColumn(column)} />
+          </div>
+        {/each}
+      </div>
+      <p class="note">Double-click a pill to switch between Index and Aggregate.</p>
       {#if selectedAggregateColumn}
         <fieldset class="metrics">
           <legend>Metrics for {selectedAggregateColumn.name}</legend>
@@ -91,10 +119,17 @@
     display: flex; flex-direction: column; gap: 10px;
   }
   .search { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
-  .search input, .search select { height: 28px; padding: 0 8px; border-radius: var(--radius-md); border: 1px solid var(--control-border); font-size: 12px; }
-  .columns { display: flex; flex-wrap: wrap; gap: 5px; }
+  .search input { height: 28px; padding: 0 8px; border-radius: var(--radius-md); border: 1px solid var(--control-border); font-size: 12px; }
+  .field-picker, .metrics { border: none; margin: 0; padding: 0; }
+  .field-list { max-height: 144px; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; padding: 2px; }
+  .empty { margin: 4px 0; font-size: 11px; color: var(--muted-2); }
+  .columns { display: flex; flex-direction: column; gap: 5px; }
+  .column-role { display: flex; align-items: center; gap: 3px; }
+  .role-pill { min-width: 0; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; }
+  .role-pill.focused { outline: 2px solid var(--action); outline-offset: 1px; }
+  .role-pill:focus-visible { outline: 2px solid var(--action); outline-offset: 1px; }
   .note { margin: 0; font-size: 11px; line-height: 1.5; color: var(--muted-2); }
-  .metrics { border: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+  .metrics { display: flex; flex-wrap: wrap; gap: 5px; }
   legend { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint-2); padding: 0; margin-bottom: 4px; }
   .metric-chip {
     height: 26px; padding: 0 9px;

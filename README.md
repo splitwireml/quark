@@ -1,6 +1,6 @@
 # Quark
 
-Local-first DuckDB data viewer: FastAPI backend, Svelte 5 frontend, server-side paging/filtering/sorting/deduplication, metadata-only Versions and Views, nullity gauges, and on-demand numeric, categorical, and date profiles.
+Local-first DuckDB data viewer: projects contain sources, every table or derived query is a versioned View, and FastAPI/Svelte provide server-side exploration without copying result data.
 
 ## Run for development
 
@@ -44,9 +44,9 @@ By default uploads and the node registry live in `./data`. Override with:
 QUARK_DATA_DIR=/absolute/path uv run uvicorn backend.app:app --host 0.0.0.0
 ```
 
-Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become datasets), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. New flat-file uploads use a safe filename stem as their SQL table name (`Claims v1.csv` → `claims_v1`); existing registrations keep their current names. First run: add a source, choose its dataset, then filter, profile, transform cells/columns, reorder or select columns by regex, join datasets, aggregate, or create a read-only SQL View.
+Supported: CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX (choose worksheets before they become Views), DuckDB/DB. Legacy `.xls` files and `.sql` scripts are not accepted. New flat-file uploads use a safe filename stem as their SQL table name (`Claims v1.csv` → `claims_v1`); existing registrations keep their current names. First run: create a project, add a source, choose a View, then filter, profile, transform cells/columns, reorder or select columns by regex, join Views, aggregate, or create a read-only SQL View.
 
-Every dataset starts at Version 1. Column/cell transformations, visibility, ordering, and joins record one pending Version until **Stop recording** finalizes it. Aggregates and SQL are Views and do not increment the Version number. Versions and Views store only replayable SQL/JSON metadata in the browser—never duplicate row data.
+Every View starts at Version 1. Column/cell transformations, visibility, and ordering record one pending Version until **Stop recording** finalizes it. Joins, aggregates, and SQL create new Views; later changes append Versions to that derived View, never to its source. Versions store only replayable SQL/JSON metadata in the browser—never duplicate row data.
 
 An attached DuckDB path is opened read-only. Only attach paths you trust; Quark is an intentionally local, single-user tool.
 

@@ -1,3 +1,4 @@
+import base64
 import csv
 import datetime as dt
 import io
@@ -181,24 +182,13 @@ def test_export_xlsx_preserves_excel_unsafe_scalars_headers_and_zoned_dates(clie
     workbook.close()
 
 
-def test_export_uses_an_independent_cursor_during_concurrent_metadata(tmp_path, monkeypatch):
+def test_export_and_metadata_are_serialized(tmp_path, monkeypatch):
     original_connect = duckdb.connect
+    executing = threading.Lock()
     export_started = threading.Event()
-    metadata_done = threading.Event()
-
-    class ExportCursor:
-        def __init__(self, con):
-            self.con = con
-
-        def __getattr__(self, name):
-            return getattr(self.con, name)
-
-        def execute(self, sql, *args, **kwargs):
-            self.con.execute(sql, *args, **kwargs)
-            if "range(5001)" in str(sql):
-                export_started.set()
-                assert metadata_done.wait(2)
-            return self
+    metadata_started = threading.Event()
+    overlap = threading.Event()
+    release = threading.Event()
 
     class CoordinatedConnection:
         def __init__(self, con):
@@ -207,25 +197,53 @@ def test_export_uses_an_independent_cursor_during_concurrent_metadata(tmp_path, 
         def __getattr__(self, name):
             return getattr(self.con, name)
 
-        def cursor(self):
-            return ExportCursor(self.con.cursor())
+        def execute(self, sql, *args, **kwargs):
+            if not export_started.is_set() and "range(5001)" not in str(sql):
+                return self.con.execute(sql, *args, **kwargs)
+            if not executing.acquire(blocking=False):
+                overlap.set()
+                release.wait(2)
+                raise RuntimeError("shared DuckDB connection used concurrently")
+            try:
+                if "range(5001)" in str(sql):
+                    export_started.set()
+                    assert release.wait(3)
+                return self.con.execute(sql, *args, **kwargs)
+            finally:
+                executing.release()
 
-    monkeypatch.setattr(backend_app.duckdb, "connect", lambda *args, **kwargs: CoordinatedConnection(original_connect(*args, **kwargs)))
-    with TestClient(create_app(tmp_path)) as client:
+    monkeypatch.setattr(
+        backend_app.duckdb,
+        "connect",
+        lambda *args, **kwargs: CoordinatedConnection(original_connect(*args, **kwargs)),
+    )
+    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as client:
         node = upload(client, "items.csv", b"value\n1\n")
         payload = {
             "format": "csv",
             "sheets": [export_sheet(node, "Rows", "SELECT i FROM range(5001) t(i)")],
         }
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future = executor.submit(client.post, "/api/exports", json=payload)
-            assert export_started.wait(2)
-            assert client.get(f"/api/nodes/{node['id']}/datasets").status_code == 200
-            metadata_done.set()
-            response = future.result(timeout=5)
 
-    assert response.status_code == 200, response.text
-    assert len(response.text.splitlines()) == 5002
+        def get_metadata():
+            metadata_started.set()
+            return client.get(f"/api/nodes/{node['id']}/datasets")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            export_future = executor.submit(client.post, "/api/exports", json=payload)
+            assert export_started.wait(2)
+            metadata_future = executor.submit(get_metadata)
+            assert metadata_started.wait(2)
+            try:
+                overlap.wait(1)
+            finally:
+                release.set()
+            export_response = export_future.result(timeout=5)
+            metadata_response = metadata_future.result(timeout=5)
+
+    assert not overlap.is_set()
+    assert export_response.status_code == metadata_response.status_code == 200
+    assert len(export_response.text.splitlines()) == 5002
+    assert metadata_response.json()[0]["name"] == "items"
 
 
 def test_export_csv_neutralizes_spreadsheet_formulas(client, tmp_path):
@@ -615,6 +633,27 @@ def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client
     assert columns["price"]["null_fraction"] == 0.0
 
 
+def test_query_filter_connectors_fold_left_to_right(client):
+    node = upload(
+        client,
+        "items.csv",
+        b"category,name,price\nx,alpha,10\nx,alpine,20\nx,beta,\ny,alto,30\ny,bravo,40\n",
+    )
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'items')['id']}/query"
+    response = client.post(url, json={"filters": [
+        {"column": "category", "operator": "=", "value": "x", "connector": "or"},
+        {"column": "name", "operator": "=", "value": "alto", "connector": "or"},
+        {"column": "price", "operator": ">=", "value": 20, "connector": "and"},
+    ]})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [
+        {"category": "x", "name": "alpine", "price": 20},
+        {"category": "y", "name": "alto", "price": 30},
+    ]
+    assert 'WHERE (("category" = \'x\' OR "name" = \'alto\') AND "price" >= 20)' in response.json()["sql"]
+
+
 def test_sql_query_pages_with_metadata_and_safe_values(client):
     node = upload(
         client,
@@ -703,6 +742,7 @@ def test_sql_query_rejects_non_select_blank_and_multiple_statements(client, sql)
     {"page_size": 1001},
     {"filters": [{"column": "missing", "operator": "=", "value": "x"}]},
     {"filters": [{"column": "name", "operator": "bogus", "value": "x"}]},
+    {"filters": [{"column": "name", "operator": "=", "value": "x", "connector": "xor"}]},
     {"sorts": [{"column": "missing", "direction": "asc"}]},
     {"sorts": [{"column": "name", "direction": "sideways"}]},
 ])
@@ -1266,3 +1306,372 @@ def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
     assert {node["id"] for node in client.get("/api/nodes").json()} == {
         first["id"], second["id"], third["id"],
     }
+
+
+def create_project(client, name):
+    response = client.post("/api/projects", json={"name": name})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def project_upload(client, project, name, content):
+    response = client.post(
+        f"/api/projects/{project['id']}/sources/upload",
+        files={"file": (name, content)},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_project_source_api_layers_mount_only_the_requested_source(tmp_path, monkeypatch):
+    original_connect = duckdb.connect
+    connections = []
+    workbook = tmp_path / "third.xlsx"
+    with original_connect() as con:
+        con.execute("INSTALL excel; LOAD excel")
+        con.execute("COPY (SELECT 3 AS value) TO ? (FORMAT xlsx, HEADER true, SHEET 'Third')", [str(workbook)])
+
+    def recording_connect(*args, **kwargs):
+        connections.append(original_connect(*args, **kwargs))
+        return connections[-1]
+
+    monkeypatch.setattr(backend_app.duckdb, "connect", recording_connect)
+    with TestClient(create_app(tmp_path)) as client:
+        project = create_project(client, "Layered")
+        other = create_project(client, "Other")
+        first = project_upload(client, project, "first.csv", b"value\n1\n")
+        second = project_upload(client, project, "second.csv", b"value\n2\n")
+        preview = client.post(
+            f"/api/projects/{project['id']}/sources/upload",
+            files={"file": ("third.xlsx", workbook.read_bytes())},
+        ).json()
+        assert preview == {
+            "id": preview["id"], "name": "third.xlsx", "kind": "workbook",
+            "sheets": ["Third"], "project_id": project["id"],
+        }
+        third = client.post(
+            f"/api/projects/{project['id']}/sources/upload/{preview['id']}/confirm",
+            json={"sheets": ["Third"]},
+        ).json()
+        assert third == {
+            "id": third["id"], "name": "third.xlsx", "kind": "upload", "project_id": project["id"],
+        }
+        assert first == {
+            "id": first["id"], "name": "first.csv", "kind": "upload", "project_id": project["id"],
+        }
+
+        source_connections = len(connections)
+        assert client.get(f"/api/projects/{project['id']}/sources").json() == [
+            {"id": first["id"], "name": "first.csv"},
+            {"id": second["id"], "name": "second.csv"},
+            {"id": third["id"], "name": "third.xlsx"},
+        ]
+        assert len(connections) == source_connections
+
+        detail = client.get(f"/api/projects/{project['id']}/sources/{first['id']}")
+        assert detail.status_code == 200, detail.text
+        detail = detail.json()
+        assert detail == {
+            "id": first["id"], "name": "first.csv", "kind": "upload", "project_id": project["id"],
+            "views": detail["views"],
+        }
+        assert len(connections) == source_connections + 1
+        assert len(detail["views"]) == 1
+        assert detail["views"][0]["source_id"] == first["id"]
+        catalog = client.post(
+            f"/api/nodes/{project['node_id']}/sql",
+            json={"sql": "SELECT view_name FROM duckdb_views() WHERE schema_name LIKE 'source_%' ORDER BY view_name"},
+        )
+        assert catalog.status_code == 200, catalog.text
+        assert catalog.json()["rows"] == [{"view_name": "first"}]
+
+        third_detail = client.get(f"/api/projects/{project['id']}/sources/{third['id']}").json()
+        assert [view["name"] for view in third_detail["views"]] == ["Third"]
+        assert client.post(
+            f"/api/nodes/{project['node_id']}/sql", json={"sql": third_detail["views"][0]["sql"]},
+        ).json()["rows"] == [{"value": 3}]
+        assert [view["name"] for view in client.get(f"/api/projects/{project['id']}/views").json()] == [
+            "first", "second", "Third",
+        ]
+
+        expected_path = str((tmp_path / "uploads" / f"{first['id']}.csv").resolve())
+        assert client.get(f"/api/projects/{project['id']}/sources/{first['id']}/path").json() == {
+            "path": expected_path,
+        }
+        assert client.get(f"/api/projects/{other['id']}/sources/{first['id']}").status_code == 404
+        assert client.get(f"/api/projects/{other['id']}/sources/{first['id']}/path").status_code == 404
+
+
+def test_projects_persist_with_stable_workspace_ids(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        project = create_project(client, "  Sales  ")
+        assert project == {
+            "id": project["id"], "name": "Sales",
+            "node_id": f"project_{project['id']}", "source_count": 0,
+        }
+        assert client.get("/api/projects").json() == [
+            {"id": "default", "name": "Default", "node_id": "project_default", "source_count": 0},
+            project,
+        ]
+
+    with TestClient(create_app(tmp_path)) as restarted:
+        assert restarted.get("/api/projects").json()[1] == project
+
+
+def test_legacy_sources_are_visible_in_default_project_without_registry_migration(tmp_path):
+    source = tmp_path / "uploads" / "legacy.csv"
+    source.parent.mkdir()
+    source.write_bytes(b"value\n1\n")
+    stored = {"id": "legacy", "name": "legacy.csv", "kind": "upload", "source": str(source)}
+    (tmp_path / "registry.json").write_text(json.dumps([stored]))
+
+    with TestClient(create_app(tmp_path)) as client:
+        assert client.get("/api/projects").json()[0]["source_count"] == 1
+        assert client.get("/api/projects/default/sources").json() == [{"id": "legacy", "name": "legacy.csv"}]
+        assert client.get("/api/nodes").json() == [stored]
+
+    assert json.loads((tmp_path / "registry.json").read_text()) == [stored]
+
+
+def test_project_sources_are_isolated_and_base_views_execute_in_project_workspace(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        first = create_project(client, "First")
+        second = create_project(client, "Second")
+        source = project_upload(client, first, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
+
+        assert source["project_id"] == first["id"]
+        assert client.get(f"/api/projects/{first['id']}/sources").json() == [
+            {"id": source["id"], "name": "people.csv"},
+        ]
+        assert client.get(f"/api/projects/{second['id']}/sources").json() == []
+        views = client.get(f"/api/projects/{first['id']}/views").json()
+        assert views == [{
+            "id": views[0]["id"],
+            "project_id": first["id"],
+            "source_id": source["id"],
+            "source_name": "people.csv",
+            "node_id": first["node_id"],
+            "name": "people",
+            "schema": "main",
+            "type": "VIEW",
+            "columns": ["id", "name"],
+            "sql": views[0]["sql"],
+        }]
+        query = client.post(f"/api/nodes/{first['node_id']}/sql", json={"sql": views[0]["sql"]})
+        assert query.status_code == 200, query.text
+        assert query.json()["rows"] == [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Bob"}]
+        assert client.get(f"/api/projects/{second['id']}/views").json() == []
+
+    persisted = json.loads((tmp_path / "registry.json").read_text())
+    assert persisted == [{
+        **source,
+        "source": str(tmp_path / "uploads" / f"{source['id']}.csv"),
+        "dataset_name": "people",
+    }]
+    with TestClient(create_app(tmp_path)) as restarted:
+        assert restarted.get(f"/api/projects/{first['id']}/views").json() == views
+
+
+def test_project_sql_requests_serialize_shared_workspace(tmp_path, monkeypatch):
+    original_connect = duckdb.connect
+    armed = threading.Event()
+    executing = threading.Lock()
+    first_execute = threading.Event()
+    second_started = threading.Event()
+    overlap = threading.Event()
+    release = threading.Event()
+
+    # ponytail: deterministic shared-result-state race without a production test hook.
+    class CoordinatedConnection:
+        def __init__(self, con):
+            self.con = con
+
+        def __getattr__(self, name):
+            return getattr(self.con, name)
+
+        def execute(self, *args, **kwargs):
+            if not armed.is_set():
+                return self.con.execute(*args, **kwargs)
+            if not executing.acquire(blocking=False):
+                overlap.set()
+                release.wait(2)
+                raise RuntimeError("shared DuckDB connection used concurrently")
+            try:
+                if not first_execute.is_set():
+                    first_execute.set()
+                    assert release.wait(3)
+                return self.con.execute(*args, **kwargs)
+            finally:
+                executing.release()
+
+    monkeypatch.setattr(
+        backend_app.duckdb,
+        "connect",
+        lambda *args, **kwargs: CoordinatedConnection(original_connect(*args, **kwargs)),
+    )
+    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as client:
+        project = create_project(client, "Concurrent")
+        project_upload(client, project, "values.csv", b"value\n0\n")
+        client.get(f"/api/projects/{project['id']}/views").raise_for_status()
+        armed.set()
+        url = f"/api/nodes/{project['node_id']}/sql"
+
+        def request(value):
+            if value == 2:
+                second_started.set()
+            return client.post(url, json={"sql": f"SELECT {value} AS value"})
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(request, 1)
+            assert first_execute.wait(2)
+            second = executor.submit(request, 2)
+            assert second_started.wait(2)
+            try:
+                overlap.wait(1)
+            finally:
+                release.set()
+            responses = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert not overlap.is_set()
+    assert [(response.status_code, response.json()["rows"]) for response in responses] == [
+        (200, [{"value": 1}]), (200, [{"value": 2}]),
+    ]
+
+
+def test_join_preview_accepts_arbitrary_sql_views_only_in_one_project_workspace(client):
+    project = create_project(client, "Analysis")
+    project_upload(client, project, "people.csv", b"id,name\n1,Ada\n2,Bob\n3,Cyd\n")
+    project_upload(client, project, "orders.csv", b"person_id,amount\n1,10\n1,20\n2,5\n")
+    people, orders = client.get(f"/api/projects/{project['id']}/views").json()
+    aggregate = f"SELECT person_id AS id, sum(amount) AS total FROM ({orders['sql']}) orders GROUP BY person_id"
+    payload = {
+        "left": {"node_id": project["node_id"], "sql": people["sql"], "name": "People"},
+        "right": {"node_id": project["node_id"], "sql": aggregate, "name": "Order totals"},
+        "left_keys": ["id"],
+        "right_keys": ["id"],
+    }
+
+    response = client.post("/api/join-workspaces", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "node_id": project["node_id"],
+        "left": {"name": "People", "sql": people["sql"]},
+        "right": {"name": "Order totals", "sql": aggregate},
+        "left_rows": 3,
+        "right_rows": 2,
+        "output_rows": 2,
+        "relationship": "one_to_one",
+        "cartesian_risk": False,
+    }
+
+    malformed = {**payload, "left": {**payload["left"], "dataset": people["id"]}}
+    assert client.post("/api/join-workspaces", json=malformed).status_code == 422
+    malformed = {**payload, "left": {"node_id": project["node_id"]}}
+    assert client.post("/api/join-workspaces", json=malformed).status_code == 422
+
+    other = create_project(client, "Other")
+    project_upload(client, other, "other.csv", b"id\n1\n")
+    other_view = client.get(f"/api/projects/{other['id']}/views").json()[0]
+    cross_workspace = {
+        **payload,
+        "right": {"node_id": other["node_id"], "sql": other_view["sql"], "name": "Other"},
+    }
+    assert client.post("/api/join-workspaces", json=cross_workspace).status_code == 422
+
+
+def test_project_workspace_exposes_every_attached_database_relation(client, tmp_path):
+    database = tmp_path / "source.duckdb"
+    with duckdb.connect(str(database)) as con:
+        con.execute("CREATE TABLE first AS SELECT 1 AS value")
+        con.execute("CREATE SCHEMA extra")
+        con.execute("CREATE TABLE extra.second AS SELECT 2 AS value")
+    project = create_project(client, "Database")
+    response = client.post(f"/api/projects/{project['id']}/sources/attach", json={"path": str(database)})
+    assert response.status_code == 201, response.text
+    attached = response.json()
+    assert attached == {
+        "id": attached["id"], "name": "source.duckdb", "kind": "attached", "project_id": project["id"],
+    }
+
+    views = client.get(f"/api/projects/{project['id']}/views").json()
+    assert [(view["schema"], view["name"]) for view in views] == [("extra", "second"), ("main", "first")]
+    assert [
+        client.post(f"/api/nodes/{project['node_id']}/sql", json={"sql": view["sql"]}).json()["rows"]
+        for view in views
+    ] == [[{"value": 2}], [{"value": 1}]]
+
+
+def test_project_workspace_blocks_other_project_files_without_breaking_registered_views(client):
+    first = create_project(client, "First")
+    second = create_project(client, "Second")
+    project_upload(client, first, "first.csv", b"value\n1\n")
+    private = project_upload(client, second, "private.csv", b"secret\nnope\n")
+    view = client.get(f"/api/projects/{first['id']}/views").json()[0]
+    url = f"/api/nodes/{first['node_id']}/sql"
+
+    assert client.post(url, json={"sql": view["sql"]}).json()["rows"] == [{"value": 1}]
+    source = client.get(f"/api/projects/{second['id']}/sources/{private['id']}/path").json()["path"].replace("'", "''")
+    response = client.post(url, json={"sql": f"SELECT * FROM read_csv_auto('{source}')"})
+    assert response.status_code == 422, response.text
+    assert client.post(url, json={"sql": view["sql"]}).json()["rows"] == [{"value": 1}]
+
+
+def test_project_owned_sources_cannot_use_legacy_node_routes(client):
+    project = create_project(client, "Private")
+    source = project_upload(client, project, "private.csv", b"value\n1\n")
+    view = client.get(f"/api/projects/{project['id']}/views").json()[0]
+
+    assert source["id"] not in {node["id"] for node in client.get("/api/nodes").json()}
+    assert client.get(f"/api/nodes/{source['id']}/datasets").status_code == 404
+    assert client.post(f"/api/nodes/{source['id']}/sql", json={"sql": "SELECT 1"}).status_code == 404
+    assert client.post("/api/exports", json={
+        "format": "csv", "sheets": [export_sheet(source, "Private", "SELECT 1")],
+    }).status_code == 404
+    assert client.delete(f"/api/nodes/{source['id']}").status_code == 404
+    assert client.get(f"/api/projects/{project['id']}/sources").json() == [
+        {"id": source["id"], "name": "private.csv"},
+    ]
+    assert client.post(
+        f"/api/nodes/{project['node_id']}/sql", json={"sql": view["sql"]},
+    ).json()["rows"] == [{"value": 1}]
+
+
+def test_project_owned_sources_cannot_join_through_dataset_references(client):
+    first = create_project(client, "First")
+    second = create_project(client, "Second")
+    first_source = project_upload(client, first, "first.csv", b"id\n1\n")
+    second_source = project_upload(client, second, "second.csv", b"id\n1\n")
+    first_view = client.get(f"/api/projects/{first['id']}/views").json()[0]
+    second_view = client.get(f"/api/projects/{second['id']}/views").json()[0]
+    first_dataset = json.loads(base64.urlsafe_b64decode(first_view["id"] + "=="))[-1]
+    second_dataset = json.loads(base64.urlsafe_b64decode(second_view["id"] + "=="))[-1]
+
+    response = client.post("/api/join-workspaces", json={
+        "left": {"node_id": first_source["id"], "dataset": first_dataset},
+        "right": {"node_id": second_source["id"], "dataset": second_dataset},
+        "left_keys": ["id"], "right_keys": ["id"],
+    })
+    assert response.status_code == 404, response.text
+
+
+def test_project_workspace_invalidation_keeps_inflight_query_and_refreshes_membership(client):
+    project = create_project(client, "Changing")
+    first = project_upload(client, project, "first.csv", b"value\n1\n")
+    first_view = client.get(f"/api/projects/{project['id']}/views").json()[0]
+    url = f"/api/nodes/{project['node_id']}/sql"
+    slow_sql = f"SELECT sum(sin(i + value)) AS n FROM ({first_view['sql']}) source, range(100000000) t(i)"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        inflight = executor.submit(client.post, url, json={"sql": slow_sql})
+        time.sleep(0.1)
+        assert not inflight.done()
+        second = project_upload(client, project, "second.csv", b"value\n2\n")
+        response = inflight.result(timeout=10)
+
+    assert response.status_code == 200, response.text
+    views = client.get(f"/api/projects/{project['id']}/views").json()
+    assert {view["source_id"] for view in views} == {first["id"], second["id"]}
+    assert client.delete(f"/api/projects/{project['id']}/sources/{first['id']}").status_code == 204
+    views = client.get(f"/api/projects/{project['id']}/views").json()
+    assert [view["source_id"] for view in views] == [second["id"]]
+    assert client.post(url, json={"sql": views[0]["sql"]}).json()["rows"] == [{"value": 2}]

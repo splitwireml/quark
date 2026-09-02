@@ -14,12 +14,12 @@
 
 <section class="welcome">
   <div class="icon">Q</div>
-  <h1>Explore local data</h1>
+  <h1>Add project sources</h1>
   <p>Open a local file or a read-only DuckDB database. Quark keeps the work on this machine and loads only the page you are viewing.</p>
   <ol class="steps">
     <li><b>1. Add a source</b><span>CSV, TSV, Parquet, JSON, JSONL/NDJSON, XLSX, DuckDB, or DB</span></li>
-    <li><b>2. Choose a dataset</b><span>Tables and views appear after the source opens</span></li>
-    <li><b>3. Inspect the data</b><span>Filter, profile, hide columns, or dedupe by selected keys</span></li>
+    <li><b>2. Choose a View</b><span>Source Views appear after the source opens</span></li>
+    <li><b>3. Inspect the View</b><span>Filter, profile, hide columns, or dedupe by selected keys</span></li>
   </ol>
   {#if error}
     <div class="error" role="alert">

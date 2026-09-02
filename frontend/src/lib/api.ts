@@ -1,4 +1,4 @@
-import type { CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, QueryRequest, QueryResponse, SqlQueryRequest, WorkbookPreview } from './types';
+import type { BaseViewInfo, CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, ProjectSourceInfo, QueryRequest, QueryResponse, SourceSummary, SqlQueryRequest, WorkbookPreview } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -19,26 +19,42 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body)
 });
 
-export function listNodes(): Promise<NodeInfo[]> {
-  return request('/api/nodes');
+export function listProjects(): Promise<ProjectInfo[]> {
+  return request('/api/projects');
 }
 
-export function uploadNode(file: File): Promise<NodeInfo | WorkbookPreview> {
+export function createProject(name: string): Promise<ProjectInfo> {
+  return request('/api/projects', json({ name }));
+}
+
+export function listProjectSources(projectId: string): Promise<SourceSummary[]> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/sources`);
+}
+
+export function getProjectSource(projectId: string, sourceId: string): Promise<ProjectSourceInfo> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/sources/${encodeURIComponent(sourceId)}`);
+}
+
+export function listProjectViews(projectId: string): Promise<BaseViewInfo[]> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/views`);
+}
+
+export function uploadNode(projectId: string, file: File): Promise<NodeInfo | WorkbookPreview> {
   const body = new FormData();
   body.append('file', file);
-  return request('/api/nodes/upload', { method: 'POST', body });
+  return request(`/api/projects/${encodeURIComponent(projectId)}/sources/upload`, { method: 'POST', body });
 }
 
-export function confirmWorkbook(id: string, sheets: string[]): Promise<NodeInfo> {
-  return request(`/api/nodes/upload/${encodeURIComponent(id)}/confirm`, json({ sheets }));
+export function confirmWorkbook(projectId: string, id: string, sheets: string[]): Promise<NodeInfo> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/sources/upload/${encodeURIComponent(id)}/confirm`, json({ sheets }));
 }
 
-export function discardWorkbook(id: string): Promise<void> {
-  return request(`/api/nodes/upload/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export function discardWorkbook(projectId: string, id: string): Promise<void> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/sources/upload/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export function attachNode(path: string): Promise<NodeInfo> {
-  return request('/api/nodes/attach', json({ path }));
+export function attachNode(projectId: string, path: string): Promise<NodeInfo> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/sources/attach`, json({ path }));
 }
 
 export function listDatasets(nodeId: string): Promise<DatasetInfo[]> {

@@ -224,7 +224,7 @@
 <svelte:window onclick={closeContextMenuOnClick} onkeydown={closeContextMenuOnKeydown} />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable dataset table" ondragover={tableDragOver} ondrop={dropHeader}>
+<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader}>
   <table>
     <caption class="sr-only">{caption}</caption>
     <thead>

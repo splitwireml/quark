@@ -11,6 +11,7 @@ import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
@@ -42,6 +43,11 @@ class AttachRequest(BaseModel):
     path: str
 
 
+class ProjectCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+
+
 class WorkbookConfirm(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sheets: list[str]
@@ -52,6 +58,7 @@ class Filter(BaseModel):
     column: str
     operator: str
     value: Any = None
+    connector: Literal["and", "or"] = "and"
 
 
 class Sort(BaseModel):
@@ -95,7 +102,9 @@ class ExportRequest(BaseModel):
 class JoinReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str
-    dataset: str
+    dataset: str | None = None
+    sql: str | None = None
+    name: str | None = None
 
 
 class JoinWorkspaceRequest(BaseModel):
@@ -268,20 +277,68 @@ def page_count(rows: int, page_size: int) -> int:
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
     root = Path(data_dir or os.getenv("QUARK_DATA_DIR", "data")).expanduser().resolve()
     registry_path = root / "registry.json"
+    projects_path = root / "projects.json"
     uploads = root / "uploads"
+    projects: list[dict[str, str]] = [{"id": "default", "name": "Default", "node_id": "project_default"}]
     nodes: dict[str, dict[str, Any]] = {}
     registered_nodes: list[dict[str, Any]] = []
     pending_workbooks: dict[str, dict[str, Any]] = {}
     connections: dict[str, duckdb.DuckDBPyConnection] = {}
+    project_workspaces: dict[str, dict[str, Any]] = {}
+    retired_project_connections: list[duckdb.DuckDBPyConnection] = []
+    project_workspaces_lock = Lock()
+    # ponytail: global serialization is fine for local single-user Quark; use per-project locks only if concurrent analytics throughput matters.
+    database_operations_lock = Lock()
     # ponytail: one process-global slot is intentional; Quark is local and single-user.
     join_workspace: dict[str, Any] = {}
-    # ponytail: global lock; use per-node locks if category lookup throughput matters.
-    category_values_lock = Lock()
-    # ponytail: global lock; use per-node locks if export throughput matters.
-    export_lock = Lock()
 
-    def public(node: dict[str, Any]) -> dict[str, str]:
-        return {key: node[key] for key in ("id", "name", "kind", "source")}
+    def serialized(endpoint):
+        @wraps(endpoint)
+        def wrapper(*args, **kwargs):
+            with database_operations_lock:
+                return endpoint(*args, **kwargs)
+
+        return wrapper
+
+    def public(node: dict[str, Any], project_scoped: bool = False) -> dict[str, str]:
+        keys = ("id", "name", "kind") if project_scoped else ("id", "name", "kind", "source")
+        result = {key: node[key] for key in keys}
+        if project_scoped:
+            result["project_id"] = node.get("project_id", "default")
+        return result
+
+    def project_for(project_id: str) -> dict[str, str]:
+        project = next((item for item in projects if item["id"] == project_id), None)
+        if project is None:
+            raise HTTPException(404, "Project not found")
+        return project
+
+    def project_sources(project_id: str) -> list[dict[str, Any]]:
+        project_for(project_id)
+        return [node for node in nodes.values() if node.get("project_id", "default") == project_id]
+
+    def source_for(project_id: str, source_id: str) -> dict[str, Any]:
+        project_for(project_id)
+        source = nodes.get(source_id)
+        if source is None or source.get("project_id", "default") != project_id:
+            raise HTTPException(404, "Source not found")
+        return source
+
+    def public_project(project: dict[str, str]) -> dict[str, Any]:
+        return {**project, "source_count": len(project_sources(project["id"]))}
+
+    def save_projects() -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = projects_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(projects[1:], indent=2))
+        temporary.replace(projects_path)
+
+    def invalidate_project(project_id: str) -> None:
+        with project_workspaces_lock:
+            workspace = project_workspaces.pop(project_id, None)
+            if workspace is not None:
+                # ponytail: retired workspaces are acceptable for local low-frequency source mutations; add refcounts only if churn matters.
+                retired_project_connections.append(workspace["connection"])
 
     def save_registry() -> None:
         root.mkdir(parents=True, exist_ok=True)
@@ -371,12 +428,16 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         registered_nodes.append(node)
         connections[node["id"]] = con
         save_registry()
-        return public(node)
+        invalidate_project(node.get("project_id", "default"))
+        return public(node, "project_id" in node)
 
     def get_connection(node_id: str) -> duckdb.DuckDBPyConnection:
         if node_id == join_workspace.get("id"):
             return join_workspace["connection"]
-        if node_id not in nodes:
+        project = next((item for item in projects if item["node_id"] == node_id), None)
+        if project is not None:
+            return workspace_for(project["id"])["connection"]
+        if node_id not in nodes or nodes[node_id].get("project_id", "default") != "default":
             raise HTTPException(404, "Node not found")
         return connections[node_id]
 
@@ -428,6 +489,85 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             con.execute(f"CREATE VIEW {target} AS SELECT * FROM {scan_expression(source)}")
         return target
 
+    def workspace_for(project_id: str) -> dict[str, Any]:
+        project_for(project_id)
+        with project_workspaces_lock:
+            if project_id in project_workspaces:
+                return project_workspaces[project_id]
+            sources = project_sources(project_id)
+            con = duckdb.connect()
+            try:
+                if any(Path(node["source"]).suffix.lower() == ".xlsx" for node in sources):
+                    con.execute("INSTALL excel; LOAD excel")
+                paths = [str(Path(node["source"])) for node in sources]
+                paths.extend(f"{node['source']}.wal" for node in sources if Path(node["source"]).suffix.lower() in {".duckdb", ".db"})
+                if paths:
+                    con.execute("SET allowed_paths = ?", [sorted(paths)])
+                con.execute("SET enable_external_access = ?", [False])
+            except Exception:
+                con.close()
+                raise
+            workspace = {"connection": con, "views": [], "mounted_sources": set()}
+            project_workspaces[project_id] = workspace
+            return workspace
+
+    def mount_project_source(project_id: str, source_id: str) -> list[dict[str, Any]]:
+        node = source_for(project_id, source_id)
+        project = project_for(project_id)
+        workspace = workspace_for(project_id)
+        if source_id in workspace["mounted_sources"]:
+            return [view for view in workspace["views"] if view["source_id"] == source_id]
+        con = workspace["connection"]
+        source_con = connections[source_id]
+        source = Path(node["source"])
+        source_sql = str(source).replace("'", "''")
+        source_views: list[dict[str, Any]] = []
+        try:
+            attached_alias = None
+            if source.suffix.lower() in {".duckdb", ".db"}:
+                node_encoded = base64.urlsafe_b64encode(source_id.encode()).rstrip(b"=").decode()
+                attached_alias = f"database_{node_encoded}"
+                con.execute(f"ATTACH '{source_sql}' AS {quote(attached_alias)} (READ_ONLY)")
+            for item in datasets_for(source_con):
+                encoded = base64.urlsafe_b64encode(
+                    json.dumps([source_id, item["id"]], separators=(",", ":")).encode()
+                ).rstrip(b"=").decode()
+                schema = f"source_{encoded}"
+                target = f"{quote(schema)}.{quote(item['name'])}"
+                if attached_alias is not None:
+                    con.execute(f"CREATE SCHEMA {quote(schema)}")
+                    con.execute(
+                        f"CREATE VIEW {target} AS SELECT * FROM "
+                        f"{quote(attached_alias)}.{quote(item['schema'])}.{quote(item['name'])}"
+                    )
+                elif source.suffix.lower() == ".xlsx":
+                    con.execute(f"CREATE SCHEMA {quote(schema)}")
+                    _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+                else:
+                    target = mount_dataset(con, schema, node, item)
+                columns = [row[0] for row in source_con.execute(
+                    f"DESCRIBE SELECT * FROM {quote(item['schema'])}.{quote(item['name'])}"
+                ).fetchall()]
+                view_id = base64.urlsafe_b64encode(
+                    json.dumps([project_id, source_id, item["id"]], separators=(",", ":")).encode()
+                ).rstrip(b"=").decode()
+                source_views.append({
+                    "id": view_id, "project_id": project_id,
+                    "source_id": source_id, "source_name": node["name"],
+                    "node_id": project["node_id"], "name": item["name"],
+                    "schema": item["schema"], "type": item["type"], "columns": columns,
+                    "sql": f"SELECT * FROM {target}",
+                })
+        except Exception:
+            with project_workspaces_lock:
+                if project_workspaces.get(project_id) is workspace:
+                    project_workspaces.pop(project_id)
+            con.close()
+            raise
+        workspace["views"].extend(source_views)
+        workspace["mounted_sources"].add(source_id)
+        return source_views
+
     def filtered_relation(
         table: str, columns: list[tuple[str, str]], request: Query, display_table: str | None = None,
     ) -> tuple[str, list[Any], str]:
@@ -463,8 +603,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 values.append(condition.value)
         if len(set(request.dedupe_columns)) != len(request.dedupe_columns) or any(column not in column_types for column in request.dedupe_columns):
             raise HTTPException(422, "Invalid dedupe column")
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        display_where = " WHERE " + " AND ".join(display_clauses) if display_clauses else ""
+        where = clauses[0] if clauses else ""
+        display_where = display_clauses[0] if display_clauses else ""
+        for condition, clause, display_clause in zip(request.filters[1:], clauses[1:], display_clauses[1:]):
+            connector = condition.connector.upper()
+            where = f"({where} {connector} {clause})"
+            display_where = f"({display_where} {connector} {display_clause})"
+        where = f" WHERE {where}" if where else ""
+        display_where = f" WHERE {display_where}" if display_where else ""
         if request.dedupe_columns:
             keys = ", ".join(quote(column) for column in request.dedupe_columns)
             qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}) = 1"
@@ -544,6 +690,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         root.mkdir(parents=True, exist_ok=True)
         uploads.mkdir(exist_ok=True)
+        if projects_path.exists():
+            try:
+                loaded_projects = json.loads(projects_path.read_text())
+                for project in loaded_projects if isinstance(loaded_projects, list) else []:
+                    if (
+                        isinstance(project, dict)
+                        and all(isinstance(project.get(key), str) for key in ("id", "name", "node_id"))
+                        and project["id"] != "default"
+                        and all(existing["id"] != project["id"] for existing in projects)
+                    ):
+                        projects.append({key: project[key] for key in ("id", "name", "node_id")})
+            except (json.JSONDecodeError, OSError):
+                pass
         stored: list[Any] = []
         if registry_path.exists():
             try:
@@ -571,6 +730,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         yield
         if join_workspace:
             join_workspace["connection"].close()
+        for workspace in project_workspaces.values():
+            workspace["connection"].close()
+        for con in retired_project_connections:
+            con.close()
         for con in connections.values():
             con.close()
 
@@ -582,68 +745,100 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @api.get("/api/nodes")
     def list_nodes():
-        return [public(node) for node in nodes.values()]
+        return [public(node) for node in nodes.values() if node.get("project_id", "default") == "default"]
+
+    @api.get("/api/projects")
+    def list_projects():
+        return [public_project(project) for project in projects]
+
+    @api.post("/api/projects", status_code=201)
+    def create_project(request: ProjectCreate):
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(422, "Project name is required")
+        project_id = uuid.uuid4().hex
+        project = {"id": project_id, "name": name, "node_id": f"project_{project_id}"}
+        projects.append(project)
+        save_projects()
+        return public_project(project)
+
+    @api.get("/api/projects/{project_id}/sources")
+    def list_project_sources(project_id: str):
+        return [{"id": node["id"], "name": node["name"]} for node in project_sources(project_id)]
+
+    @api.get("/api/projects/{project_id}/sources/{source_id}")
+    @serialized
+    def get_project_source(project_id: str, source_id: str):
+        source = source_for(project_id, source_id)
+        return {**public(source, True), "views": mount_project_source(project_id, source_id)}
+
+    @api.get("/api/projects/{project_id}/sources/{source_id}/path")
+    def get_project_source_path(project_id: str, source_id: str):
+        return {"path": str(Path(source_for(project_id, source_id)["source"]).expanduser().resolve())}
+
+    @api.get("/api/projects/{project_id}/views")
+    @serialized
+    def list_project_views(project_id: str):
+        return [
+            view
+            for source in project_sources(project_id)
+            for view in mount_project_source(project_id, source["id"])
+        ]
 
     @api.post("/api/exports")
+    @serialized
     def export(request: ExportRequest):
         if request.format == "csv" and len(request.sheets) != 1:
             raise HTTPException(422, "CSV export requires exactly one sheet")
         extension = ".csv" if request.format == "csv" else ".xlsx"
         media_type = "text/csv" if request.format == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        with export_lock:
-            cursors: list[duckdb.DuckDBPyConnection] = []
-            try:
-                sheets = []
-                for sheet in request.sheets:
-                    con = get_connection(sheet.node_id).cursor()
-                    cursors.append(con)
-                    sheets.append((sheet, con, read_only_sql(con, sheet.sql)))
-                with tempfile.NamedTemporaryFile(dir=root, prefix=".export-", suffix=extension, delete=False) as temporary:
-                    path = Path(temporary.name)
+        sheets = []
+        for sheet in request.sheets:
+            con = get_connection(sheet.node_id)
+            sheets.append((sheet, con, read_only_sql(con, sheet.sql)))
+        with tempfile.NamedTemporaryFile(dir=root, prefix=".export-", suffix=extension, delete=False) as temporary:
+            path = Path(temporary.name)
+        try:
+            if request.format == "csv":
+                _, con, sql = sheets[0]
+                with path.open("w", encoding="utf-8", newline="") as output:
+                    writer = csv.writer(output)
+                    result = con.execute(sql)
+                    writer.writerow([csv_value(column[0]) for column in result.description])
+                    while rows := result.fetchmany(1000):
+                        writer.writerows([csv_value(value) for value in row] for row in rows)
+            else:
+                workbook = Workbook(write_only=True)
                 try:
-                    if request.format == "csv":
-                        _, con, sql = sheets[0]
-                        with path.open("w", encoding="utf-8", newline="") as output:
-                            writer = csv.writer(output)
-                            result = con.execute(sql)
-                            writer.writerow([csv_value(column[0]) for column in result.description])
-                            while rows := result.fetchmany(1000):
-                                writer.writerows([csv_value(value) for value in row] for row in rows)
-                    else:
-                        workbook = Workbook(write_only=True)
-                        try:
-                            used_names: set[str] = set()
-                            for sheet, con, sql in sheets:
-                                worksheet = workbook.create_sheet(export_sheet_name(sheet.name, used_names))
-                                result = con.execute(sql)
-                                worksheet.append(xlsx_row(worksheet, (column[0] for column in result.description)))
-                                while rows := result.fetchmany(1000):
-                                    for row in rows:
-                                        worksheet.append(xlsx_row(worksheet, row))
-                            workbook.save(path)
-                        except Exception:
-                            for worksheet in workbook.worksheets:
-                                try:
-                                    worksheet.close()
-                                except Exception:
-                                    pass
-                                writer = getattr(worksheet, "_writer", None)
-                                if writer is not None:
-                                    try:
-                                        writer.cleanup()
-                                    except (FileNotFoundError, ValueError):
-                                        pass
-                            workbook.close()
-                            raise
-                except duckdb.Error as exc:
-                    path.unlink(missing_ok=True)
-                    raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+                    used_names: set[str] = set()
+                    for sheet, con, sql in sheets:
+                        worksheet = workbook.create_sheet(export_sheet_name(sheet.name, used_names))
+                        result = con.execute(sql)
+                        worksheet.append(xlsx_row(worksheet, (column[0] for column in result.description)))
+                        while rows := result.fetchmany(1000):
+                            for row in rows:
+                                worksheet.append(xlsx_row(worksheet, row))
+                    workbook.save(path)
                 except Exception:
-                    path.unlink(missing_ok=True)
+                    for worksheet in workbook.worksheets:
+                        try:
+                            worksheet.close()
+                        except Exception:
+                            pass
+                        writer = getattr(worksheet, "_writer", None)
+                        if writer is not None:
+                            try:
+                                writer.cleanup()
+                            except (FileNotFoundError, ValueError):
+                                pass
+                    workbook.close()
                     raise
-            finally:
-                for con in cursors:
-                    con.close()
+        except duckdb.Error as exc:
+            path.unlink(missing_ok=True)
+            raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
         return FileResponse(
             path,
             media_type=media_type,
@@ -652,47 +847,75 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         )
 
     @api.post("/api/join-workspaces")
+    @serialized
     def create_join_workspace(request: JoinWorkspaceRequest):
         if len(request.left_keys) != len(request.right_keys):
             raise HTTPException(422, "Join key counts must match")
         if len(set(request.left_keys)) != len(request.left_keys) or len(set(request.right_keys)) != len(request.right_keys):
             raise HTTPException(422, "Join keys must be unique")
-        if request.left.node_id not in nodes or request.right.node_id not in nodes:
-            raise HTTPException(404, "Node not found")
+        for ref in (request.left, request.right):
+            if (ref.dataset is None) == (ref.sql is None):
+                raise HTTPException(422, "Join reference requires exactly one of dataset or sql")
 
-        left_con = connections[request.left.node_id]
-        right_con = connections[request.right.node_id]
-        left_item = dataset_for(left_con, request.left.dataset)
-        right_item = dataset_for(right_con, request.right.dataset)
-        left_original, left_columns = metadata(left_con, request.left.dataset)
-        right_original, right_columns = metadata(right_con, request.right.dataset)
+        uses_sql = request.left.sql is not None or request.right.sql is not None
+        new_con = None
+        if uses_sql:
+            left_con = get_connection(request.left.node_id)
+            right_con = get_connection(request.right.node_id)
+            if left_con is not right_con:
+                raise HTTPException(422, "SQL joins require one project workspace")
+            con = left_con
+            node_id = request.left.node_id
+
+            def resolve(ref: JoinReference) -> tuple[str, list[tuple[str, str]], dict[str, str]]:
+                if ref.sql is not None:
+                    sql, columns = sql_metadata(con, SQLRequest(sql=ref.sql))
+                    return f"query({literal(sql)})", columns, {"name": ref.name or "View", "sql": sql}
+                assert ref.dataset is not None
+                item = dataset_for(con, ref.dataset)
+                table, columns = metadata(con, ref.dataset)
+                return table, columns, {"schema": item["schema"], "name": item["name"]}
+
+            left_table, left_columns, left_identity = resolve(request.left)
+            right_table, right_columns, right_identity = resolve(request.right)
+        else:
+            if request.left.node_id not in nodes or request.right.node_id not in nodes:
+                raise HTTPException(404, "Node not found")
+            assert request.left.dataset is not None and request.right.dataset is not None
+            left_con = get_connection(request.left.node_id)
+            right_con = get_connection(request.right.node_id)
+            left_item = dataset_for(left_con, request.left.dataset)
+            right_item = dataset_for(right_con, request.right.dataset)
+            left_original, left_columns = metadata(left_con, request.left.dataset)
+            right_original, right_columns = metadata(right_con, request.right.dataset)
+            if request.left.node_id == request.right.node_id:
+                con = left_con
+                node_id = request.left.node_id
+                left_table, right_table = left_original, right_original
+                left_identity = {"schema": left_item["schema"], "name": left_item["name"]}
+                right_identity = {"schema": right_item["schema"], "name": right_item["name"]}
+            else:
+                new_con = duckdb.connect()
+                con = new_con
+                try:
+                    left_table = mount_dataset(con, "left_source", nodes[request.left.node_id], left_item)
+                    right_table = mount_dataset(con, "right_source", nodes[request.right.node_id], right_item)
+                    directories = sorted({str(Path(nodes[ref.node_id]["source"]).parent) for ref in (request.left, request.right)})
+                    con.execute("SET allowed_directories = ?", [directories])
+                    con.execute("SET enable_external_access = ?", [False])
+                except Exception:
+                    con.close()
+                    raise
+                node_id = f"join_{uuid.uuid4().hex}"
+                left_identity = {"schema": "left_source", "name": left_item["name"]}
+                right_identity = {"schema": "right_source", "name": right_item["name"]}
+
         if any(key not in dict(left_columns) for key in request.left_keys) or any(
             key not in dict(right_columns) for key in request.right_keys
         ):
+            if new_con is not None:
+                new_con.close()
             raise HTTPException(422, "Join key not found")
-
-        new_con = None
-        if request.left.node_id == request.right.node_id:
-            con = left_con
-            node_id = request.left.node_id
-            left_table, right_table = left_original, right_original
-            left_identity = {"schema": left_item["schema"], "name": left_item["name"]}
-            right_identity = {"schema": right_item["schema"], "name": right_item["name"]}
-        else:
-            new_con = duckdb.connect()
-            con = new_con
-            try:
-                left_table = mount_dataset(con, "left_source", nodes[request.left.node_id], left_item)
-                right_table = mount_dataset(con, "right_source", nodes[request.right.node_id], right_item)
-                directories = sorted({str(Path(nodes[ref.node_id]["source"]).parent) for ref in (request.left, request.right)})
-                con.execute("SET allowed_directories = ?", [directories])
-                con.execute("SET enable_external_access = ?", [False])
-            except Exception:
-                con.close()
-                raise
-            node_id = f"join_{uuid.uuid4().hex}"
-            left_identity = {"schema": "left_source", "name": left_item["name"]}
-            right_identity = {"schema": "right_source", "name": right_item["name"]}
 
         try:
             left_rows = con.execute(f"SELECT count(*) FROM {left_table}").fetchone()[0]
@@ -740,8 +963,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "cartesian_risk": relationship in {"cartesian", "many_to_many"},
         })
 
+    @api.post("/api/projects/{project_id}/sources/upload", status_code=201)
     @api.post("/api/nodes/upload", status_code=201)
-    async def upload(file: UploadFile = File(...)):
+    async def upload(file: UploadFile = File(...), project_id: str | None = None):
+        if project_id is not None:
+            project_for(project_id)
         name = Path(file.filename or "").name
         suffix = Path(name).suffix.lower()
         if suffix not in SUPPORTED:
@@ -755,8 +981,15 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if suffix == ".xlsx":
                 sheets = workbook_sheets(destination)
                 pending_workbooks[node_id] = {"id": node_id, "name": name, "source": str(destination), "sheets": sheets}
-                return {"id": node_id, "name": name, "kind": "workbook", "sheets": sheets}
+                if project_id is not None:
+                    pending_workbooks[node_id]["project_id"] = project_id
+                return {
+                    "id": node_id, "name": name, "kind": "workbook", "sheets": sheets,
+                    **({"project_id": project_id} if project_id is not None else {}),
+                }
             node = {"id": node_id, "name": name, "kind": "upload", "source": str(destination)}
+            if project_id is not None:
+                node["project_id"] = project_id
             if suffix not in {".duckdb", ".db"}:
                 node["dataset_name"] = dataset_name(name)
             return add(node)
@@ -766,10 +999,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         finally:
             await file.close()
 
+    @api.post("/api/projects/{project_id}/sources/upload/{stage_id}/confirm")
     @api.post("/api/nodes/upload/{stage_id}/confirm")
-    def confirm_workbook(stage_id: str, request: WorkbookConfirm):
+    def confirm_workbook(stage_id: str, request: WorkbookConfirm, project_id: str | None = None):
+        if project_id is not None:
+            project_for(project_id)
         stage = pending_workbooks.get(stage_id)
-        if stage is None:
+        if stage is None or stage.get("project_id", "default") != (project_id or "default"):
             raise HTTPException(404, "Workbook upload not found")
         if not request.sheets or len(set(request.sheets)) != len(request.sheets) or not set(request.sheets).issubset(stage["sheets"]):
             raise HTTPException(422, "Select one or more unique workbook sheets")
@@ -777,26 +1013,42 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         pending_workbooks.pop(stage_id, None)
         return node
 
+    @api.delete("/api/projects/{project_id}/sources/upload/{stage_id}", status_code=204)
     @api.delete("/api/nodes/upload/{stage_id}", status_code=204)
-    def discard_workbook(stage_id: str):
-        stage = pending_workbooks.pop(stage_id, None)
-        if stage is None:
+    def discard_workbook(stage_id: str, project_id: str | None = None):
+        if project_id is not None:
+            project_for(project_id)
+        stage = pending_workbooks.get(stage_id)
+        if stage is None or stage.get("project_id", "default") != (project_id or "default"):
             raise HTTPException(404, "Workbook upload not found")
+        pending_workbooks.pop(stage_id)
         Path(stage["source"]).unlink(missing_ok=True)
         return Response(status_code=204)
 
+    @api.post("/api/projects/{project_id}/sources/attach", status_code=201)
     @api.post("/api/nodes/attach", status_code=201)
-    def attach(request: AttachRequest):
+    def attach(request: AttachRequest, project_id: str | None = None):
+        if project_id is not None:
+            project_for(project_id)
         source = Path(request.path).expanduser().resolve()
         if source.suffix.lower() not in {".duckdb", ".db"}:
             raise HTTPException(400, "Only .duckdb and .db paths can be attached")
         if not source.is_file():
             raise HTTPException(404, "Database not found")
-        return add({"id": uuid.uuid4().hex, "name": source.name, "kind": "attached", "source": str(source)})
+        node = {"id": uuid.uuid4().hex, "name": source.name, "kind": "attached", "source": str(source)}
+        if project_id is not None:
+            node["project_id"] = project_id
+        return add(node)
 
+    @api.delete("/api/projects/{project_id}/sources/{node_id}", status_code=204)
     @api.delete("/api/nodes/{node_id}", status_code=204)
-    def delete_node(node_id: str):
+    @serialized
+    def delete_node(node_id: str, project_id: str | None = None):
+        if project_id is not None:
+            project_for(project_id)
         if node_id not in nodes:
+            raise HTTPException(404, "Node not found")
+        if nodes[node_id].get("project_id", "default") != (project_id or "default"):
             raise HTTPException(404, "Node not found")
         node = nodes.pop(node_id)
         connections.pop(node_id).close()
@@ -804,9 +1056,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             Path(node["source"]).unlink(missing_ok=True)
         registered_nodes[:] = [record for record in registered_nodes if record.get("id") != node_id]
         save_registry()
+        invalidate_project(node.get("project_id", "default"))
         return Response(status_code=204)
 
     @api.get("/api/nodes/{node_id}/datasets")
+    @serialized
     def list_datasets(node_id: str):
         con = get_connection(node_id)
         datasets = datasets_for(con)
@@ -816,6 +1070,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return datasets
 
     @api.post("/api/nodes/{node_id}/sql")
+    @serialized
     def sql_query(node_id: str, request: SQLQuery):
         started = time.perf_counter()
         con = get_connection(node_id)
@@ -830,6 +1085,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
 
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/query")
+    @serialized
     def query(node_id: str, dataset: str, request: Query):
         started = time.perf_counter()
         con = get_connection(node_id)
@@ -874,6 +1130,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         }
 
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/values")
+    @serialized
     def category_values(
         node_id: str,
         dataset: str,
@@ -882,12 +1139,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         offset: int = QueryParam(0, ge=0),
         limit: int = QueryParam(200, ge=1, le=500),
     ):
-        with category_values_lock:
-            con = get_connection(node_id)
-            table, metadata_columns = metadata(con, dataset)
-            return category_response(con, table, metadata_columns, column, search=search, offset=offset, limit=limit)
+        con = get_connection(node_id)
+        table, metadata_columns = metadata(con, dataset)
+        return category_response(con, table, metadata_columns, column, search=search, offset=offset, limit=limit)
 
     @api.post("/api/nodes/{node_id}/sql/columns/{column}/values")
+    @serialized
     def sql_category_values(
         node_id: str,
         column: str,
@@ -896,10 +1153,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         offset: int = QueryParam(0, ge=0),
         limit: int = QueryParam(200, ge=1, le=500),
     ):
-        with category_values_lock:
-            con = get_connection(node_id)
-            sql, columns = sql_metadata(con, request)
-            return category_response(con, "query(?)", columns, column, [sql], search, offset, limit)
+        con = get_connection(node_id)
+        sql, columns = sql_metadata(con, request)
+        return category_response(con, "query(?)", columns, column, [sql], search, offset, limit)
 
     def profile_response(
         con: duckdb.DuckDBPyConnection,
@@ -1016,6 +1272,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
+    @serialized
     def stats(node_id: str, dataset: str, column: str, request: Query | None = None):
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
@@ -1023,6 +1280,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return profile_response(con, source, values, columns, column)
 
     @api.post("/api/nodes/{node_id}/sql/columns/{column}/stats")
+    @serialized
     def sql_stats(node_id: str, column: str, request: SQLQuery):
         con = get_connection(node_id)
         sql, columns = sql_metadata(con, request)

@@ -1,28 +1,24 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
   import DatasetTab from '../molecules/DatasetTab.svelte';
-  import type { DatasetInfo, RowDensity } from '../../lib/types';
+  import type { RowDensity } from '../../lib/types';
 
   type Props = {
-    datasets: DatasetInfo[];
-    selectedDataset: string;
     workspaceTab: 'data' | 'history';
     tableExpanded: boolean;
     rowDensity: RowDensity;
     historyCount: number;
-    onSelectDataset: (id: string) => void;
+    onSelectData: () => void;
     onSelectHistory: () => void;
     setRowDensity: (density: RowDensity) => void;
     onToggleExpanded: () => void;
   };
-  let { datasets, selectedDataset, workspaceTab, tableExpanded, rowDensity, historyCount, onSelectDataset, onSelectHistory, setRowDensity, onToggleExpanded }: Props = $props();
+  let { workspaceTab, tableExpanded, rowDensity, historyCount, onSelectData, onSelectHistory, setRowDensity, onToggleExpanded }: Props = $props();
 </script>
 
-<nav class:expanded={tableExpanded} class="tabs" aria-label="Datasets, versions, and views">
-  {#each datasets as dataset (dataset.id)}
-    <DatasetTab active={workspaceTab === 'data' && dataset.id === selectedDataset} disabled={tableExpanded} onselect={() => onSelectDataset(dataset.id)}>{dataset.name}</DatasetTab>
-  {/each}
-  <DatasetTab active={workspaceTab === 'history'} disabled={tableExpanded} onselect={onSelectHistory}>Versions &amp; Views ({historyCount})</DatasetTab>
+<nav class:expanded={tableExpanded} class="tabs" aria-label="Data and versions">
+  <DatasetTab active={workspaceTab === 'data'} disabled={tableExpanded} onselect={onSelectData}>Data</DatasetTab>
+  <DatasetTab active={workspaceTab === 'history'} disabled={tableExpanded} onselect={onSelectHistory}>Versions ({historyCount})</DatasetTab>
   <div class="toolbar">
     <div class="density" role="group" aria-label="Row density">
       <Button active={rowDensity === 'compact'} onclick={() => setRowDensity('compact')}>Compact</Button>
@@ -34,16 +30,7 @@
 </nav>
 
 <style>
-  .tabs {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    height: 40px;
-    padding: 0 20px;
-    border-bottom: 1px solid var(--line);
-    overflow-x: auto;
-  }
+  .tabs { flex: none; display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 20px; border-bottom: 1px solid var(--line); overflow-x: auto; }
   .toolbar { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
   .density { display: flex; gap: 4px; }
   .tabs.expanded { display: none; }

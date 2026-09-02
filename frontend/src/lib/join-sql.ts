@@ -1,14 +1,21 @@
-type JoinDataset = { name: string; schema: string };
+type JoinDataset = { name: string; schema?: string; sql?: string };
 export type JoinKey = { left: string; right: string };
 
 function quoteIdentifier(value: string): string { return `"${value.replace(/"/g, '""')}"`; }
+// ponytail: duplicated for direct Node TS tests; share when TS-extension imports are enabled.
+function stripTerminalSemicolon(value: string): string { return value.trim().replace(/;(?=\s*(?:(?:--[^\n]*(?:\n|$))|(?:\/\*[\s\S]*?\*\/))*\s*$)/, '').trim(); }
+function relation(view: JoinDataset): string {
+  if (!view.sql) return `${quoteIdentifier(view.schema ?? '')}.${quoteIdentifier(view.name)}`;
+  const sql = stripTerminalSemicolon(view.sql);
+  return `(${sql}${/--[^\n]*$/.test(sql) ? '\n' : ''})`;
+}
 
 export function buildJoinSql(left: JoinDataset, right: JoinDataset, keys: JoinKey[], leftColumns: string[], rightColumns: string[]): string {
   const pairs = keys.map(({ left, right }) => `${left}\0${right}`);
-  if (!keys.length || keys.some(({ left, right }) => !left || !right) || new Set(pairs).size !== pairs.length || !leftColumns.length && !rightColumns.length) return '';
+  if ((!left.sql && !left.schema) || (!right.sql && !right.schema) || !keys.length || keys.some(({ left, right }) => !left || !right) || new Set(pairs).size !== pairs.length || !leftColumns.length && !rightColumns.length) return '';
 
   const collisions = new Set(leftColumns.filter((column) => rightColumns.includes(column)));
-  const prefix = (dataset: JoinDataset) => left.name === right.name ? `${dataset.schema}.${dataset.name}` : dataset.name;
+  const prefix = (dataset: JoinDataset) => left.name === right.name && dataset.schema ? `${dataset.schema}.${dataset.name}` : dataset.name;
   const used = new Set<string>();
   const select = (side: 'left' | 'right', dataset: JoinDataset, columns: string[]) => columns.map((column) => {
     const source = `${quoteIdentifier(side)}.${quoteIdentifier(column)}`;
@@ -19,5 +26,5 @@ export function buildJoinSql(left: JoinDataset, right: JoinDataset, keys: JoinKe
     return output === column ? source : `${source} AS ${quoteIdentifier(output)}`;
   });
   const on = keys.map((key) => `${quoteIdentifier('left')}.${quoteIdentifier(key.left)} = ${quoteIdentifier('right')}.${quoteIdentifier(key.right)}`).join(' AND ');
-  return `SELECT ${[...select('left', left, leftColumns), ...select('right', right, rightColumns)].join(', ')} FROM ${quoteIdentifier(left.schema)}.${quoteIdentifier(left.name)} AS "left" INNER JOIN ${quoteIdentifier(right.schema)}.${quoteIdentifier(right.name)} AS "right" ON ${on}`;
+  return `SELECT ${[...select('left', left, leftColumns), ...select('right', right, rightColumns)].join(', ')} FROM ${relation(left)} AS "left" INNER JOIN ${relation(right)} AS "right" ON ${on}`;
 }
