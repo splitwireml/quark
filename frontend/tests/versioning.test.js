@@ -169,3 +169,15 @@ test('strips runtime payload fields from joins and staged changes', () => {
   assert.deepEqual(history.versions[0].join, join);
   assert.deepEqual(history.pendingChanges, [{ kind: 'join', summary: 'Join makers' }]);
 });
+
+test('does not alias staged or diff change metadata', () => {
+  const change = { kind: 'hide', summary: 'Hide model', details: { columns: ['model'] } };
+  const staged = stageVersionChange(createSourceHistory(source), change);
+  change.details.columns[0] = 'year';
+  const finalized = finalizeVersion(staged, { ...source, timestamp: '2026-09-02T08:20:00.000Z' });
+  const diff = versionDiff(finalized, 'v2');
+  diff.changes[0].summary = 'mutated';
+  diff.changes[0].details.columns[0] = 'year';
+
+  assert.deepEqual(finalized.versions[1].changes, [{ kind: 'hide', summary: 'Hide model', details: { columns: ['model'] } }]);
+});

@@ -25,6 +25,14 @@ function copyJoin(join: JoinWorkspaceRequest): JoinWorkspaceRequest {
   };
 }
 
+function copyChange(change: VersionChange): VersionChange {
+  return {
+    kind: change.kind,
+    summary: change.summary,
+    ...(change.details ? { details: structuredClone(change.details) } : {})
+  };
+}
+
 function restoreMetadata(version: Version): VersionRestoreMetadata {
   return {
     nodeId: version.nodeId,
@@ -66,15 +74,10 @@ export function activateVersion(history: DatasetVersionHistory, versionId: strin
 }
 
 export function stageVersionChange(history: DatasetVersionHistory, change: VersionChange): DatasetVersionHistory {
-  const metadata = {
-    kind: change.kind,
-    summary: change.summary,
-    ...(change.details ? { details: { ...change.details } } : {})
-  };
   return {
     ...history,
     pendingParentId: history.pendingParentId ?? history.activeVersionId,
-    pendingChanges: [...history.pendingChanges, metadata]
+    pendingChanges: [...history.pendingChanges, copyChange(change)]
   };
 }
 
@@ -92,7 +95,7 @@ export function finalizeVersion(history: DatasetVersionHistory, snapshot: Snapsh
     columns: [...snapshot.columns],
     hiddenColumns: [...snapshot.hiddenColumns],
     timestamp: snapshot.timestamp,
-    changes: [...history.pendingChanges],
+    changes: history.pendingChanges.map(copyChange),
     ...(snapshot.join ? { join: copyJoin(snapshot.join) } : {})
   };
   return {
@@ -116,7 +119,7 @@ export function versionDiff(history: DatasetVersionHistory, versionId: string): 
     versionId: version.id,
     before: restoreMetadata(parent),
     after: restoreMetadata(version),
-    changes: [...version.changes]
+    changes: version.changes.map(copyChange)
   } : null;
 }
 
