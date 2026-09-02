@@ -41,9 +41,12 @@ export function createSourceHistory(source: SourceInput): DatasetVersionHistory 
     nodeId: source.nodeId,
     dataset: source.dataset,
     versions: [{
-      ...source,
+      nodeId: source.nodeId,
+      dataset: source.dataset,
+      sql: source.sql,
       columns: [...source.columns],
       hiddenColumns: [...source.hiddenColumns],
+      timestamp: source.timestamp,
       ...(source.join ? { join: copyJoin(source.join) } : {}),
       id: 'v1',
       number: 1,
@@ -114,7 +117,10 @@ export function versionDiff(history: DatasetVersionHistory, versionId: string): 
 
 export function createView(history: DatasetVersionHistory, input: ViewInput): DatasetVersionHistory {
   const view: View = {
-    ...input,
+    id: input.id,
+    name: input.name,
+    sql: input.sql,
+    timestamp: input.timestamp,
     nodeId: history.nodeId,
     dataset: history.dataset,
     ...(input.join ? { join: copyJoin(input.join) } : {})

@@ -30,7 +30,7 @@ const join = {
 };
 
 test('creates source version 1 with metadata and no row data', () => {
-  const history = createSourceHistory(source);
+  const history = createSourceHistory({ ...source, rows: [{ make: 'BMW' }] });
 
   assert.deepEqual(history, {
     nodeId: 'node-1',
@@ -116,7 +116,8 @@ test('creates a view without incrementing version history', () => {
     name: 'German cars',
     sql: "SELECT * FROM cars WHERE country = 'DE'",
     timestamp: '2026-09-02T08:10:00.000Z',
-    join
+    join,
+    rows: [{ make: 'BMW' }]
   });
 
   assert.equal(history.versions.length, 1);
