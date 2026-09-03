@@ -43,7 +43,7 @@
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
   const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
   const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
-  type CellMove = 'up' | 'down' | 'left' | 'right';
+  type CellMove = 'up' | 'down' | 'left' | 'right' | 'rowStart' | 'rowEnd' | 'pageUp' | 'pageDown' | 'gridStart' | 'gridEnd';
 
 
   let projects = $state.raw<ProjectInfo[]>([]);
@@ -1691,19 +1691,39 @@
     );
     cell?.focus();
   }
+  // One screen of rows, used by PageUp/PageDown. The grid is a single tab stop, so these
+  // are the only way a keyboard user crosses a long page without holding an arrow key.
+  function cellPageSize(): number {
+    const rowHeight = tableScroll?.querySelector('tbody tr:not(.spacer)')?.getBoundingClientRect().height || 34;
+    return Math.max(1, Math.floor((tableScroll?.clientHeight ?? rowHeight * 10) / rowHeight) - 1);
+  }
   function moveCell(row: number, column: string, move: CellMove) {
     if (!result || !visibleColumns.length || !result.rows.length) return;
+    const lastRow = result.rows.length - 1;
+    const lastColumn = visibleColumns.length - 1;
     const columnIndex = Math.max(0, visibleColumns.findIndex((item) => item.name === column));
-    const nextRow = Math.min(result.rows.length - 1, Math.max(0, row + (move === 'down' ? 1 : move === 'up' ? -1 : 0)));
-    const nextColumnIndex = Math.min(visibleColumns.length - 1, Math.max(0, columnIndex + (move === 'right' ? 1 : move === 'left' ? -1 : 0)));
+    const page = cellPageSize();
+    const rowDelta = move === 'down' ? 1 : move === 'up' ? -1 : move === 'pageDown' ? page : move === 'pageUp' ? -page : 0;
+    const nextRow = move === 'gridStart' ? 0 : move === 'gridEnd' ? lastRow : Math.min(lastRow, Math.max(0, row + rowDelta));
+    const nextColumnIndex = move === 'rowStart' || move === 'gridStart'
+      ? 0
+      : move === 'rowEnd' || move === 'gridEnd'
+        ? lastColumn
+        : Math.min(lastColumn, Math.max(0, columnIndex + (move === 'right' ? 1 : move === 'left' ? -1 : 0)));
     const nextColumn = visibleColumns[nextColumnIndex].name;
     selectedCell = { row: nextRow, column: nextColumn, expanded: false };
     void focusCell(nextRow, nextColumn);
   }
   function handleCellKeydown(event: KeyboardEvent, row: number, column: string) {
     if (editingCell || loadingData || cellEditSaving) return;
-    const moves: Record<string, CellMove> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    const moves: Record<string, CellMove> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', PageUp: 'pageUp', PageDown: 'pageDown' };
     if (moves[event.key]) { event.preventDefault(); moveCell(row, column, moves[event.key]); return; }
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const move: CellMove = event.ctrlKey || event.metaKey ? (event.key === 'Home' ? 'gridStart' : 'gridEnd') : (event.key === 'Home' ? 'rowStart' : 'rowEnd');
+      moveCell(row, column, move);
+      return;
+    }
     if (event.key === 'Enter') { event.preventDefault(); startCellEdit(row, column); return; }
     if (event.key === 'Backspace' || event.key === 'Delete') { event.preventDefault(); startCellEdit(row, column, ''); return; }
     if (event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); startCellEdit(row, column, event.key); }

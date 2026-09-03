@@ -78,9 +78,23 @@
   const DEFAULT_ROW_HEIGHT = 34;
   let rowHeight = $state(DEFAULT_ROW_HEIGHT);
 
-  const firstRow = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
-  const lastRow = $derived(Math.min(rows.length, firstRow + Math.ceil(viewportHeight / rowHeight) + OVERSCAN * 2));
+  const windowSize = $derived(Math.ceil(viewportHeight / rowHeight) + OVERSCAN * 2);
+  const scrollFirstRow = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
+  // A selected cell must stay rendered even when it sits outside the scrolled window: it carries
+  // the grid's only tab stop, and focusing it is what scrolls the window back to it.
+  const firstRow = $derived(
+    selectedCell && (selectedCell.row < scrollFirstRow || selectedCell.row >= scrollFirstRow + windowSize)
+      ? Math.max(0, Math.min(selectedCell.row - OVERSCAN, Math.max(0, rows.length - windowSize)))
+      : scrollFirstRow,
+  );
+  const lastRow = $derived(Math.min(rows.length, firstRow + windowSize));
   const windowRows = $derived(rows.slice(firstRow, lastRow));
+
+  // Roving tabindex: the grid is one tab stop, not one per cell. Arrow keys move within it.
+  const activeColumn = $derived(
+    bodyColumns.some((column) => column.name === selectedCell?.column) ? selectedCell!.column : bodyColumns[0]?.name,
+  );
+  const activeRow = $derived(selectedCell?.row ?? firstRow);
   const padTop = $derived(firstRow * rowHeight);
   const padBottom = $derived(Math.max(0, (rows.length - lastRow) * rowHeight));
   const bodyCellCount = $derived(bodyColumns.length * 2);
@@ -259,10 +273,10 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader}>
-  <table>
+  <table role="grid" aria-rowcount={rows.length + 1} aria-colcount={bodyColumns.length}>
     <caption class="sr-only">{caption}</caption>
     <thead>
-      <tr>
+      <tr aria-rowindex="1">
         {#each columns as column, columnIndex (column.name)}
           <ColumnHeaderCell
             {column}
@@ -301,13 +315,14 @@
       {/if}
       {#each windowRows as row, windowIndex (row)}
         {@const index = firstRow + windowIndex}
-        <tr class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
+        <tr aria-rowindex={index + 2} class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
           {#each bodyColumns as column (column.name)}
             {@const selected = selectedCell?.row === index && selectedCell.column === column.name}
             {@const expanded = selected && selectedCell?.expanded}
             {@const editing = editingCell?.row === index && editingCell.column === column.name}
             <td
-              tabindex="0"
+              tabindex={index === activeRow && column.name === activeColumn ? 0 : -1}
+              aria-selected={selected}
               data-row={index}
               data-column={column.name}
               class:selected-cell={selected}

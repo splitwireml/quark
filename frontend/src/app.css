@@ -1,3 +1,12 @@
+/* Self-hosted IBM Plex. Quark runs on the user's machine against their own files, so the
+   typography must not depend on a third-party CDN: the design has to survive being offline,
+   and the app should not announce every launch to fonts.googleapis.com. */
+@import '@fontsource/ibm-plex-sans/latin-400.css';
+@import '@fontsource/ibm-plex-sans/latin-500.css';
+@import '@fontsource/ibm-plex-sans/latin-600.css';
+@import '@fontsource/ibm-plex-mono/latin-400.css';
+@import '@fontsource/ibm-plex-mono/latin-500.css';
+
 :root {
   color-scheme: light;
   font-family: var(--font-ui);
