@@ -122,15 +122,15 @@
   .search input { height: 28px; padding: 0 8px; border-radius: var(--radius-md); border: 1px solid var(--control-border); font-size: 12px; }
   .field-picker, .metrics { border: none; margin: 0; padding: 0; }
   .field-list { max-height: 144px; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; padding: 2px; }
-  .empty { margin: 4px 0; font-size: 11px; color: var(--muted-2); }
+  .empty { margin: 4px 0; font-size: 11px; color: var(--faint); }
   .columns { display: flex; flex-direction: column; gap: 5px; }
   .column-role { display: flex; align-items: center; gap: 3px; }
   .role-pill { min-width: 0; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; }
   .role-pill.focused { outline: 2px solid var(--action); outline-offset: 1px; }
   .role-pill:focus-visible { outline: 2px solid var(--action); outline-offset: 1px; }
-  .note { margin: 0; font-size: 11px; line-height: 1.5; color: var(--muted-2); }
+  .note { margin: 0; font-size: 11px; line-height: 1.5; color: var(--faint); }
   .metrics { display: flex; flex-wrap: wrap; gap: 5px; }
-  legend { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint-2); padding: 0; margin-bottom: 4px; }
+  legend { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); padding: 0; margin-bottom: 4px; }
   .metric-chip {
     height: 26px; padding: 0 9px;
     border-radius: var(--radius-sm);

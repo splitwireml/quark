@@ -134,7 +134,7 @@
   .label { font-size: 11px; color: var(--muted); }
   .trigger-host { display: flex; }
   .value { max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .placeholder { color: var(--placeholder); }
+  .placeholder { color: var(--faint); }
   .chevron { position: absolute; right: 10px; color: var(--faint); }
   .popover {
     position: absolute;
@@ -167,7 +167,7 @@
   .option:hover, .option:focus-visible { background: var(--surface-hover); }
   .option.selected { background: var(--action-tint); color: var(--action-dark); }
   .option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .option small { color: var(--muted-2); font-size: 10.5px; }
+  .option small { color: var(--faint); font-size: 10.5px; }
   .option:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; }
   .empty { display: block; padding: 8px; font-size: 11.5px; color: var(--muted); }
 </style>

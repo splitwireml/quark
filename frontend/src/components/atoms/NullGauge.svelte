@@ -24,6 +24,6 @@
   }
   .fill { position: absolute; inset: 0 auto 0 0; background: var(--control-border); border-radius: 1px; }
   .fill.warn { background: var(--warning-fill); }
-  .label { font-family: var(--font-mono); font-size: 9px; color: var(--placeholder); flex: none; }
+  .label { font-family: var(--font-mono); font-size: 9px; color: var(--faint); flex: none; }
   .label.warn { color: var(--warning); }
 </style>

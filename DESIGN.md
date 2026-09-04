@@ -16,6 +16,10 @@ A data analyst works in daylight on a laptop, scanning thousands of values for a
 - Data: `'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace` (weights 400/500) — column names, badges, kbd hints, SQL, counts, type labels.
 - Default UI text: 12.5–14 px. Dense metadata: 9–11px. Page title: 22px.
 - Use weight and spacing before adding more colors.
+- Text has exactly three levels — ink, muted, faint — and each clears 4.5:1 on
+  every surface listed above. A light UI has room for about three AA-passing
+  greys; anything meant to recede further does so through size, weight, or the
+  mono face, never a fourth lighter grey.
 
 ## Color tokens
 
@@ -25,7 +29,10 @@ A data analyst works in daylight on a laptop, scanning thousands of values for a
 - Surface (rail): `#FAFBFD`
 - Surface (inset panels): `#F7F9FC`
 - Ink: `#1F2533`
-- Muted ink: `#5A6673` / `#7A8593`
+- Muted ink (secondary text): `#515D6B` — 5.87:1 on canvas
+- Faint ink (tertiary text, metadata, eyebrows, placeholders): `#616E80` — 4.54:1 on canvas
+- Glyph (decorative icon characters, non-text 3:1): `#7D8C9E`
+- Disabled control text (exempt from contrast minimums): `#A8B2BE`
 - Rule: `#E6EAF0`; strong rule (card border): `#D5DBE4`; control border: `#D7DEE7`
 - Action (accent): `#1155F5`; action dark: `#0B3FBF`; action tint: `#EDF3FF`
 - Warning (null %): `#B87415`

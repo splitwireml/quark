@@ -42,7 +42,7 @@
   .chip.dashed { border-style: dashed; border-color: var(--faint); color: var(--faint); background: transparent; }
 
   .remove {
-    color: var(--placeholder);
+    color: var(--faint);
     font-size: 12px;
     line-height: 1;
     padding: 0;

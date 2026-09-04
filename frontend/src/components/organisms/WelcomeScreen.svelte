@@ -53,7 +53,7 @@
   .steps { margin: 8px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
   .steps li { display: flex; flex-direction: column; gap: 2px; }
   .steps b { font-size: 13px; color: var(--ink); }
-  .steps span { font-size: 12px; color: var(--muted-2); }
+  .steps span { font-size: 12px; color: var(--faint); }
   .error {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     padding: 12px;

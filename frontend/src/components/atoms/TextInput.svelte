@@ -25,7 +25,7 @@
     background: var(--surface);
   }
   .field:focus-within { border-color: var(--ink); }
-  .glyph { color: var(--placeholder); font-size: 11px; flex: none; }
+  .glyph { color: var(--glyph); font-size: 11px; flex: none; }
   input {
     flex: 1;
     min-width: 0;
@@ -34,5 +34,5 @@
     font-size: 11.5px;
     color: var(--ink);
   }
-  input::placeholder { color: var(--placeholder); }
+  input::placeholder { color: var(--faint); }
 </style>

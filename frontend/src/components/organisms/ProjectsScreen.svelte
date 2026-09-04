@@ -83,7 +83,7 @@
   .project { width: 100%; min-width: 0; padding: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); text-align: left; transition: border-color 120ms ease, background 120ms ease; }
   .project:hover { border-color: var(--control-border); background: var(--surface-3); }
   .project strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-  .project span { flex: none; font: 10px var(--font-mono); color: var(--muted-2); }
+  .project span { flex: none; font: 10px var(--font-mono); color: var(--faint); }
   @media (max-width: 520px) {
     .screen { padding-top: 36px; }
     ul { grid-template-columns: 1fr; }

@@ -11,6 +11,6 @@
     font-size: 9.5px;
     letter-spacing: 0.09em;
     text-transform: uppercase;
-    color: var(--faint-2);
+    color: var(--faint);
   }
 </style>

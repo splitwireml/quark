@@ -36,7 +36,7 @@
   .details { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .name, small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .name { font: 11px var(--font-mono); color: var(--ink); }
-  small { font-size: 10px; color: var(--muted-2); }
+  small { font-size: 10px; color: var(--faint); }
   .version { flex: none; margin-left: auto; padding: 1px 5px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font: 9px var(--font-mono); color: var(--muted); }
   .active .version { border-color: var(--action-tint-border); color: var(--action-dark); }
 </style>
