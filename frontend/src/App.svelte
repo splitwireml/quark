@@ -56,6 +56,7 @@
   let datasets = $state.raw<BaseViewInfo[]>([]);
   let loadedSourceIds = $state.raw<string[]>([]);
   let loadingSourceId = $state('');
+  let highlightToken = $state(0);
   let selectedNodeId = $state('');
   let selectedDataset = $state('');
   let result = $state.raw<QueryResponse | null>(null);
@@ -1832,7 +1833,7 @@
 
   {#snippet rail()}
     <SourceRail
-      {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen}
+      {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen} {highlightToken}
       inert={!!inspectorMode || tableExpanded}
       onSelectSource={(id) => { void loadProjectSource(id); }}
       onSelectView={(id) => { void selectView(id); }}
@@ -1848,9 +1849,14 @@
   {#snippet main()}
     <main>
       {#if !selectedDataset}
-        <WelcomeScreen {error} {mutating} onUpload={upload} onRetry={() => loadProjectContents(activeProject!)}>
+        <WelcomeScreen
+          {error} {mutating} {nodes} {loadedSourceIds} {loadingSourceId}
+          onSelectSource={(id) => { void loadProjectSource(id); }}
+          onShowAllSources={() => { railCollapsed = false; railOpen = true; highlightToken += 1; }}
+          onUpload={upload} onRetry={() => loadProjectContents(activeProject!)}
+        >
           {#snippet attachForm()}
-            <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} idPrefix="onboarding-database-path" />
+            <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} idPrefix="onboarding-database-path" showUpload={false} />
           {/snippet}
         </WelcomeScreen>
       {:else}
