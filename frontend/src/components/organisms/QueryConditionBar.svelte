@@ -2,8 +2,10 @@
   import type { Snippet } from 'svelte';
   import Button from '../atoms/Button.svelte';
   import Chip from '../atoms/Chip.svelte';
+  import IconButton from '../atoms/IconButton.svelte';
   import TextInput from '../atoms/TextInput.svelte';
-  import type { FilterCondition, SortCondition } from '../../lib/types';
+  import { dismissable } from '../../lib/dismiss';
+  import type { FilterCondition, RowDensity, SortCondition } from '../../lib/types';
 
   type Props = {
     inert?: boolean;
@@ -29,6 +31,10 @@
     onColumnSearchKeydown: (event: KeyboardEvent) => void;
     columnMatchCount: number;
     storageError: string;
+    rowDensity: RowDensity;
+    setRowDensity: (density: RowDensity) => void;
+    tableExpanded: boolean;
+    onToggleExpanded: () => void;
     columnsMenu: Snippet;
     joinMenu: Snippet;
     aggregateMenu: Snippet;
@@ -41,8 +47,22 @@
     isSqlMode, onBackToFullTable, onBackToBuilder,
     columnSearch, setColumnSearch, onFindColumn, onColumnSearchKeydown, columnMatchCount,
     storageError,
+    rowDensity, setRowDensity, tableExpanded, onToggleExpanded,
     columnsMenu, joinMenu, aggregateMenu, dedupeMenu
   }: Props = $props();
+
+  const densities: { value: RowDensity; icon: 'density-compact' | 'density-default' | 'density-comfortable'; label: string }[] = [
+    { value: 'compact', icon: 'density-compact', label: 'Compact rows' },
+    { value: 'default', icon: 'density-default', label: 'Default rows' },
+    { value: 'comfortable', icon: 'density-comfortable', label: 'Comfortable rows' }
+  ];
+
+  let densityOpen = $state(false);
+
+  function chooseDensity(density: RowDensity) {
+    setRowDensity(density);
+    densityOpen = false;
+  }
 
   function scrollModifierRail(event: WheelEvent) {
     if (event.deltaX !== 0 || event.deltaY === 0) return;
@@ -88,6 +108,32 @@
     <Button onclick={onBackToBuilder}>Back to builder</Button>
   {/if}
   {#if storageError}<span class="error" role="alert">{storageError}</span>{/if}
+  <div class="view-controls">
+    <div class="density-anchor">
+      <IconButton
+        type="button" size="md" icon="spacing" active={densityOpen}
+        label="Row spacing" data-menu-trigger
+        aria-expanded={densityOpen} aria-haspopup="true"
+        onclick={() => densityOpen = !densityOpen}
+      />
+      {#if densityOpen}
+        <div class="density-menu" use:dismissable={() => densityOpen = false} role="group" aria-label="Row spacing">
+          {#each densities as density (density.value)}
+            <IconButton
+              type="button" size="md" icon={density.icon} label={density.label}
+              active={rowDensity === density.value}
+              onclick={() => chooseDensity(density.value)}
+            />
+          {/each}
+        </div>
+      {/if}
+    </div>
+    <IconButton
+      type="button" size="md" icon={tableExpanded ? 'collapse' : 'expand'}
+      label={tableExpanded ? 'Exit expanded table view' : 'Expand table to fill the window'}
+      onclick={onToggleExpanded}
+    />
+  </div>
   <div class="column-search">
     <TextInput type="search" glyph="⌕" value={columnSearch} oninput={(event: Event) => { setColumnSearch((event.currentTarget as HTMLInputElement).value); onFindColumn(); }} onkeydown={onColumnSearchKeydown} placeholder="Find column" aria-label="Find column" />
     <span class="match-count" aria-live="polite" aria-label={`${columnMatchCount} matching columns`}>{columnMatchCount}</span>
@@ -135,7 +181,29 @@
   .connector:hover { border-color: var(--action-tint-border); color: var(--action-dark); }
   .muted { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
   .link { font-size: 11.5px; color: var(--action); background: none; border: none; white-space: nowrap; }
-  .column-search { margin-left: auto; flex: none; }
+  .view-controls { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
+  .density-anchor { position: relative; display: flex; }
+  .density-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    z-index: 12;
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-xl);
+    background: var(--surface);
+    box-shadow: var(--shadow-popover);
+    transform-origin: top center;
+    animation: density-in 200ms cubic-bezier(0.32, 0.72, 0, 1);
+    translate: -50% 0;
+  }
+  @keyframes density-in {
+    from { opacity: 0; transform: translateY(-6px) scale(0.94); }
+    to { opacity: 1; transform: none; }
+  }
+  .column-search { flex: none; }
   .match-count { font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); flex: none; }
   .error { font-size: 11px; color: var(--error); flex: none; }
 </style>

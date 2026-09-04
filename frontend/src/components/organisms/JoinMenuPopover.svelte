@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
+  import Icon from '../atoms/Icon.svelte';
   import Checkbox from '../atoms/Checkbox.svelte';
   import MultiSelectDropdown from '../molecules/MultiSelectDropdown.svelte';
   import SelectDropdown from '../molecules/SelectDropdown.svelte';
@@ -56,7 +57,7 @@
 </script>
 
 <details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger" class:active={open}>Joins</summary>
+  <summary class="trigger menu-trigger" class:active={open}><Icon name="join" size={14} /><span class="menu-label"><span>Join</span></span></summary>
   <div class="popover">
     <header><strong>INNER JOIN</strong><span>project Views</span></header>
     <div class="members">
@@ -122,9 +123,6 @@
   .popover-host { position: static; }
   summary { list-style: none; cursor: pointer; }
   summary::-webkit-details-marker { display: none; }
-  .trigger { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border-radius: var(--radius-lg); border: 1px solid var(--control-border); background: var(--surface); font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
-  .trigger:hover { border-color: var(--faint); }
-  .trigger.active { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
   .popover { position: fixed; top: 125px; left: clamp(12px, calc((100vw - 620px) / 2), 245px); z-index: 10; width: min(620px, calc(100vw - 24px)); min-height: min(540px, calc(100vh - 137px)); max-height: min(680px, calc(100vh - 137px)); overflow-y: auto; padding: 12px; border-radius: var(--radius-xl); background: var(--surface); border: 1px solid var(--line-strong); box-shadow: var(--shadow-popover-wide); display: flex; flex-direction: column; gap: 10px; }
   header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
   header span { font: 10px var(--font-mono); color: var(--faint); white-space: nowrap; }

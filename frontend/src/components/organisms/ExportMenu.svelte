@@ -2,6 +2,7 @@
   import Button from '../atoms/Button.svelte';
   import Checkbox from '../atoms/Checkbox.svelte';
   import Icon from '../atoms/Icon.svelte';
+  import { dismissable } from '../../lib/dismiss';
   import type { ExportFormat, ExportOption, JsonLayout } from '../../lib/types';
 
   type Props = {
@@ -29,7 +30,6 @@
   let pane = $state<'root' | 'sheets' | 'json'>('root');
   let paneHeight = $state(0);
   let measured = $state(false);
-  let panel = $state<HTMLDivElement | null>(null);
 
   let sources = $derived([...new Set(options.map((option) => option.source))]);
   let sheetCount = $derived(selectedKeys.length);
@@ -69,23 +69,12 @@
     onExport();
   }
 
-  function onKeydown(event: KeyboardEvent) {
-    if (event.key !== 'Escape' || exporting) return;
-    event.stopPropagation();
-    if (pane !== 'root') { backToRoot(); return; }
-    onClose();
-  }
-
-  function onPointerDown(event: PointerEvent) {
-    const target = event.target as Node | null;
-    if (exporting || !panel || !target || panel.contains(target)) return;
-    // The trigger toggles itself; let its own handler decide.
-    if ((target as HTMLElement).closest?.('[data-export-trigger]')) return;
+  function onDismiss(reason: 'escape' | 'outside') {
+    if (exporting) return;
+    if (reason === 'escape' && pane !== 'root') { backToRoot(); return; }
     onClose();
   }
 </script>
-
-<svelte:window onpointerdown={open ? onPointerDown : undefined} onkeydowncapture={open ? onKeydown : undefined} />
 
 {#if open}
   <div
@@ -93,7 +82,7 @@
     class:wide={pane === 'sheets'}
     class:tall={pane === 'json'}
     class:measured
-    bind:this={panel}
+    use:dismissable={onDismiss}
     role="group"
     aria-label="Export"
     style:height={paneHeight ? `${paneHeight}px` : undefined}

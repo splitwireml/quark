@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
+  import Icon from '../atoms/Icon.svelte';
   import type { ColumnInfo } from '../../lib/types';
 
   type Props = {
@@ -17,7 +18,7 @@
 </script>
 
 <details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger" class:active={open}>{label}</summary>
+  <summary class="trigger menu-trigger" class:active={open}><Icon name="duplicate" size={14} /><span class="menu-label"><span>{label}</span></span></summary>
   <div class="popover">
     <div class="list">
       {#each columns as column (column.name)}
@@ -39,18 +40,6 @@
   .popover-host { position: relative; }
   summary { list-style: none; cursor: pointer; }
   summary::-webkit-details-marker { display: none; }
-  .trigger {
-    display: inline-flex; align-items: center; gap: 6px;
-    height: 30px; padding: 0 12px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--control-border);
-    background: var(--surface);
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ink-2);
-  }
-  .trigger:hover { border-color: var(--faint); }
-  .trigger.active { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
   .popover {
     position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
     width: 260px; padding: 10px;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import Icon from '../atoms/Icon.svelte';
   import Button from '../atoms/Button.svelte';
   import TextInput from '../atoms/TextInput.svelte';
   import type { ColumnInfo } from '../../lib/types';
@@ -193,7 +194,7 @@
 <svelte:window onkeydown={menuKeydown} />
 
 <details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger" class:active={open}>Columns <small>{visibleCount}/{totalCount}</small></summary>
+  <summary class="trigger menu-trigger" class:active={open}><Icon name="columns" size={14} /><span class="menu-label"><span>Columns <small>{visibleCount}/{totalCount}</small></span></span></summary>
   <div class="popover">
     <header><strong>Columns</strong><span>{visibleCount} of {totalCount} visible</span></header>
     <div class="search">
@@ -270,20 +271,6 @@
   .popover-host { position: relative; }
   summary { list-style: none; cursor: pointer; }
   summary::-webkit-details-marker { display: none; }
-  .trigger {
-    display: inline-flex; align-items: center; gap: 6px;
-    height: 30px; padding: 0 12px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--control-border);
-    background: var(--surface);
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ink-2);
-  }
-  .trigger:hover { border-color: var(--faint); }
-  .trigger.active { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
-  .trigger small { font-family: var(--font-mono); color: var(--faint); }
-  .trigger.active small { color: var(--action-dark); }
   .popover {
     position: absolute;
     top: calc(100% + 6px);

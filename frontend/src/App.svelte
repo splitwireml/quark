@@ -17,8 +17,7 @@
   import SourceDisclosure from './components/organisms/SourceDisclosure.svelte';
   import WelcomeScreen from './components/organisms/WelcomeScreen.svelte';
   import DatasetHead from './components/organisms/DatasetHead.svelte';
-  import DatasetTabsBar from './components/organisms/DatasetTabsBar.svelte';
-  import VersionsViewsPane from './components/organisms/VersionsViewsPane.svelte';
+  import VersionMenu from './components/organisms/VersionMenu.svelte';
   import VersionDiffDialog from './components/organisms/VersionDiffDialog.svelte';
   import QueryConditionBar from './components/organisms/QueryConditionBar.svelte';
   import ColumnsMenuPopover from './components/organisms/ColumnsMenuPopover.svelte';
@@ -153,7 +152,7 @@
   let exportError = $state('');
   let exportTrigger = $state<HTMLButtonElement | null>(null);
   let exportRequestId = 0;
-  let workspaceTab = $state<'data' | 'history'>('data');
+  let versionsOpen = $state(false);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -181,9 +180,9 @@
   let projectViews = $derived(activeProjectId ? versionHistories.filter((history) => history.projectId === activeProjectId) : []);
   let activeVersion = $derived(currentHistory?.versions.find((version) => version.id === currentHistory.activeVersionId));
   let activeVersionChildren = $derived(activeVersion ? currentHistory?.versions.filter((version) => version.parentId === activeVersion.id) ?? [] : []);
-  let versionLabel = $derived(workspaceTab === 'data' && activeVersion ? `${formatVersionLabel(activeVersion)} · ${currentHistory?.versions.length ?? 0} saved` : '');
-  let canPreviousVersion = $derived(workspaceTab === 'data' && !loadingData && !!activeVersion?.parentId);
-  let canNextVersion = $derived(workspaceTab === 'data' && !loadingData && activeVersionChildren.length === 1);
+  let versionLabel = $derived(activeVersion ? `${formatVersionLabel(activeVersion)} · ${currentHistory?.versions.length ?? 0} saved` : '');
+  let canPreviousVersion = $derived(!loadingData && !!activeVersion?.parentId);
+  let canNextVersion = $derived(!loadingData && activeVersionChildren.length === 1);
   let currentExportOption = $derived(result ? {
     key: 'current',
     node_id: activeSqlNodeId || activeProject?.node_id || selectedNodeId,
@@ -528,6 +527,7 @@
   async function openExport(trigger: HTMLButtonElement) {
     if (!currentExportOption) return;
     if (exportOpen) { closeExport(); return; }
+    versionsOpen = false;
     exportTrigger = trigger;
     exportOpen = true;
     exportFormat = 'csv';
@@ -551,6 +551,15 @@
       return options;
     }, []);
   }
+
+  function toggleVersions() {
+    if (versionsOpen) { versionsOpen = false; return; }
+    if (!currentHistory) return;
+    closeExport();
+    versionsOpen = true;
+  }
+
+  function closeVersions() { versionsOpen = false; }
 
   function closeExport() {
     if (exporting) return;
@@ -865,7 +874,7 @@
   }
 
   function closeSql(_restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; }
-  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; } tableExpanded = !tableExpanded; }
+  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; versionsOpen = false; } tableExpanded = !tableExpanded; }
   function resetSql(dataset: BaseViewInfo | undefined) { closeSql(); queryMode = 'builder'; sqlText = dataset?.sql ?? ''; sqlBase = ''; activeSql = ''; activeSqlNodeId = ''; sqlError = ''; }
 
   function discardPending(): boolean {
@@ -898,7 +907,6 @@
   }
 
   async function replayVersionSnapshot(version: Version): Promise<boolean> {
-    workspaceTab = 'data';
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -1033,7 +1041,6 @@
     sourceRequestId++;
     closeInspector();
     resetSql(undefined);
-    workspaceTab = 'data';
     selectedNodeId = '';
     selectedDataset = '';
     datasets = [];
@@ -1217,14 +1224,13 @@
       history = versionHistories.find((item) => item.id === id && item.projectId === activeProject?.id);
       if (!history) return;
     }
-    if (id === selectedDataset && result) { workspaceTab = 'data'; railOpen = false; return; }
+    if (id === selectedDataset && result) { railOpen = false; return; }
     if (!discardPending()) return;
     replayRequestId++;
     closeInspector();
     resetSql(datasets.find((view) => view.id === id));
     selectedNodeId = activeProject?.node_id ?? history.nodeId;
     selectedDataset = id;
-    workspaceTab = 'data';
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -1810,7 +1816,6 @@
 
   // -- view-layer adapters for the atomic component split below; no behavior change --
   let canQuery = $derived(!!result);
-  let aggregateMenuLabel = $derived(queryMode === 'sql' ? 'Aggregate builder' : 'Aggregate');
   function typeToggleDisabled(type: string): boolean { return isTypeShown(type) && (columnTypes.length === 1 || (shownColumnTypes.length === 1 && shownColumnTypes[0] === type)); }
   function setCategorySearchLive(value: string) { categorySearch = value; loadCategoryValues(true); }
 </script>
@@ -1865,13 +1870,14 @@
       {:else}
         <section class="workspace" inert={cellEditSaving}>
           <DatasetHead
-            title={workspaceTab === 'history' ? 'Versions' : (currentHistory?.name ?? '')}
+            title={currentHistory?.name ?? ''}
             {versionLabel} {canPreviousVersion} {canNextVersion}
             onPreviousVersion={previousVersion} onNextVersion={nextVersion}
-            showMeta={workspaceTab === 'data' && !!result}
+            versionOpen={versionsOpen} onToggleVersions={toggleVersions}
+            showMeta={!!result}
             rows={result ? count(result.total_rows) : ''}
             ms={result ? compact(result.elapsed_ms) : ''}
-            showRefresh={workspaceTab === 'data'}
+            showRefresh
             onRefresh={loadActiveData}
             onExport={openExport}
             {loadingData} canExport={!!result} {exporting}
@@ -1880,6 +1886,14 @@
             {exportOpen}
             inert={!!inspectorMode || tableExpanded}
           >
+            {#snippet versionMenu()}
+              <VersionMenu
+                open={versionsOpen} history={currentHistory} {storageError}
+                onRestore={restoreVersion}
+                onDiff={(version, trigger) => currentHistory && showDiff(currentHistory, version, trigger)}
+                onClose={closeVersions}
+              />
+            {/snippet}
             {#snippet exportMenu()}
               <ExportMenu
                 open={exportOpen} current={currentExportOption} options={exportOptions}
@@ -1890,22 +1904,7 @@
               />
             {/snippet}
           </DatasetHead>
-          <DatasetTabsBar
-            {workspaceTab} {tableExpanded} {rowDensity}
-            historyCount={currentHistory?.versions.length ?? 0}
-            onSelectData={() => workspaceTab = 'data'}
-            onSelectHistory={() => { closeSql(); workspaceTab = 'history'; }}
-            setRowDensity={(density) => rowDensity = density}
-            onToggleExpanded={toggleTableExpanded}
-          />
-          {#if workspaceTab === 'history'}
-            <VersionsViewsPane
-              history={currentHistory} {storageError}
-              onRestore={restoreVersion}
-              onDiff={(version, trigger) => currentHistory && showDiff(currentHistory, version, trigger)}
-            />
-          {:else}
-            {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
+          {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
             {#if error}
               <div class="banner error-banner" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => loadData()}>Retry</button></div>
             {/if}
@@ -1925,6 +1924,8 @@
                 onFindColumn={findColumn} onColumnSearchKeydown={cycleColumnMatch}
                 columnMatchCount={columnMatches.length}
                 {storageError}
+                {rowDensity} setRowDensity={(density) => rowDensity = density}
+                {tableExpanded} onToggleExpanded={toggleTableExpanded}
               >
                 {#snippet columnsMenu()}
                   <ColumnsMenuPopover
@@ -1960,7 +1961,7 @@
                 {#snippet aggregateMenu()}
                   <AggregateMenuPopover
                     open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
-                    label={aggregateMenuLabel}
+                    label="Aggregate"
                     {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
                     {aggregateColumnMatches} {aggregateColumns} {aggregateFields} {focusedAggregateColumn}
                     onToggleColumn={toggleAggregateColumn} onRemoveColumn={removeAggregateColumn}
@@ -2086,7 +2087,6 @@
                 {/if}
               </div>
             {/if}
-          {/if}
         </section>
       {/if}
     </main>
