@@ -27,4 +27,5 @@ export type IconName =
   | 'sort-asc'
   | 'sort-desc'
   | 'filter'
-  | 'histogram';
+  | 'histogram'
+  | 'pin';

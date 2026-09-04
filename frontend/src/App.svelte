@@ -108,6 +108,7 @@
   let nullThreshold = $state(100);
   let activeColumnMatch = $state(0);
   let selectedCell = $state<{ row: number; column: string; expanded?: boolean } | null>(null);
+  let pinnedColumns = $state<string[]>([]);
   let editingCell = $state<{ row: number; column: string; value: string; original: string } | null>(null);
   let cellEditSaving = $state(false);
   let cellEditError = $state('');
@@ -222,6 +223,8 @@
     return names.filter((name, index) => byName.has(name) && names.indexOf(name) === index).map((name) => byName.get(name)!);
   });
   let visibleColumns = $derived(orderedColumns.filter((column) => !hiddenColumns.includes(column.name)));
+  // A pin only survives while its column is still on screen.
+  let livePins = $derived(pinnedColumns.filter((name) => visibleColumns.some((column) => column.name === name)));
   let rowColumns = $derived.by(() => {
     if (!reorderOrigin) return visibleColumns;
     const byName = new Map((result?.columns ?? []).map((column) => [column.name, column]));
@@ -1959,6 +1962,18 @@
       }
     } finally { cellEditSaving = false; }
   }
+  // Pinning parks the column at the left of the grid, ahead of every unpinned one, and freezes
+  // it there; the reorder rides the same staged path as a drag so it undoes like one.
+  function togglePinColumn(column: ColumnInfo) {
+    if (livePins.includes(column.name)) { pinnedColumns = livePins.filter((name) => name !== column.name); return; }
+    const target = visibleColumns.filter((item) => !livePins.includes(item.name))[0];
+    if (target && target.name !== column.name) {
+      beginColumnReorder();
+      previewColumnReorder(column.name, target.name, 'before');
+      commitColumnReorder();
+    }
+    pinnedColumns = [...livePins, column.name];
+  }
   function collapseCell(row: number, column: string) { if (selectedCell?.row === row && selectedCell.column === column) selectedCell = { row, column, expanded: false }; }
   function sortFor(column: string): SortCondition | undefined { return sorts.find((sort) => sort.column === column); }
   function compact(value: number | string | null | undefined): string { return value == null ? '—' : typeof value === 'string' ? value : new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value); }
@@ -2171,6 +2186,8 @@
                     {:else if result}
                       <DataGridTable
                         columns={visibleColumns} bodyColumns={rowColumns} rows={result.rows}
+                        rowOffset={(result.page - 1) * result.page_size}
+                        pinnedColumns={livePins} onTogglePin={togglePinColumn}
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
                         {rowDensity} {fitColumnsToContent}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}

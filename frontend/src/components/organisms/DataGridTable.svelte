@@ -3,6 +3,7 @@
   import Icon from '../atoms/Icon.svelte';
   import InsertionHandle from '../atoms/InsertionHandle.svelte';
   import ColumnHeaderCell from '../molecules/ColumnHeaderCell.svelte';
+  import { rangeToHtml, rangeToText } from '../../lib/clipboard';
   import type { ColumnInfo, FilterCondition, SortCondition } from '../../lib/types';
 
   type LabelPart = { text: string; match: boolean };
@@ -15,6 +16,9 @@
     columns: ColumnInfo[];
     bodyColumns: ColumnInfo[];
     rows: Record<string, unknown>[];
+    rowOffset: number;
+    pinnedColumns: string[];
+    onTogglePin: (column: ColumnInfo) => void;
     caption: string;
     rowDensity: string;
     fitColumnsToContent: boolean;
@@ -60,7 +64,7 @@
   };
 
   let {
-    columns, bodyColumns, rows, caption, rowDensity, fitColumnsToContent, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
+    columns, bodyColumns, rows, rowOffset, pinnedColumns, onTogglePin, caption, rowDensity, fitColumnsToContent, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
@@ -264,6 +268,127 @@
     cancelAnimations();
   });
 
+  // Range selection. Columns are indexes into bodyColumns; row mode pins the range to full rows.
+  type Point = { row: number; column: number };
+  let anchor = $state<Point | null>(null);
+  let head = $state<Point | null>(null);
+  let rowMode = $state(false);
+  let dragging = $state(false);
+  let shiftHeld = $state(false);
+
+  const range = $derived(
+    anchor && head
+      ? {
+          top: Math.min(anchor.row, head.row),
+          bottom: Math.max(anchor.row, head.row),
+          left: rowMode ? 0 : Math.min(anchor.column, head.column),
+          right: rowMode ? bodyColumns.length - 1 : Math.max(anchor.column, head.column),
+        }
+      : null,
+  );
+
+  // A new page or query replaces the rows the range pointed at.
+  $effect(() => { void rows; anchor = null; head = null; rowMode = false; });
+
+  function startSelect(event: PointerEvent, row: number, column: number) {
+    if (event.button !== 0 || editingCell) return;
+    if ((event.target as HTMLElement).closest('input, button')) return;
+    rowMode = event.shiftKey;
+    anchor = { row, column };
+    head = { row, column };
+    dragging = true;
+  }
+  function startRowSelect(event: PointerEvent, row: number) {
+    if (event.button !== 0 || editingCell) return;
+    rowMode = true;
+    anchor = { row, column: 0 };
+    head = { row, column: 0 };
+    dragging = true;
+  }
+  function extendTo(row: number, column: number) { if (dragging) head = { row, column }; }
+  function extendRow(row: number) { if (dragging && head) head = { row, column: head.column }; }
+
+  function cellText(row: Record<string, unknown>, name: string): string {
+    const value = row[name];
+    return value == null ? '' : display(value);
+  }
+  function rangeMatrix(): string[][] | null {
+    if (!range) return null;
+    const names = bodyColumns.slice(range.left, range.right + 1).map((column) => column.name);
+    const matrix: string[][] = [];
+    for (let row = range.top; row <= range.bottom; row += 1) {
+      const values = rows[row];
+      if (values) matrix.push(names.map((name) => cellText(values, name)));
+    }
+    return matrix.length ? matrix : null;
+  }
+
+  // The grid keeps its selection in state, not in a DOM range, so the browser has nothing to
+  // copy and never fires a copy event. The shortcut writes to the clipboard itself instead.
+  async function copyKeydown(event: KeyboardEvent) {
+    if (event.key !== 'c' || !(event.metaKey || event.ctrlKey) || editingCell) return;
+    const matrix = rangeMatrix();
+    if (!matrix) return;
+    event.preventDefault();
+    const text = rangeToText(matrix);
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+          'text/html': new Blob([rangeToHtml(matrix)], { type: 'text/html' }),
+        }),
+      ]);
+    } catch {
+      // Older or stricter engines only accept plain text.
+      await navigator.clipboard.writeText(text);
+    }
+  }
+
+  // Pinned columns freeze against the left edge. Their offsets are measured rather than
+  // guessed: column widths depend on the header's own content and the fit-to-content mode.
+  const GUTTER_WIDTH = 12;
+  // A frozen region wider than this stops being a reference and starts being the table.
+  const PIN_LIMIT = 0.3;
+  let pinLefts = $state(new Map<string, number>());
+  let pinRefused = $state<string | null>(null);
+  const lastPinned = $derived(pinnedColumns[pinnedColumns.length - 1] ?? null);
+
+  function headerFor(name: string): HTMLTableCellElement | null {
+    return scrollElement?.querySelector<HTMLTableCellElement>(`th[data-column="${CSS.escape(name)}"]`) ?? null;
+  }
+  // A column and the insertion slot that trails it freeze as one unit.
+  function pinnedWidth(header: HTMLTableCellElement): number {
+    return header.getBoundingClientRect().width + (header.nextElementSibling?.getBoundingClientRect().width ?? 0);
+  }
+
+  $effect(() => {
+    void columns;
+    void fitColumnsToContent;
+    void rowDensity;
+    const lefts = new Map<string, number>();
+    let x = GUTTER_WIDTH;
+    for (const name of pinnedColumns) {
+      const header = headerFor(name);
+      if (!header) continue;
+      lefts.set(name, x);
+      x += pinnedWidth(header);
+    }
+    pinLefts = lefts;
+  });
+
+  function requestPin(column: ColumnInfo) {
+    if (pinnedColumns.includes(column.name)) { onTogglePin(column); return; }
+    const header = headerFor(column.name);
+    const room = (scrollElement?.clientWidth ?? 0) * PIN_LIMIT - GUTTER_WIDTH;
+    const used = pinnedColumns.reduce((total, name) => { const pinned = headerFor(name); return total + (pinned ? pinnedWidth(pinned) : 0); }, 0);
+    if (!header || used + pinnedWidth(header) > room) {
+      pinRefused = column.name;
+      setTimeout(() => { if (pinRefused === column.name) pinRefused = null; }, 400);
+      return;
+    }
+    onTogglePin(column);
+  }
+
   function focusEditor(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.setSelectionRange(node.value.length, node.value.length); }); }
   function positionTailAction(event: PointerEvent) {
     const button = event.currentTarget as HTMLButtonElement;
@@ -280,15 +405,23 @@
   }
 </script>
 
-<svelte:window onclick={closeContextMenuOnClick} onkeydown={closeContextMenuOnKeydown} />
+<svelte:window
+  onclick={closeContextMenuOnClick}
+  onkeydown={(event) => { shiftHeld = event.shiftKey; closeContextMenuOnKeydown(event); }}
+  onkeyup={(event) => { shiftHeld = event.shiftKey; }}
+  onblur={() => { shiftHeld = false; dragging = false; }}
+  onpointerup={() => { dragging = false; }}
+/>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader}>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader} onkeydown={copyKeydown}>
   <div class="table-canvas" class:fit-columns={fitColumnsToContent}>
-    <table role="grid" aria-rowcount={rows.length + 1} aria-colcount={bodyColumns.length}>
+    <table role="grid" aria-rowcount={rows.length + 1} aria-colcount={bodyColumns.length + 1} class:row-hover={shiftHeld || rowMode}>
     <caption class="sr-only">{caption}</caption>
     <thead>
       <tr aria-rowindex="1">
+        <th class="gutter gutter-head" scope="col"><span class="sr-only">Row</span></th>
         {#each columns as column, columnIndex (column.name)}
           <ColumnHeaderCell
             {column}
@@ -302,6 +435,9 @@
             canHide={columns.length > 1}
             canReorder={canEdit}
             dragging={draggedName === column.name}
+            pinned={pinnedColumns.includes(column.name)}
+            pinnedLeft={pinLefts.get(column.name) ?? null}
+            pinRefused={pinRefused === column.name}
             dropPlacement={dropTarget?.name === column.name ? dropTarget.placement : null}
             renaming={renamingColumn?.original === column.name}
             renameValue={renamingColumn?.original === column.name ? renamingColumn.value : column.name}
@@ -310,6 +446,7 @@
             onfilter={(trigger) => onFilter(column, trigger)}
             onprofile={(trigger) => onProfile(column, trigger)}
             onhide={() => onHide(column.name)}
+            onpin={() => requestPin(column)}
             onstartrename={() => onStartRename(column)}
             onrenamevalue={onRenameValue}
             oncommitrename={onCommitRename}
@@ -319,21 +456,31 @@
             ondragover={(event) => previewHeader(event, column.name)}
             ondragend={endHeaderDrag}
           />
-          <th class="insertion-slot" scope="col"><InsertionHandle left={column.name} right={columns[columnIndex + 1]?.name ?? null} disabled={!canInsert} onclick={(event) => onInsert(column, columns[columnIndex + 1] ?? null, event.currentTarget as HTMLButtonElement)} /></th>
+          <th class="insertion-slot" scope="col" class:pinned={pinLefts.has(column.name)} class:pin-edge={lastPinned === column.name} style:left={pinLefts.has(column.name) ? `${pinLefts.get(column.name)! + (headerFor(column.name)?.getBoundingClientRect().width ?? 0)}px` : undefined}><InsertionHandle left={column.name} right={columns[columnIndex + 1]?.name ?? null} disabled={!canInsert} onclick={(event) => onInsert(column, columns[columnIndex + 1] ?? null, event.currentTarget as HTMLButtonElement)} /></th>
         {/each}
       </tr>
     </thead>
     <tbody>
       {#if padTop > 0}
-        <tr class="spacer" aria-hidden="true"><td colspan={bodyCellCount} style:height={`${padTop}px`}></td></tr>
+        <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${padTop}px`}></td></tr>
       {/if}
       {#each windowRows as row, windowIndex (row)}
         {@const index = firstRow + windowIndex}
+        {@const rowActive = !!range && index >= range.top && index <= range.bottom}
         <tr aria-rowindex={index + 2} class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
-          {#each bodyColumns as column (column.name)}
+          <th
+            scope="row"
+            class="gutter"
+            class:row-active={rowActive}
+            title="Select row"
+            onpointerdown={(event) => startRowSelect(event, index)}
+            onpointerenter={() => extendRow(index)}
+          ><span class="sr-only">Row {rowOffset + index + 1}</span></th>
+          {#each bodyColumns as column, columnIndex (column.name)}
             {@const selected = selectedCell?.row === index && selectedCell.column === column.name}
             {@const expanded = selected && selectedCell?.expanded}
             {@const editing = editingCell?.row === index && editingCell.column === column.name}
+            {@const inRange = !!range && rowActive && columnIndex >= range.left && columnIndex <= range.right}
             <td
               tabindex={index === activeRow && column.name === activeColumn ? 0 : -1}
               aria-selected={selected}
@@ -342,6 +489,11 @@
               class:selected-cell={selected}
               class:expanded-cell={expanded}
               class:editing-cell={editing}
+              class:in-range={inRange}
+              class:pinned={pinLefts.has(column.name)}
+              style:left={pinLefts.get(column.name) === undefined ? undefined : `${pinLefts.get(column.name)}px`}
+              onpointerdown={(event) => startSelect(event, index, columnIndex)}
+              onpointerenter={() => extendTo(index, columnIndex)}
               onclick={(event) => { onSelectCell(event, index, column.name); onExpandCell(event, index, column.name); }}
               ondblclick={() => { if (!editing) onFilterCategoricalCell(column, row[column.name]); }}
               onkeydown={(event) => onCellKeydown(event, index, column.name)}
@@ -366,12 +518,12 @@
                 {/if}
               {/if}
             </td>
-            <td class="insertion-gap" aria-hidden="true"></td>
+            <td class="insertion-gap" aria-hidden="true" class:pinned={pinLefts.has(column.name)} class:pin-edge={lastPinned === column.name} style:left={pinLefts.has(column.name) ? `${pinLefts.get(column.name)! + (headerFor(column.name)?.getBoundingClientRect().width ?? 0)}px` : undefined}></td>
           {/each}
         </tr>
       {/each}
       {#if padBottom > 0}
-        <tr class="spacer" aria-hidden="true"><td colspan={bodyCellCount} style:height={`${padBottom}px`}></td></tr>
+        <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${padBottom}px`}></td></tr>
       {/if}
     </tbody>
     </table>
@@ -408,6 +560,7 @@
 <style>
   .table-scroll { width: 100%; height: 100%; overflow: auto; }
   .table-canvas { min-width: 100%; min-height: 100%; display: flex; align-items: stretch; }
+  tbody { user-select: none; }
   table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: 12px var(--font-mono); }
   .table-canvas.fit-columns table { width: max-content; min-width: 0; flex: none; }
   .add-column-tail {
@@ -482,7 +635,7 @@
   td {
     height: var(--row-height, 34px);
     max-width: 320px;
-    padding: 0 10px;
+    padding: 0 8px;
     overflow: hidden;
     border-right: 1px solid var(--line-soft-2);
     border-bottom: 1px solid var(--line-soft-2);
@@ -490,16 +643,70 @@
     white-space: nowrap;
     text-overflow: ellipsis;
     background: var(--surface);
+    transition: background-color 90ms ease;
   }
-  tbody tr.striped td { background: var(--surface-inset); }
-  tbody tr:hover td { background: var(--action-tint); }
+  tbody tr.striped td, tbody tr.striped .gutter { background: var(--surface-inset); }
   tbody tr.spacer td { padding: 0; border: 0; background: var(--surface); }
-  tbody tr.spacer:hover td { background: var(--surface); }
-  tbody tr.aggregate-row td { background: var(--surface); }
-  tbody tr.aggregate-row.aggregate-row-alt td { background: var(--surface-inset); }
+  tbody tr.aggregate-row td, tbody tr.aggregate-row .gutter { background: var(--surface); }
+  tbody tr.aggregate-row.aggregate-row-alt td, tbody tr.aggregate-row.aggregate-row-alt .gutter { background: var(--surface-inset); }
+  /* Hover shades the cell under the pointer; holding shift widens it to the whole row. */
+  tbody td[data-column]:hover { background: var(--action-tint); }
+  table.row-hover tbody tr:hover td[data-column],
+  tbody tr:has(> .gutter:hover) td[data-column] { background: var(--action-tint); }
+  tbody td[data-column].in-range { background: color-mix(in srgb, var(--action) 12%, var(--surface)); }
+  .gutter {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    box-sizing: border-box;
+    width: 12px;
+    min-width: 12px;
+    padding: 0;
+    border-bottom: 1px solid var(--line-soft-2);
+    background: var(--surface);
+    cursor: pointer;
+    user-select: none;
+    transition: color 90ms ease, background-color 90ms ease;
+  }
+  /* A resting dot marks the strip as a target; it grows into the row's own bar on hover. */
+  .gutter::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 3px;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--faint);
+    opacity: 0.55;
+    translate: -50% -50%;
+    transition: height 150ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms ease, background-color 150ms ease;
+  }
+  .gutter:hover, .gutter.row-active { background: var(--surface-hover); }
+  .gutter:hover::before, .gutter.row-active::before {
+    height: calc(100% - 9px);
+    opacity: 1;
+    background: var(--action);
+  }
+  th.gutter-head::before, tbody tr.spacer .gutter::before { content: none; }
+  th.gutter-head {
+    top: 0;
+    z-index: 5;
+    height: 48px;
+    border-bottom: 1px solid var(--line);
+    background:
+      repeating-linear-gradient(-45deg, var(--line-strong) 0 1px, transparent 1px 5px),
+      var(--surface-3);
+    cursor: default;
+  }
+  tbody tr.spacer .gutter { border-bottom: 0; cursor: default; }
+  td.pinned, th.insertion-slot.pinned { position: sticky; z-index: 3; }
+  th.insertion-slot.pinned { z-index: 5; }
+  .pin-edge { box-shadow: 6px 0 8px -8px rgba(31, 37, 51, 0.55); }
   td.expanded-cell { white-space: normal; overflow: visible; position: relative; z-index: 2; box-shadow: var(--shadow-popover); }
   td.selected-cell { position: relative; z-index: 1; box-shadow: inset 0 0 0 2px var(--action); }
   td.editing-cell { padding: 0; overflow: visible; }
+  td.editing-cell input { user-select: text; }
   td.editing-cell input { width: 100%; min-width: 120px; height: 100%; padding: 0 9px; border: 0; outline: 2px solid var(--action); outline-offset: -2px; background: var(--surface); color: var(--ink); font: inherit; }
   td.editing-cell input:disabled { opacity: 0.7; }
   .collapse { display: block; margin-top: 4px; font-size: 10.5px; color: var(--action); background: none; border: none; }
@@ -509,6 +716,7 @@
   .context-menu kbd { margin-left: auto; font: 9.5px var(--font-mono); color: var(--faint); }
   .context-menu button:not(:disabled):hover, .context-menu button:not(:disabled):focus-visible { background: var(--surface-hover); }
   @media (prefers-reduced-motion: reduce) {
+    td, .gutter, .gutter::before { transition: none; }
     .add-column-tail { animation: none; transition: none; }
     .add-column-tail::before { display: none; }
     .tail-action { transition: none; }

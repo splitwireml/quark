@@ -18,6 +18,9 @@
     canHide: boolean;
     canReorder: boolean;
     dragging: boolean;
+    pinned: boolean;
+    pinnedLeft: number | null;
+    pinRefused: boolean;
     dropPlacement: Placement | null;
     renaming: boolean;
     renameValue: string;
@@ -26,6 +29,7 @@
     onfilter: (trigger: HTMLButtonElement) => void;
     onprofile: (trigger: HTMLButtonElement) => void;
     onhide: () => void;
+    onpin: () => void;
     onstartrename: () => void;
     onrenamevalue: (value: string) => void;
     oncommitrename: () => void;
@@ -37,8 +41,8 @@
   };
 
   let {
-    column, fitColumnsToContent, labelParts, sort, sortRank, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, dropPlacement,
-    renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onstartrename, onrenamevalue,
+    column, fitColumnsToContent, labelParts, sort, sortRank, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, pinned, pinnedLeft, pinRefused, dropPlacement,
+    renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onpin, onstartrename, onrenamevalue,
     oncommitrename, oncancelrename, oncontextmenu, ondragstart, ondragover, ondragend
   }: Props = $props();
 
@@ -50,7 +54,7 @@
   let pressed = $state(false);
   let sortIcon = $derived(sort?.direction === 'asc' ? 'sort-asc' as const : sort?.direction === 'desc' ? 'sort-desc' as const : 'sort' as const);
   let title = $derived(
-    `${column.name} — double-click to rename${hideable ? ' · shift-double-click to hide' : ''}`,
+    `${column.name} — double-click to rename${hideable ? ' · shift-double-click to hide' : ''} · shift-click to ${pinned ? 'unpin' : 'pin left'}`,
   );
 
   function focusRename(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.select(); }); }
@@ -62,6 +66,11 @@
   function onHeaderPointerDown(event: PointerEvent) {
     if (!draggable || (event.target as HTMLElement).closest('button, input')) return;
     pressed = true;
+  }
+  function onHeaderClick(event: MouseEvent) {
+    if (!event.shiftKey || renaming || (event.target as HTMLElement).closest('button, input')) return;
+    event.preventDefault();
+    onpin();
   }
   function onHeaderDoubleClick(event: MouseEvent) {
     if (renaming || (event.target as HTMLElement).closest('button, input')) return;
@@ -85,13 +94,17 @@
   onpointerup={() => (pressed = false)}
   onpointerleave={() => (pressed = false)}
   onpointercancel={() => (pressed = false)}
+  onclick={onHeaderClick}
   ondblclick={onHeaderDoubleClick}
   class:dragging
+  class:pinned
+  class:refused={pinRefused}
   class:pressed
   class:grabbable={draggable}
   class:drop-before={dropPlacement === 'before'}
   class:drop-after={dropPlacement === 'after'}
   style:min-width={fitColumnsToContent ? '0' : `${width}px`}
+  style:left={pinnedLeft === null ? undefined : `${pinnedLeft}px`}
 >
   <div class="head">
     <div class="label">
@@ -104,6 +117,7 @@
           {/each}
         </strong>
         <small>{column.type}</small>
+        {#if pinned}<span class="pin-mark" aria-label="Pinned" data-tip="Pinned — shift-click to unpin"><Icon name="pin" size={11} /></span>{/if}
         {#if canQuery}
           <div class="actions">
             <button type="button" class:on={!!sort} onclick={onsort} aria-label={`Sort ${column.name}`} data-tip="Sort">
@@ -153,6 +167,17 @@
   th.grabbable { cursor: grab; }
   th.pressed { cursor: grabbing; background: var(--surface-hover); }
   th.dragging { opacity: 0.55; }
+  th.pinned { z-index: 6; }
+  .pin-mark { display: inline-flex; flex: none; color: var(--action); }
+  th.refused .head { animation: pin-refused 260ms ease; }
+  @keyframes pin-refused {
+    0%, 100% { translate: 0; }
+    30% { translate: -3px 0; }
+    70% { translate: 3px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    th.refused .head { animation: none; }
+  }
   th.drop-before { box-shadow: inset 3px 0 var(--action); }
   th.drop-after { box-shadow: inset -3px 0 var(--action); }
 
