@@ -33,8 +33,8 @@
     storageError: string;
     rowDensity: RowDensity;
     setRowDensity: (density: RowDensity) => void;
-    tableExpanded: boolean;
-    onToggleExpanded: () => void;
+    fitColumnsToContent: boolean;
+    onToggleFitColumns: () => void;
     columnsMenu: Snippet;
     joinMenu: Snippet;
     aggregateMenu: Snippet;
@@ -47,7 +47,7 @@
     isSqlMode, onBackToFullTable, onBackToBuilder,
     columnSearch, setColumnSearch, onFindColumn, onColumnSearchKeydown, columnMatchCount,
     storageError,
-    rowDensity, setRowDensity, tableExpanded, onToggleExpanded,
+    rowDensity, setRowDensity, fitColumnsToContent, onToggleFitColumns,
     columnsMenu, joinMenu, aggregateMenu, dedupeMenu
   }: Props = $props();
 
@@ -107,9 +107,10 @@
         {/if}
       </div>
       <IconButton
-        type="button" size="md" icon={tableExpanded ? 'collapse' : 'expand'}
-        label={tableExpanded ? 'Exit expanded table view' : 'Expand table to fill the window'}
-        onclick={onToggleExpanded}
+        type="button" size="md" icon="fit-columns" active={fitColumnsToContent}
+        label={fitColumnsToContent ? 'Use standard column widths' : 'Fit columns to content'}
+        aria-pressed={fitColumnsToContent}
+        onclick={onToggleFitColumns}
       />
     </div>
     <div class="column-search">

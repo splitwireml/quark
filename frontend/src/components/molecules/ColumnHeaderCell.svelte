@@ -7,6 +7,7 @@
 
   type Props = {
     column: ColumnInfo;
+    fitColumnsToContent: boolean;
     labelParts: LabelPart[];
     sort: SortCondition | undefined;
     filtered: boolean;
@@ -34,7 +35,7 @@
   };
 
   let {
-    column, labelParts, sort, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, dropPlacement,
+    column, fitColumnsToContent, labelParts, sort, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, dropPlacement,
     renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onstartrename, onrenamevalue,
     oncommitrename, oncancelrename, oncontextmenu, ondragstart, ondragover, ondragend
   }: Props = $props();
@@ -57,7 +58,7 @@
   class:dragging
   class:drop-before={dropPlacement === 'before'}
   class:drop-after={dropPlacement === 'after'}
-  style:min-width={`${width}px`}
+  style:min-width={fitColumnsToContent ? '0' : `${width}px`}
 >
   <div class="head">
     <div class="label">

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import Icon from '../atoms/Icon.svelte';
   import InsertionHandle from '../atoms/InsertionHandle.svelte';
   import ColumnHeaderCell from '../molecules/ColumnHeaderCell.svelte';
   import type { ColumnInfo, FilterCondition, SortCondition } from '../../lib/types';
@@ -16,6 +17,7 @@
     rows: Record<string, unknown>[];
     caption: string;
     rowDensity: string;
+    fitColumnsToContent: boolean;
     canQuery: boolean;
     canInsert: boolean;
     canEdit: boolean;
@@ -58,7 +60,7 @@
   };
 
   let {
-    columns, bodyColumns, rows, caption, rowDensity, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
+    columns, bodyColumns, rows, caption, rowDensity, fitColumnsToContent, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
@@ -98,6 +100,7 @@
   const padTop = $derived(firstRow * rowHeight);
   const padBottom = $derived(Math.max(0, (rows.length - lastRow) * rowHeight));
   const bodyCellCount = $derived(bodyColumns.length * 2);
+  const lastColumn = $derived(columns[columns.length - 1]);
 
   // Mirrors the --row-height values set per density in App.svelte.
   const ROW_HEIGHTS: Record<string, number> = { compact: 26, default: DEFAULT_ROW_HEIGHT, comfortable: 42 };
@@ -260,6 +263,12 @@
   });
 
   function focusEditor(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.setSelectionRange(node.value.length, node.value.length); }); }
+  function positionTailAction(event: PointerEvent) {
+    const button = event.currentTarget as HTMLButtonElement;
+    const rect = button.getBoundingClientRect();
+    button.style.setProperty('--tail-x', `${event.clientX - rect.left + 12}px`);
+    button.style.setProperty('--tail-y', `${event.clientY - rect.top + 12}px`);
+  }
   function editorKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); onCancelEdit(); return; }
@@ -273,13 +282,15 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader}>
-  <table role="grid" aria-rowcount={rows.length + 1} aria-colcount={bodyColumns.length}>
+  <div class="table-canvas" class:fit-columns={fitColumnsToContent}>
+    <table role="grid" aria-rowcount={rows.length + 1} aria-colcount={bodyColumns.length}>
     <caption class="sr-only">{caption}</caption>
     <thead>
       <tr aria-rowindex="1">
         {#each columns as column, columnIndex (column.name)}
           <ColumnHeaderCell
             {column}
+            {fitColumnsToContent}
             labelParts={columnLabelParts(column.name)}
             sort={sortFor(column.name)}
             filtered={filters.some((filter) => filter.column === column.name)}
@@ -360,7 +371,20 @@
         <tr class="spacer" aria-hidden="true"><td colspan={bodyCellCount} style:height={`${padBottom}px`}></td></tr>
       {/if}
     </tbody>
-  </table>
+    </table>
+    {#if fitColumnsToContent && lastColumn}
+      <button
+        type="button"
+        class="add-column-tail"
+        disabled={!canInsert}
+        aria-label={`Add column after ${lastColumn.name}`}
+        onpointermove={positionTailAction}
+        onclick={(event) => onInsert(lastColumn, null, event.currentTarget)}
+      >
+        <span class="tail-action"><Icon name="plus" size={14} /> Add column</span>
+      </button>
+    {/if}
+  </div>
 </div>
 
 {#if contextMenu}
@@ -380,7 +404,76 @@
 
 <style>
   .table-scroll { width: 100%; height: 100%; overflow: auto; }
+  .table-canvas { min-width: 100%; min-height: 100%; display: flex; align-items: stretch; }
   table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: 12px var(--font-mono); }
+  .table-canvas.fit-columns table { width: max-content; min-width: 0; flex: none; }
+  .add-column-tail {
+    position: relative;
+    min-width: 72px;
+    flex: 1 0 72px;
+    display: flex;
+    align-items: flex-start;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    border-left: 1px solid var(--line-soft);
+    background-color: var(--surface-inset);
+    background-image:
+      linear-gradient(to bottom, transparent calc(var(--row-height, 34px) - 1px), var(--line-soft-2) calc(var(--row-height, 34px) - 1px)),
+      linear-gradient(to right, transparent 31px, var(--line-soft-2) 31px, var(--line-soft-2) 32px, transparent 32px);
+    background-position: 0 0;
+    background-size: 100% var(--row-height, 34px), 32px 100%;
+    color: var(--muted);
+    cursor: pointer;
+    isolation: isolate;
+    text-align: left;
+    animation: tail-reveal 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .add-column-tail::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: linear-gradient(100deg, transparent 36%, color-mix(in srgb, var(--action) 7%, transparent) 48%, color-mix(in srgb, var(--action) 3%, transparent) 54%, transparent 66%);
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  .add-column-tail:hover:not(:disabled)::before,
+  .add-column-tail:focus-visible::before {
+    animation: data-pulse 1.152s linear infinite;
+  }
+  .tail-action {
+    position: absolute;
+    left: clamp(8px, var(--tail-x, 12px), calc(100% - 108px));
+    top: clamp(8px, var(--tail-y, 60px), calc(100% - 36px));
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    margin: 0;
+    padding: 0 9px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    box-shadow: 0 5px 14px -11px rgba(31, 37, 51, 0.65);
+    font: 500 11px var(--font-ui);
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: border-color 140ms ease, color 140ms ease, opacity 140ms ease;
+  }
+  .add-column-tail:hover:not(:disabled) .tail-action,
+  .add-column-tail:focus-visible .tail-action { border-color: var(--line-strong); color: var(--ink); opacity: 1; }
+  .add-column-tail:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; }
+  .add-column-tail:disabled { cursor: default; opacity: 0.55; }
+  @keyframes tail-reveal { from { opacity: 0; background-position: 4px 0; } }
+  @keyframes data-pulse {
+    0% { opacity: 0; transform: translateX(-100%); }
+    24% { opacity: 1; }
+    100% { opacity: 0; transform: translateX(100%); }
+  }
   .insertion-slot { position: sticky; top: 0; z-index: 4; width: 2px; min-width: 2px; height: 48px; padding: 0; border: 0; border-bottom: 1px solid var(--line); background: var(--surface-3); }
   td.insertion-gap { width: 2px; min-width: 2px; padding: 0; border-right: 0; background: color-mix(in srgb, var(--success) 4%, var(--surface)); }
   td {
@@ -411,4 +504,9 @@
   .context-menu strong { min-width: 0; padding: 8px 9px; overflow: hidden; border-bottom: 1px solid var(--line); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
   .context-menu button { min-height: 36px; padding: 0 9px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); text-align: left; }
   .context-menu button:not(:disabled):hover, .context-menu button:not(:disabled):focus-visible { background: var(--surface-hover); }
+  @media (prefers-reduced-motion: reduce) {
+    .add-column-tail { animation: none; transition: none; }
+    .add-column-tail::before { display: none; }
+    .tail-action { transition: none; }
+  }
 </style>

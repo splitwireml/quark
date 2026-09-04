@@ -89,7 +89,7 @@
   let reorderOrigin = $state.raw<string[] | null>(null);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
-  let tableExpanded = $state(false);
+  let fitColumnsToContent = $state(false);
   let rowDensity = $state<RowDensity>('default');
   let page = $state(1);
   let pageSize = $state(100);
@@ -1021,7 +1021,6 @@
   }
 
   function closeSql(_restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; }
-  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; versionsOpen = false; } tableExpanded = !tableExpanded; }
   function resetSql(dataset: BaseViewInfo | undefined) { closeSql(); queryMode = 'builder'; sqlText = dataset?.sql ?? ''; sqlBase = ''; activeSql = ''; activeSqlNodeId = ''; sqlError = ''; }
 
   function discardPending(): boolean {
@@ -1162,7 +1161,6 @@
     if (event.key === 'Escape') {
       if (inspectorMode) closeInspector();
       else if (sqlOpen) closeSql();
-      else if (tableExpanded) tableExpanded = false;
       else railOpen = false;
       return;
     }
@@ -1218,7 +1216,7 @@
     error = '';
     recordingNotice = '';
     queryMenuOpen = null;
-    tableExpanded = false;
+    fitColumnsToContent = false;
     selectedCell = null;
     editingCell = null;
     railOpen = false;
@@ -1995,7 +1993,7 @@
   {#snippet titlebar()}
     <TitleBar
       project={activeProject!} currentView={currentHistory} {railCollapsed}
-      inert={!!inspectorMode || tableExpanded}
+      inert={!!inspectorMode}
       onProjects={exitProject}
       onToggleRailCollapsed={() => railCollapsed = !railCollapsed}
       onOpenRail={() => railOpen = true}
@@ -2005,7 +2003,7 @@
   {#snippet rail()}
     <SourceRail
       {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen} {highlightToken}
-      inert={!!inspectorMode || tableExpanded}
+      inert={!!inspectorMode}
       joinPicking={queryMenuOpen === 'joins' && joinStep === 0} {joinSourceSide} {joinLeftViewId} {joinRightViewId}
       {joinLeftSourceId} {joinRightSourceId}
       onSelectSource={(id) => { void loadProjectSource(id); }}
@@ -2053,7 +2051,7 @@
             canUndo={undoStack.length > 0 && undoStack[undoStack.length - 1].historyId === currentHistory?.id}
             onUndo={() => void undoLastChange()}
             {exportOpen}
-            inert={!!inspectorMode || tableExpanded}
+            inert={!!inspectorMode}
           >
             {#snippet versionMenu()}
               <VersionMenu
@@ -2075,11 +2073,11 @@
           </DatasetHead>
           {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
             {#if error}
-              <div class="banner error-banner" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => loadData()}>Retry</button></div>
+              <div class="banner error-banner" role="alert"><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => loadData()}>Retry</button></div>
             {/if}
             {#if selectedDataset}
               <QueryConditionBar
-                inert={!!inspectorMode || tableExpanded || loadingData}
+                inert={!!inspectorMode || loadingData}
                 showBuilder={canQuery}
                 {filters} {sorts} {dedupeColumns}
                 {activeSql} {filterSummary}
@@ -2094,7 +2092,7 @@
                 columnMatchCount={columnMatches.length}
                 {storageError}
                 {rowDensity} setRowDensity={(density) => rowDensity = density}
-                {tableExpanded} onToggleExpanded={toggleTableExpanded}
+                {fitColumnsToContent} onToggleFitColumns={() => fitColumnsToContent = !fitColumnsToContent}
               >
                 {#snippet columnsMenu()}
                   <ColumnsMenuPopover
@@ -2163,13 +2161,7 @@
                   canRun={!loadingData && !!sqlText.trim()} running={loadingData}
                 />
               {/if}
-              <div class:expanded={tableExpanded} class="data-stage">
-                {#if tableExpanded}
-                  <div class="expanded-toolbar">
-                    <span>Expanded table</span>
-                    <button onclick={toggleTableExpanded}>Back <kbd>Esc</kbd></button>
-                  </div>
-                {/if}
+              <div class="data-stage">
                 <section class="table-pane {rowDensity}" aria-label="View rows" inert={!!inspectorMode}>
                   <div class="table-card" class:recording={!!currentHistory?.pendingChanges.length} aria-busy={loadingData}>
                     {#if loadingData && !result}
@@ -2180,7 +2172,7 @@
                       <DataGridTable
                         columns={visibleColumns} bodyColumns={rowColumns} rows={result.rows}
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
-                        {rowDensity}
+                        {rowDensity} {fitColumnsToContent}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
                         onSort={cycleSort}
                         onFilter={(column, trigger) => openFilter(column, trigger)}
@@ -2301,10 +2293,6 @@
 <style>
   .workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .data-stage { flex: 1; min-height: 0; display: flex; position: relative; }
-  .data-stage.expanded { position: fixed; inset: 20px; z-index: 6; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-panel); }
-  .expanded-toolbar { flex: none; height: 40px; padding: 0 10px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12px; font-weight: 600; }
-  .expanded-toolbar button { height: 28px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--surface); font-size: 12px; }
-  .expanded-toolbar kbd { margin-left: 5px; font: 10px var(--font-mono); color: var(--faint); }
   .table-pane { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }
   .table-pane.compact { --row-height: 26px; }
   .table-pane.comfortable { --row-height: 42px; }
