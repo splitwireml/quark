@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import Icon from '../atoms/Icon.svelte';
+  import MenuPopover from '../molecules/MenuPopover.svelte';
   import Button from '../atoms/Button.svelte';
+  import ToggleChip from '../atoms/ToggleChip.svelte';
   import TextInput from '../atoms/TextInput.svelte';
   import type { ColumnInfo } from '../../lib/types';
 
@@ -193,10 +194,10 @@
 
 <svelte:window onkeydown={menuKeydown} />
 
-<details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger menu-trigger" class:active={open}><Icon name="columns" size={14} /><span class="menu-label"><span>Columns <small>{visibleCount}/{totalCount}</small></span></span></summary>
-  <div class="popover">
-    <header><strong>Columns</strong><span>{visibleCount} of {totalCount} visible</span></header>
+<MenuPopover {open} {ontoggle} icon="columns" label="Columns" hint={`${visibleCount}/${totalCount}`} width={400} flush>
+  {#snippet header()}
+    <strong>Columns</strong><span>{visibleCount} of {totalCount} visible</span>
+  {/snippet}
     <div class="search">
       <label for="column-menu-search" class="sr-only">Search columns</label>
       <TextInput id="column-menu-search" type="search" glyph="⌕" value={columnMenuSearch} oninput={(event: Event) => setColumnMenuSearch((event.currentTarget as HTMLInputElement).value)} placeholder="Search columns" />
@@ -215,10 +216,11 @@
     </div>
     <div class="type-row" role="group" aria-label="Show by type">
       {#each columnTypes as type (type)}
-        <button type="button" class="type-chip" class:on={isTypeShown(type)} disabled={typeToggleDisabled(type)} aria-pressed={isTypeShown(type)} aria-label={`${type}: ${columnTypeCounts[type] ?? 0} columns`} onclick={() => toggleShownType(type, !isTypeShown(type))}>
-          {#if isTypeShown(type)}<span class="check">✓</span>{:else}<span class="check empty"></span>{/if}
-          {type} <b>{columnTypeCounts[type] ?? 0}</b>
-        </button>
+        <ToggleChip
+          on={isTypeShown(type)} label={type} badge={columnTypeCounts[type] ?? 0}
+          disabled={typeToggleDisabled(type)} aria-label={`${type}: ${columnTypeCounts[type] ?? 0} columns`}
+          onclick={() => toggleShownType(type, !isTypeShown(type))}
+        />
       {/each}
     </div>
     <div class="threshold-row">
@@ -263,29 +265,12 @@
         <p class="muted">No matching columns.</p>
       {/each}
     </div>
-    <footer><span>Dedupe keys stay visible</span><span class="esc">esc</span></footer>
-  </div>
-</details>
+  {#snippet footer()}
+    <span class="hint">Dedupe keys stay visible</span><span class="esc">esc</span>
+  {/snippet}
+</MenuPopover>
 
 <style>
-  .popover-host { position: relative; }
-  summary { list-style: none; cursor: pointer; }
-  summary::-webkit-details-marker { display: none; }
-  .popover {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    z-index: 10;
-    width: 400px;
-    border-radius: var(--radius-xl);
-    background: var(--surface);
-    border: 1px solid var(--line-strong);
-    box-shadow: var(--shadow-popover-wide);
-    overflow: hidden;
-  }
-  header { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }
-  header strong { font-size: 11.5px; }
-  header span { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
   .search { padding: 9px 11px 0; }
   .regex-panel { display: grid; gap: 6px; padding: 9px 11px 0; }
   .regex-panel > label { font-size: 10.5px; color: var(--muted); }
@@ -294,21 +279,6 @@
   .invert { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; color: var(--ink-2); }
   .regex-error { margin: 0; font-size: 11px; color: var(--error); }
   .type-row { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 11px 0; }
-  .type-chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    height: 24px; padding: 0 8px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--control-border);
-    background: var(--surface);
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--muted);
-  }
-  .type-chip.on { border-color: var(--action-tint-border); background: var(--action-tint); color: var(--action-dark); }
-  .type-chip .check { width: 11px; height: 11px; display: inline-flex; align-items: center; justify-content: center; border-radius: 2px; font-size: 7.5px; }
-  .type-chip.on .check { background: var(--action); color: #fff; }
-  .type-chip .check.empty { border: 1px solid var(--control-border); }
-  .type-chip:disabled { opacity: 0.5; }
   .threshold-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 9px 11px 11px; border-bottom: 1px solid var(--line-soft); }
   .threshold { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-2); }
   .threshold input { width: 34px; height: 22px; text-align: center; border-radius: var(--radius-sm); border: 1px solid var(--control-border); }
@@ -340,6 +310,6 @@
   .move-actions button:hover:not(:disabled) { border-color: var(--faint); color: var(--ink); }
   .move-actions button:disabled { opacity: 0.3; }
   .muted { padding: 12px; font-size: 12px; color: var(--muted); }
-  footer { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 11px; border-top: 1px solid var(--line-soft); background: var(--surface-2); font-size: 11px; color: var(--faint); }
-  .esc { margin-left: auto; font-family: var(--font-mono); color: var(--faint); }
+  .hint { font-size: 11px; color: var(--faint); }
+  .esc { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--faint); }
 </style>

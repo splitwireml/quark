@@ -1,9 +1,7 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import Button from '../atoms/Button.svelte';
-  import Checkbox from '../atoms/Checkbox.svelte';
+  import { dismissable } from '../../lib/dismiss';
 
-  type Option = { value: string; label: string; description?: string };
+  type Option = { value: string; label: string };
   type Props = {
     label: string;
     options: Option[];
@@ -13,130 +11,57 @@
     disabled?: boolean;
   };
 
-  let { label, options, selected, onchange, placeholder = 'Select…', disabled = false }: Props = $props();
+  let { label, options, selected, onchange, placeholder = 'Choose keys', disabled = false }: Props = $props();
   let open = $state(false);
-  let activeIndex = $state(0);
-  let root: HTMLDivElement;
-  let triggerHost: HTMLDivElement;
-  let listbox = $state<HTMLDivElement>();
+  let search = $state('');
   let selectedLabels = $derived(selected.map((value) => options.find((option) => option.value === value)?.label ?? value));
-  let summary = $derived(selectedLabels.length === 0 ? placeholder : selectedLabels.join(' + '));
+  let summary = $derived(selectedLabels.length === 0 ? placeholder : selectedLabels.length === 1 ? selectedLabels[0] : `${selectedLabels[0]} +${selectedLabels.length - 1}`);
+  let matches = $derived.by(() => {
+    const query = search.trim().toLowerCase();
+    return query ? options.filter((option) => option.label.toLowerCase().includes(query)) : options;
+  });
 
-  function optionElements() {
-    return listbox?.querySelectorAll<HTMLElement>('[role="option"]') ?? [];
-  }
-
-  function focusOption(index: number) {
-    const elements = optionElements();
-    if (!elements.length) return;
-    activeIndex = (index + elements.length) % elements.length;
-    elements[activeIndex].focus();
-  }
-
-  async function show() {
-    if (disabled) return;
-    open = true;
-    const firstSelected = options.findIndex((option) => option.value === selected[0]);
-    activeIndex = firstSelected < 0 ? 0 : firstSelected;
-    await tick();
-    focusOption(activeIndex);
-  }
-
-  async function close(restoreFocus = false) {
-    open = false;
-    if (restoreFocus) {
-      await tick();
-      triggerHost.querySelector('button')?.focus();
-    }
-  }
-
-  function toggle(value: string, checked = !selected.includes(value)) {
-    onchange(checked ? [...selected, value] : selected.filter((item) => item !== value));
-  }
-
-  function onTriggerKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && open) {
-      event.preventDefault();
-      close(true);
-    } else if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(event.key)) {
-      event.preventDefault();
-      show();
-    }
-  }
-
-  function onOptionKeydown(event: KeyboardEvent, option: Option, index: number) {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      focusOption(index + (event.key === 'ArrowDown' ? 1 : -1));
-    } else if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      toggle(option.value);
-    }
-  }
-
-  function onWindowClick(event: MouseEvent) {
-    if (open && !root.contains(event.target as Node)) close();
-  }
-
-  function onWindowKeydown(event: KeyboardEvent) {
-    if (open && event.key === 'Escape') {
-      event.preventDefault();
-      close(true);
-    }
+  function toggle(value: string) {
+    onchange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
   }
 </script>
 
-<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
-
-<div class="field" bind:this={root}>
+<div class="field" use:dismissable={() => open = false}>
   <span class="label">{label}</span>
-  <div class="trigger-host" bind:this={triggerHost}>
-    <Button
-      type="button"
-      class="trigger"
-      style="width: 100%; min-width: 0; min-height: 32px; position: relative; overflow: hidden;"
-      aria-label={`${label}: ${summary}`}
-      aria-haspopup="listbox"
-      aria-expanded={open}
-      title={selectedLabels.join(' + ') || undefined}
-      {disabled}
-      onclick={() => open ? close() : show()}
-      onkeydown={onTriggerKeydown}
-    >
-      <span class="summary" class:placeholder={selected.length === 0}>{summary}</span>
-      <span class="chevron" aria-hidden="true">⌄</span>
-    </Button>
-  </div>
+  <button
+    type="button" class="trigger" class:open
+    aria-label={`${label}: ${summary}`} aria-haspopup="listbox" aria-expanded={open}
+    title={selectedLabels.join(' + ') || undefined} {disabled}
+    onclick={() => open = !open}
+  >
+    <span class="summary" class:placeholder={selected.length === 0}>{summary}</span>
+    <span class="count">{selected.length || ''}</span>
+    <span class="chevron" aria-hidden="true">⌄</span>
+  </button>
 
   {#if open}
-    <div class="popover">
-      <div class="list" bind:this={listbox} role="listbox" aria-label={label} aria-multiselectable="true">
-        {#each options as option, index (option.value)}
-          <div
-            class="option"
-            class:selected={selected.includes(option.value)}
-            role="option"
-            aria-selected={selected.includes(option.value)}
-            tabindex="-1"
-            onclick={() => toggle(option.value)}
-            onkeydown={(event) => onOptionKeydown(event, option, index)}
-            onfocus={() => activeIndex = index}
-          >
-            <Checkbox
-              checked={selected.includes(option.value)}
-              label={option.label}
-              onchange={(checked) => toggle(option.value, checked)}
-              onclick={(event: MouseEvent) => event.stopPropagation()}
-            />
-            {#if option.description}<small>{option.description}</small>{/if}
-          </div>
+    <div class="panel">
+      <label class="search">
+        <span class="sr-only">Search {label}</span>
+        <span aria-hidden="true">⌕</span>
+        <input type="search" bind:value={search} placeholder="Search columns" />
+      </label>
+      <div class="options" role="listbox" aria-label={label} aria-multiselectable="true">
+        {#each matches as option (option.value)}
+          {@const on = selected.includes(option.value)}
+          <button type="button" class="option" class:on role="option" aria-selected={on} onclick={() => toggle(option.value)}>
+            <span class="box" aria-hidden="true">{on ? '✓' : ''}</span>
+            <span class="option-label" title={option.label}>{option.label}</span>
+            {#if on}<small>{selected.indexOf(option.value) + 1}</small>{/if}
+          </button>
         {:else}
-          <span class="empty">No options</span>
+          <p class="empty">No matching columns</p>
         {/each}
       </div>
       <div class="actions">
         <span>{selected.length} selected</span>
-        <Button variant="ghost" type="button" disabled={selected.length === 0} onclick={() => onchange([])}>Clear</Button>
+        <button type="button" onclick={() => onchange([])} disabled={selected.length === 0}>Clear</button>
+        <button type="button" class="done" onclick={() => open = false}>Done</button>
       </div>
     </div>
   {/if}
@@ -144,45 +69,59 @@
 
 <style>
   .field { position: relative; display: flex; min-width: 0; flex-direction: column; gap: 5px; }
-  .label { font-size: 11px; color: var(--muted); }
-  .trigger-host { display: flex; }
-  .summary { min-width: 0; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .placeholder { color: var(--faint); }
-  .chevron { position: absolute; right: 10px; color: var(--faint); }
-  .popover {
+  .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
+  .trigger {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    height: 32px;
+    min-width: 0;
+    padding: 0 9px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    color: var(--ink-2);
+    text-align: left;
+  }
+  .trigger:hover:not(:disabled) { border-color: var(--faint); }
+  .trigger.open { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
+  .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+  .summary.placeholder { color: var(--faint); font-weight: 400; }
+  .count { min-width: 12px; text-align: right; font: 10px var(--font-mono); color: var(--faint); }
+  .chevron { flex: none; color: var(--glyph); }
+
+  .panel {
     position: absolute;
     top: calc(100% + 5px);
     left: 0;
     z-index: 20;
-    width: max(100%, 240px);
+    width: max(100%, 220px);
     overflow: hidden;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-xl);
     background: var(--surface);
     box-shadow: var(--shadow-popover);
+    animation: list-in 160ms cubic-bezier(0.32, 0.72, 0, 1);
   }
-  .list { max-height: 240px; overflow-y: auto; padding: 4px; }
-  .option {
-    min-height: 32px;
-    padding: 5px 8px;
-    border-radius: var(--radius-md);
-    color: var(--ink);
-    cursor: pointer;
-  }
+  .search { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 9px; border-bottom: 1px solid var(--line); color: var(--glyph); }
+  .search input { flex: 1; min-width: 0; border: 0; background: transparent; font-size: 11.5px; color: var(--ink); outline: none; }
+  .search input::placeholder { color: var(--faint); }
+  .options { max-height: 184px; overflow-y: auto; padding: 4px; }
+  .option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 7px; border: 0; border-radius: var(--radius-md); background: transparent; text-align: left; }
   .option:hover, .option:focus-visible { background: var(--surface-hover); }
-  .option.selected { background: var(--action-tint); }
-  .option:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; }
-  .option small { display: block; margin: 2px 0 0 20px; color: var(--faint); font-size: 10.5px; }
-  .empty { display: block; padding: 8px; font-size: 11.5px; color: var(--muted); }
-  .actions {
-    display: flex;
-    min-height: 34px;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 3px 6px 3px 10px;
-    border-top: 1px solid var(--line-soft);
-    background: var(--surface-2);
-  }
-  .actions > span { font: 10px var(--font-mono); color: var(--faint); }
+  .option.on { background: var(--action-tint); color: var(--action-dark); }
+  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border: 1px solid var(--glyph); border-radius: 2px; color: #FFFFFF; font-size: 8px; }
+  .option.on .box { border-color: var(--action); background: var(--action); }
+  .option-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--font-mono); }
+  .option small { flex: none; min-width: 16px; text-align: center; font: 9px var(--font-mono); color: var(--action-dark); }
+  .empty { margin: 0; padding: 9px; font-size: 11px; color: var(--faint); }
+  .actions { display: flex; align-items: center; gap: 4px; min-height: 34px; padding: 3px 5px 3px 9px; border-top: 1px solid var(--line); background: var(--surface-2); }
+  .actions span { margin-right: auto; font: 10px var(--font-mono); color: var(--faint); }
+  .actions button { height: 26px; padding: 0 7px; border: 0; border-radius: var(--radius-md); background: transparent; font-size: 11px; color: var(--muted); }
+  .actions button:hover:not(:disabled) { background: var(--surface-hover); color: var(--ink); }
+  .actions button:disabled { color: var(--disabled); }
+  .actions .done { color: var(--action-dark); }
+
+  @keyframes list-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 </style>

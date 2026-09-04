@@ -21,14 +21,29 @@
     sourceOpen: boolean;
     highlightToken?: number;
     inert?: boolean;
+    joinPicking?: boolean;
+    joinSourceSide?: 'left' | 'right';
+    joinLeftViewId?: string;
+    joinRightViewId?: string;
+    joinLeftSourceId?: string;
+    joinRightSourceId?: string;
     onSelectSource: (id: string) => void;
     onSelectView: (id: string) => void;
+    onPickJoinSource?: (id: string) => void;
+    onPickJoinView?: (id: string) => void;
     onToggleSource: () => void;
     onCloseRail: () => void;
     disclosure: Snippet;
   };
 
-  let { nodes, views, selectedViewId, selectedSourceId, loadedSourceIds, loadingSourceId, loadingNodes, railOpen, collapsed, sourceOpen, highlightToken = 0, inert = false, onSelectSource, onSelectView, onToggleSource, onCloseRail, disclosure }: Props = $props();
+  let {
+    nodes, views, selectedViewId, selectedSourceId, loadedSourceIds, loadingSourceId, loadingNodes,
+    railOpen, collapsed, sourceOpen, highlightToken = 0, inert = false,
+    joinPicking = false, joinSourceSide = 'right', joinLeftViewId = '', joinRightViewId = '',
+    joinLeftSourceId = '', joinRightSourceId = '',
+    onSelectSource, onSelectView, onPickJoinSource = onSelectSource, onPickJoinView = onSelectView,
+    onToggleSource, onCloseRail, disclosure
+  }: Props = $props();
   let highlighting = $state(false);
   // a CSS animation only replays once the class is removed and re-added, so drop it for one frame first
   $effect(() => {
@@ -40,32 +55,56 @@
   });
   let derivedViews = $derived(views.filter((view) => view.kind === 'derived'));
   const activeVersionLabel = (view: ViewHistory) => versionLabel(view.versions.find((item) => item.id === view.activeVersionId) ?? view.versions[view.versions.length - 1]);
+  function joinMark(id: string): string {
+    const left = id === joinLeftViewId;
+    const right = id === joinRightViewId;
+    return left && right ? 'L·R' : left ? 'L' : right ? 'R' : '';
+  }
+  function joinSelectLabel(view: ViewHistory): string {
+    const mark = joinMark(view.id);
+    const selected = mark ? ` Currently selected as ${mark === 'L·R' ? 'both Views' : mark === 'L' ? 'the left View' : 'the right View'}.` : '';
+    return `Use ${view.name} as the ${joinSourceSide} join View.${selected}`;
+  }
+  function selectSource(id: string) {
+    joinPicking ? onPickJoinSource(id) : onSelectSource(id);
+  }
+  function selectView(id: string) { joinPicking ? onPickJoinView(id) : onSelectView(id); }
 </script>
 
-<aside class:open={railOpen} class:collapsed class="rail" aria-label="Sources and Views" {inert}>
+<aside class:open={railOpen} class:collapsed class:join-picking={joinPicking} class="rail" aria-label="Sources and Views" {inert}>
   <div class="rail-head">
     <Button variant="primary" aria-expanded={sourceOpen} onclick={onToggleSource}>+ Add source</Button>
     {#if sourceOpen}<div class="disclosure">{@render disclosure()}</div>{/if}
   </div>
   <nav class="nodes" aria-label="Project Views">
-    <div class="section-title"><Eyebrow>Sources</Eyebrow><span>{nodes.length}</span></div>
+    <div class="section-title"><Eyebrow>Sources</Eyebrow><span class:picker-hint={joinPicking}>{joinPicking ? `Pick ${joinSourceSide} View` : nodes.length}</span></div>
     {#if loadingNodes}
       <p class="state">Loading sources…</p>
     {:else if nodes.length === 0}
       <p class="state">No sources yet.</p>
     {:else}
       {#each nodes as node, index (node.id)}
-        <section class="source-group" class:highlight={highlighting} style="--stagger: {index * 70}ms">
+        <section
+          class="source-group"
+          class:highlight={highlighting}
+          class:join-choice={joinPicking}
+          style="--stagger: {index * 54.6}ms; --cycle: {Math.max(nodes.length, 1) * 54.6 + 286}ms"
+        >
           <SourceTreeItem
             {node}
-            active={node.id === selectedSourceId}
+            active={joinPicking ? node.id === (joinSourceSide === 'left' ? joinLeftSourceId : joinRightSourceId) : node.id === selectedSourceId}
             loading={loadingSourceId === node.id || loadingSourceId === '*'}
             loaded={loadedSourceIds.includes(node.id)}
-            onselect={() => onSelectSource(node.id)}
+            onselect={() => selectSource(node.id)}
           />
           {#if loadedSourceIds.includes(node.id)}
             {#each views.filter((view) => view.kind === 'source' && view.sourceId === node.id) as view (view.id)}
-              <ViewTreeItem name={view.name} versionLabel={activeVersionLabel(view)} active={view.id === selectedViewId} onselect={() => onSelectView(view.id)} />
+              <ViewTreeItem
+                name={view.name} versionLabel={activeVersionLabel(view)} active={view.id === selectedViewId}
+                pickable={joinPicking} selectionMark={joinPicking ? joinMark(view.id) : ''}
+                selectLabel={joinPicking ? joinSelectLabel(view) : undefined}
+                onselect={() => selectView(view.id)}
+              />
             {:else}
               <p class="empty">No Views</p>
             {/each}
@@ -75,7 +114,12 @@
     {/if}
     <div class="section-title derived-title"><Eyebrow>Derived Views</Eyebrow><span>{derivedViews.length}</span></div>
     {#each derivedViews as view (view.id)}
-      <ViewTreeItem name={view.name} versionLabel={activeVersionLabel(view)} active={view.id === selectedViewId} onselect={() => onSelectView(view.id)} />
+      <ViewTreeItem
+        name={view.name} versionLabel={activeVersionLabel(view)} active={view.id === selectedViewId}
+        pickable={joinPicking} selectionMark={joinPicking ? joinMark(view.id) : ''}
+        selectLabel={joinPicking ? joinSelectLabel(view) : undefined}
+        onselect={() => selectView(view.id)}
+      />
     {:else}
       <p class="state">No derived Views yet.</p>
     {/each}
@@ -92,20 +136,27 @@
   .nodes { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
   .section-title { display: flex; align-items: center; justify-content: space-between; padding: 0 6px 6px; }
   .section-title span { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .section-title .picker-hint { color: var(--action-dark); }
   .derived-title { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
   .source-group { min-width: 0; margin-bottom: 8px; padding-left: 8px; border-left: 1px solid var(--line); border-radius: 0 var(--radius-md) var(--radius-md) 0; }
   .source-group.highlight { animation: source-sweep 900ms ease-out var(--stagger, 0ms) both; }
+  .source-group.join-choice:not(.highlight) { animation: join-choice-sweep var(--cycle, 520ms) ease-in-out var(--stagger, 0ms) infinite; }
+  .nodes:hover .source-group.join-choice:not(.highlight) { animation-play-state: paused; }
   @keyframes source-sweep {
     0% { background: transparent; border-left-color: var(--line); }
     22% { background: var(--action-tint); border-left-color: var(--action); }
     100% { background: transparent; border-left-color: var(--line); }
+  }
+  @keyframes join-choice-sweep {
+    0%, 18%, 100% { background: transparent; border-left-color: var(--line); }
+    6%, 12% { background: var(--action-tint); border-left-color: var(--action); }
   }
   .state, .empty { margin: 0; padding: 8px 6px; font-size: 12px; color: var(--muted); }
   .empty { padding: 4px 8px 6px; font-size: 10.5px; color: var(--faint); }
   footer { display: flex; align-items: center; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
   .backdrop { display: none; }
   @media (prefers-reduced-motion: reduce) {
-    .source-group.highlight { animation: none; }
+    .source-group.highlight, .source-group.join-choice { animation: none; }
   }
   @media (max-width: 720px) {
     .rail { position: fixed; inset: 44px 0 0 0; z-index: 20; width: min(320px, 88vw); transform: translateX(-100%); transition: transform 180ms ease; }

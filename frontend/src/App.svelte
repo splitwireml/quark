@@ -43,6 +43,7 @@
   const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
   const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
   type CellMove = 'up' | 'down' | 'left' | 'right' | 'rowStart' | 'rowEnd' | 'pageUp' | 'pageDown' | 'gridStart' | 'gridEnd';
+  type JoinStep = 0 | 1 | 2;
 
 
   let projects = $state.raw<ProjectInfo[]>([]);
@@ -71,10 +72,15 @@
   let aggregateSourceColumns = $state.raw<ColumnInfo[]>([]);
   let joinLeftViewId = $state('');
   let joinRightViewId = $state('');
+  let joinLeftSourceId = $state('');
+  let joinRightSourceId = $state('');
   let joinLeftKeys = $state<string[]>([]);
   let joinRightKeys = $state<string[]>([]);
   let joinLeftColumns = $state<string[]>([]);
   let joinRightColumns = $state<string[]>([]);
+  let joinStep = $state<JoinStep>(0);
+  let joinStepDirection = $state<-1 | 1>(1);
+  let joinSourceSide = $state<'left' | 'right'>('right');
   let joinPreview = $state.raw<JoinWorkspaceResponse | null>(null);
   let joinPreviewLoading = $state(false);
   let joinPreviewError = $state('');
@@ -259,6 +265,13 @@
   function syncQueryMenu(menu: 'columns' | 'joins' | 'aggregate' | 'dedupe', event: Event) {
     const open = (event.currentTarget as HTMLDetailsElement).open;
     queryMenuOpen = open ? menu : queryMenuOpen === menu ? null : queryMenuOpen;
+    if (menu === 'joins' && open) {
+      joinStep = 0;
+      joinStepDirection = 1;
+      joinSourceSide = joinLeftViewId || joinLeftSourceId ? 'right' : 'left';
+      railCollapsed = false;
+      prepareJoinPicker();
+    }
   }
   function clearAggregateDraft() { aggregateColumnSearch = ''; aggregateColumns = []; aggregateFieldMetrics = {}; focusedAggregateColumn = ''; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
   function clearJoinPreview() { joinPreviewRequestId++; joinPreview = null; joinPreviewLoading = false; joinPreviewError = ''; }
@@ -266,18 +279,72 @@
     clearJoinPreview();
     joinLeftViewId = currentHistory?.id ?? '';
     joinRightViewId = '';
+    joinLeftSourceId = currentHistory?.sourceId ?? '';
+    joinRightSourceId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
     joinLeftColumns = [...(activeVersion?.columns ?? [])];
     joinRightColumns = [];
+    joinStep = 0;
+    joinStepDirection = 1;
+    joinSourceSide = 'right';
     if (queryMenuOpen === 'joins') queryMenuOpen = null;
+  }
+  function prepareJoinPicker() {
+    if (joinLeftView) joinLeftSourceId = joinLeftView.sourceId ?? '';
+    if (joinRightView) joinRightSourceId = joinRightView.sourceId ?? '';
+    if (joinLeftViewId && !joinRightViewId && !joinLeftKeys.length && !joinRightKeys.length && !joinLeftColumns.length && !joinRightColumns.length) selectJoinView('left', joinLeftViewId);
+  }
+  async function resolveJoinView(side: 'left' | 'right'): Promise<boolean> {
+    const viewId = side === 'left' ? joinLeftViewId : joinRightViewId;
+    let view = versionHistories.find((item) => item.id === viewId && item.projectId === activeProject?.id);
+    const sourceId = view?.sourceId ?? (side === 'left' ? joinLeftSourceId : joinRightSourceId);
+    if (sourceId && !loadedSourceIds.includes(sourceId) && !await loadProjectSource(sourceId, '', false)) return false;
+    // ponytail: source-row picks use the first View; add a second-stage View choice if multi-View sources need disambiguation.
+    view = versionHistories.find((item) => item.id === viewId && item.projectId === activeProject?.id)
+      ?? versionHistories.find((item) => item.projectId === activeProject?.id && item.kind === 'source' && item.sourceId === sourceId);
+    if (!view) return false;
+    selectJoinView(side, view.id);
+    return true;
+  }
+  async function setJoinStep(next: JoinStep): Promise<boolean> {
+    if (next === 1 && joinStep === 0) {
+      joinPreviewError = '';
+      if (!await resolveJoinView('left') || !await resolveJoinView('right')) {
+        joinPreviewError = error || 'The selected source could not be loaded.';
+        return false;
+      }
+    }
+    joinStepDirection = next < joinStep ? -1 : 1;
+    joinStep = next;
+    if (next === 0) railCollapsed = false;
+    return true;
+  }
+  function pickJoinSource(id: string) {
+    clearJoinPreview();
+    if (joinSourceSide === 'left') {
+      joinLeftSourceId = id;
+      joinLeftViewId = '';
+      joinLeftColumns = [];
+      joinSourceSide = 'right';
+    } else {
+      joinRightSourceId = id;
+      joinRightViewId = '';
+      joinRightColumns = [];
+    }
+    joinLeftKeys = [];
+    joinRightKeys = [];
+  }
+  function pickJoinView(id: string) {
+    selectJoinView(joinSourceSide, id);
+    if (joinSourceSide === 'left') joinSourceSide = 'right';
   }
   function selectJoinView(side: 'left' | 'right', id: string) {
     clearJoinPreview();
-    const view = projectViews.find((item) => item.id === id);
+    const view = versionHistories.find((item) => item.id === id && item.projectId === activeProject?.id);
     const columns = view?.versions.find((version) => version.id === view.activeVersionId)?.columns ?? [];
-    if (side === 'left') { joinLeftViewId = id; joinLeftColumns = [...columns]; }
-    else { joinRightViewId = id; joinRightColumns = [...columns]; }
+    if (side === 'left') { joinLeftViewId = id; joinLeftSourceId = view?.sourceId ?? ''; joinLeftColumns = [...columns]; }
+    else { joinRightViewId = id; joinRightSourceId = view?.sourceId ?? ''; joinRightColumns = [...columns]; }
     const left = side === 'left' ? columns : joinLeftVersion?.columns ?? [];
     const right = side === 'right' ? columns : joinRightVersion?.columns ?? [];
     const common = left.find((column) => right.includes(column)) ?? '';
@@ -866,6 +933,8 @@
       selectedDataset = history.id;
       joinLeftViewId = history.id;
       joinRightViewId = '';
+      joinLeftSourceId = '';
+      joinRightSourceId = '';
       joinLeftKeys = [];
       joinRightKeys = [];
       joinLeftColumns = [...history.versions[0].columns];
@@ -1127,6 +1196,8 @@
     clearJoinPreview();
     joinLeftViewId = '';
     joinRightViewId = '';
+    joinLeftSourceId = '';
+    joinRightSourceId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
     joinLeftColumns = [];
@@ -1310,6 +1381,8 @@
     clearJoinPreview();
     joinLeftViewId = id;
     joinRightViewId = '';
+    joinLeftSourceId = history.sourceId ?? '';
+    joinRightSourceId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
     joinLeftColumns = [];
@@ -1921,8 +1994,12 @@
     <SourceRail
       {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen} {highlightToken}
       inert={!!inspectorMode || tableExpanded}
+      joinPicking={queryMenuOpen === 'joins' && joinStep === 0} {joinSourceSide} {joinLeftViewId} {joinRightViewId}
+      {joinLeftSourceId} {joinRightSourceId}
       onSelectSource={(id) => { void loadProjectSource(id); }}
       onSelectView={(id) => { void selectView(id); }}
+      onPickJoinSource={pickJoinSource}
+      onPickJoinView={pickJoinView}
       onToggleSource={() => sourceOpen = !sourceOpen}
       onCloseRail={() => railOpen = false}
     >
@@ -2028,14 +2105,16 @@
                 {#snippet joinMenu()}
                   <JoinMenuPopover
                     open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
-                    views={projectViews} {joinLeftViewId} {joinRightViewId} onSelectView={selectJoinView}
+                    step={joinStep} direction={joinStepDirection} sourceSide={joinSourceSide}
+                    onSetSourceSide={(side) => joinSourceSide = side} onStep={setJoinStep}
+                    sources={nodes} views={projectViews} {joinLeftViewId} {joinRightViewId} {joinLeftSourceId} {joinRightSourceId}
                     {joinLeftKeys} {joinRightKeys} onSetKeys={setJoinKeys}
                     {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
                     onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? joinLeftVersion?.columns ?? [] : joinRightVersion?.columns ?? [])])}
                     onSelectNone={(side) => selectJoinColumns(side, [])}
                     {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
-                    onCheck={checkJoin} canCheck={canPreviewJoin} {count}
-                    onRun={runJoin} canRun={canRunJoin} running={loadingData}
+                    onCheck={checkJoin} {count}
+                    onRun={runJoin} canRun={canRunJoin} running={loadingData} preparing={!!loadingSourceId}
                   />
                 {/snippet}
                 {#snippet aggregateMenu()}

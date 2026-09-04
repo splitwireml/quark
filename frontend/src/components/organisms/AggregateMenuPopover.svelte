@@ -1,9 +1,10 @@
 <script lang="ts">
   import Button from '../atoms/Button.svelte';
-  import Icon from '../atoms/Icon.svelte';
+  import MenuPopover from '../molecules/MenuPopover.svelte';
   import Checkbox from '../atoms/Checkbox.svelte';
   import Chip from '../atoms/Chip.svelte';
   import IconButton from '../atoms/IconButton.svelte';
+  import TextInput from '../atoms/TextInput.svelte';
   import type { AggregateMetric, ColumnInfo } from '../../lib/types';
 
   type Props = {
@@ -42,12 +43,14 @@
   }
 </script>
 
-<details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger menu-trigger" class:active={open}><Icon name="sigma" size={14} /><span class="menu-label"><span>{label}</span></span></summary>
-  <div class="popover">
-    <label class="search">Find a column
-      <input type="search" value={aggregateColumnSearch} oninput={(event) => setAggregateColumnSearch((event.currentTarget as HTMLInputElement).value)} placeholder="Type to filter columns" />
-    </label>
+<MenuPopover {open} {ontoggle} icon="sigma" {label} width={300}>
+  {#snippet header()}
+    <strong>Aggregate</strong><span>{aggregateColumns.length} selected</span>
+  {/snippet}
+    <div class="search">
+      <label for="aggregate-menu-search" class="sr-only">Find a column</label>
+      <TextInput id="aggregate-menu-search" type="search" glyph="⌕" value={aggregateColumnSearch} oninput={(event: Event) => setAggregateColumnSearch((event.currentTarget as HTMLInputElement).value)} placeholder="Find a column" />
+    </div>
     <fieldset class="field-picker">
       <legend>Columns</legend>
       <div class="field-list">
@@ -91,24 +94,10 @@
       {/if}
       <Button variant="primary" onclick={onCreateView} disabled={creating || !selectedAggregateColumn || aggregateMetrics.length === 0}>{creating ? 'Creating…' : 'Create view'}</Button>
     {/if}
-  </div>
-</details>
+</MenuPopover>
 
 <style>
-  .popover-host { position: relative; }
-  summary { list-style: none; cursor: pointer; }
-  summary::-webkit-details-marker { display: none; }
-  .popover {
-    position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
-    width: 300px; padding: 12px;
-    border-radius: var(--radius-xl);
-    background: var(--surface);
-    border: 1px solid var(--line-strong);
-    box-shadow: var(--shadow-popover);
-    display: flex; flex-direction: column; gap: 10px;
-  }
-  .search { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
-  .search input { height: 28px; padding: 0 8px; border-radius: var(--radius-md); border: 1px solid var(--control-border); font-size: 12px; }
+  .search :global(.field) { width: 100%; }
   .field-picker, .metrics { border: none; margin: 0; padding: 0; }
   .field-list { max-height: 144px; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; padding: 2px; }
   .empty { margin: 4px 0; font-size: 11px; color: var(--faint); }
