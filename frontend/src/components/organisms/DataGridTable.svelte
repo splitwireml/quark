@@ -69,6 +69,8 @@
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
+  // Rank is only worth showing once the sort is actually ordered across columns.
+  function sortRankFor(name: string): number { return sorts.length > 1 ? sorts.findIndex((sort) => sort.column === name) + 1 : 0; }
 
   // Only the rows near the viewport are rendered; the rest are represented by two spacer rows
   // that hold the scrollbar at full height. Rows are a uniform height per density, so the
@@ -293,6 +295,7 @@
             {fitColumnsToContent}
             labelParts={columnLabelParts(column.name)}
             sort={sortFor(column.name)}
+            sortRank={sortRankFor(column.name)}
             filtered={filters.some((filter) => filter.column === column.name)}
             {canQuery}
             protectedColumn={isColumnProtected(column.name)}
@@ -397,8 +400,8 @@
     {/if}
     <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onModify(contextMenu!.column))}>Modify</button>
     <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onDuplicate(contextMenu!.column))}>Duplicate</button>
-    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onRename(contextMenu!.column))}>Rename</button>
-    <button role="menuitem" disabled={isColumnProtected(contextMenu.column.name) || columns.length <= 1} onclick={() => runContextAction(() => onHide(contextMenu!.column.name))}>Hide</button>
+    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onRename(contextMenu!.column))}>Rename<kbd>dbl-click</kbd></button>
+    <button role="menuitem" disabled={isColumnProtected(contextMenu.column.name) || columns.length <= 1} onclick={() => runContextAction(() => onHide(contextMenu!.column.name))}>Hide<kbd>⇧ dbl-click</kbd></button>
   </div>
 {/if}
 
@@ -502,7 +505,8 @@
   .collapse { display: block; margin-top: 4px; font-size: 10.5px; color: var(--action); background: none; border: none; }
   .context-menu { position: fixed; z-index: 20; width: 176px; display: grid; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-popover); }
   .context-menu strong { min-width: 0; padding: 8px 9px; overflow: hidden; border-bottom: 1px solid var(--line); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-  .context-menu button { min-height: 36px; padding: 0 9px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); text-align: left; }
+  .context-menu button { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 9px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); text-align: left; }
+  .context-menu kbd { margin-left: auto; font: 9.5px var(--font-mono); color: var(--faint); }
   .context-menu button:not(:disabled):hover, .context-menu button:not(:disabled):focus-visible { background: var(--surface-hover); }
   @media (prefers-reduced-motion: reduce) {
     .add-column-tail { animation: none; transition: none; }

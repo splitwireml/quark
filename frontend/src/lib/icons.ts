@@ -22,4 +22,9 @@ export type IconName =
   | 'link'
   | 'eye'
   | 'eye-off'
-  | 'undo';
+  | 'undo'
+  | 'sort'
+  | 'sort-asc'
+  | 'sort-desc'
+  | 'filter'
+  | 'histogram';
