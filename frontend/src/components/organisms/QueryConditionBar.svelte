@@ -93,9 +93,6 @@
       {#each sorts as sort, index (sort.column)}
         <Chip tone="sort" onRemove={() => onRemoveSort(sort.column)} removeLabel={`Remove sort ${sort.column}`}><b>{index + 1}. {sort.column}</b> {sort.direction === 'asc' ? '↑' : '↓'}</Chip>
       {/each}
-      {#if filters.length === 0 && sorts.length === 0}
-        <span class="muted">No filters or sorts applied</span>
-      {/if}
     </div>
     {#if filters.length || sorts.length || dedupeColumns.length}
       <Button onclick={onSaveView} disabled={!canSaveView}>Save View</Button>
@@ -135,7 +132,7 @@
     />
   </div>
   <div class="column-search">
-    <TextInput type="search" glyph="⌕" value={columnSearch} oninput={(event: Event) => { setColumnSearch((event.currentTarget as HTMLInputElement).value); onFindColumn(); }} onkeydown={onColumnSearchKeydown} placeholder="Find column" aria-label="Find column" />
+    <TextInput type="search" size="md" glyph="⌕" value={columnSearch} oninput={(event: Event) => { setColumnSearch((event.currentTarget as HTMLInputElement).value); onFindColumn(); }} onkeydown={onColumnSearchKeydown} placeholder="Find column" aria-label="Find column" />
     <span class="match-count" aria-live="polite" aria-label={`${columnMatchCount} matching columns`}>{columnMatchCount}</span>
   </div>
 </section>
@@ -179,7 +176,6 @@
     font: 600 9px var(--font-mono);
   }
   .connector:hover { border-color: var(--action-tint-border); color: var(--action-dark); }
-  .muted { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
   .link { font-size: 11.5px; color: var(--action); background: none; border: none; white-space: nowrap; }
   .view-controls { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
   .density-anchor { position: relative; display: flex; }
