@@ -24,6 +24,8 @@
     exporting: boolean;
     pendingCount: number;
     onStopRecording: () => void;
+    canUndo: boolean;
+    onUndo: () => void;
     exportOpen: boolean;
     exportMenu?: Snippet;
     inert?: boolean;
@@ -32,7 +34,7 @@
     title, versionLabel, canPreviousVersion, canNextVersion, onPreviousVersion, onNextVersion,
     versionOpen, onToggleVersions, versionMenu,
     showMeta, rows, ms, showRefresh, onRefresh, onExport, loadingData, canExport, exporting,
-    pendingCount, onStopRecording, exportOpen, exportMenu, inert = false
+    pendingCount, onStopRecording, canUndo, onUndo, exportOpen, exportMenu, inert = false
   }: Props = $props();
 </script>
 
@@ -64,7 +66,10 @@
           <IconButton type="button" glyph="→" label="Next version" onclick={onNextVersion} disabled={!canNextVersion} />
         </div>
       {/if}
-      {#if pendingCount}<IconButton type="button" active glyph="■" label={`Stop recording (${pendingCount} pending changes)`} onclick={onStopRecording} disabled={loadingData} />{/if}
+      {#if pendingCount}
+        <IconButton type="button" icon="undo" label="Undo last change" onclick={onUndo} disabled={!canUndo || loadingData} />
+        <IconButton type="button" active glyph="■" label={`Stop recording (${pendingCount} pending changes)`} onclick={onStopRecording} disabled={loadingData} />
+      {/if}
       {#if showRefresh}
         <div class="export-anchor">
           <IconButton

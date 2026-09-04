@@ -165,6 +165,15 @@
   let recordingNotice = $state('');
   let versionHistories = $state.raw<ViewHistory[]>([]);
   let activeJoin = $state.raw<JoinWorkspaceRequest | undefined>(undefined);
+  type UndoPoint = {
+    historyId: string;
+    sqlBase: string; activeSql: string; activeSqlNodeId: string; sqlText: string;
+    columnOrder: string[]; hiddenColumns: string[];
+    filters: FilterCondition[]; sorts: SortCondition[]; dedupeColumns: string[];
+    join: JoinWorkspaceRequest | undefined; page: number;
+  };
+  // One entry per staged pending change, kept aligned by index with pendingChanges.
+  let undoStack = $state.raw<UndoPoint[]>([]);
   let openDiff = $state.raw<VersionDiff | null>(null);
   let diffDialog = $state<HTMLDialogElement | null>(null);
   let diffReturnFocus: HTMLElement | null = null;
@@ -398,6 +407,7 @@
   }
 
   async function applyColumnQuery(query: string, closeDialog: boolean, change: VersionChange): Promise<boolean> {
+    const before = undoPoint();
     const current = result;
     const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
     if (!current || !targetNodeId || mutationApplying) return false;
@@ -430,7 +440,7 @@
       cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
-      stageChange(change, current.sql);
+      stageChange(change, before);
       if (closeDialog) mutationDialog?.close();
       return true;
     } catch (reason) {
@@ -763,10 +773,70 @@
     return saved;
   }
 
-  function stageChange(change: VersionChange, _viewSql = result?.sql ?? activeSql) {
+  function undoPoint(): UndoPoint {
+    return {
+      historyId: currentHistory?.id ?? '',
+      sqlBase, activeSql, activeSqlNodeId, sqlText,
+      columnOrder: [...columnOrder], hiddenColumns: [...hiddenColumns],
+      filters: filters.map((filter) => ({ ...filter, ...(Array.isArray(filter.value) ? { value: [...filter.value] } : {}) })),
+      sorts: sorts.map((sort) => ({ ...sort })),
+      dedupeColumns: [...dedupeColumns],
+      join: activeJoin, page
+    };
+  }
+
+  function stageChange(change: VersionChange, before?: UndoPoint) {
     if (!currentHistory) return;
     recordingNotice = '';
+    undoStack = [...undoStack, before ?? undoPoint()];
     replaceHistory(stageVersionChange(currentHistory, change), true);
+  }
+
+  function clearPending(history: ViewHistory) {
+    undoStack = [];
+    replaceHistory({ ...history, pendingParentId: null, pendingChanges: [] });
+  }
+
+  // Conditions returning to none means nothing was changed after all: drop the
+  // staged filter/sort work so the recording highlight and checkpoint go away.
+  const conditionChangeKinds = new Set(['filter', 'filter-connector', 'filter-remove', 'filter-clear']);
+  function dropConditionPending() {
+    const history = currentHistory;
+    if (!history?.pendingChanges.length || filters.length || sorts.length || dedupeColumns.length) return;
+    const keep = history.pendingChanges.map((change) => !conditionChangeKinds.has(change.kind));
+    if (keep.every(Boolean)) return;
+    const pendingChanges = history.pendingChanges.filter((_, index) => keep[index]);
+    undoStack = undoStack.filter((_, index) => keep[index] ?? true);
+    replaceHistory({ ...history, pendingParentId: pendingChanges.length ? history.pendingParentId : null, pendingChanges }, true);
+  }
+
+  async function undoLastChange() {
+    const history = currentHistory;
+    const point = undoStack[undoStack.length - 1];
+    if (!history?.pendingChanges.length || !point || point.historyId !== history.id || loadingData) return;
+    undoStack = undoStack.slice(0, -1);
+    const pendingChanges = history.pendingChanges.slice(0, -1);
+    replaceHistory({ ...history, pendingParentId: pendingChanges.length ? history.pendingParentId : null, pendingChanges }, true);
+    closeSql(false);
+    clearAggregateDraft();
+    filters = point.filters;
+    sorts = point.sorts;
+    dedupeColumns = [...point.dedupeColumns];
+    dedupeDraft = [...point.dedupeColumns];
+    columnOrder = [...point.columnOrder];
+    hiddenColumns = [...point.hiddenColumns];
+    activeJoin = point.join;
+    sqlText = point.sqlText;
+    sqlBase = point.sqlBase;
+    activeSql = point.activeSql;
+    activeSqlNodeId = point.activeSqlNodeId;
+    page = point.page;
+    pageInput = String(point.page);
+    reorderOrigin = null;
+    selectedCell = null;
+    editingCell = null;
+    recordingNotice = '';
+    await runSql(point.sqlBase || point.activeSql, true, true, point.activeSqlNodeId || activeProject?.node_id || history.nodeId);
   }
 
   function blockViewExecutionWhileRecording(): boolean {
@@ -881,7 +951,7 @@
     const history = currentHistory;
     if (!history?.pendingChanges.length) return true;
     if (!window.confirm(`Discard ${history.pendingChanges.length} pending change${history.pendingChanges.length === 1 ? '' : 's'}?`)) return false;
-    replaceHistory({ ...history, pendingParentId: null, pendingChanges: [] });
+    clearPending(history);
     recordingNotice = 'Pending changes discarded.';
     return true;
   }
@@ -952,6 +1022,7 @@
       ...(activeJoin ? { join: activeJoin } : {})
     });
     if (!replaceHistory(next)) return;
+    undoStack = [];
     const version = next.versions.find((item) => item.id === next.activeVersionId);
     if (version) await showDiff(next, version, tableScroll);
   }
@@ -1257,7 +1328,10 @@
 
   async function loadData(): Promise<boolean> {
     const sql = sqlBase || activeSql || activeVersion?.sql;
-    return sql ? runSql(sql, true, true, activeProject?.node_id ?? currentHistory?.nodeId) : false;
+    if (!sql) return false;
+    const loaded = await runSql(sql, true, true, activeProject?.node_id ?? currentHistory?.nodeId);
+    if (loaded) dropConditionPending();
+    return loaded;
   }
 
   async function createAggregateView() {
@@ -1327,7 +1401,7 @@
     const after = [...columnOrder];
     reorderOrigin = null;
     if (before.length === after.length && before.every((name, index) => name === after[index])) return;
-    stageChange({ kind: 'reorder', summary: 'Reorder columns', details: { before, after } });
+    stageChange({ kind: 'reorder', summary: 'Reorder columns', details: { before, after } }, { ...undoPoint(), columnOrder: before });
   }
 
   function cancelColumnReorder() {
@@ -1467,10 +1541,12 @@
   function selectVisibleCategories() { selectedCategories = [...new Set([...selectedCategories, ...categoryValues.map((item) => item.value)])]; }
 
   async function applyFilterChange(next: FilterCondition[], change: VersionChange) {
+    const before = undoPoint();
     filters = next;
     page = 1;
     pageInput = '1';
-    if (await loadData()) stageChange(change);
+    if (!await loadData()) return;
+    if (filters.length || sorts.length || dedupeColumns.length) stageChange(change, before);
   }
 
   async function addCategoryFilter() {
@@ -1515,7 +1591,7 @@
     page = 1;
     await loadData();
   }
-  async function removeSort(column: string) { sorts = sorts.filter((sort) => sort.column !== column); page = 1; await loadData(); }
+  async function removeSort(column: string) { sorts = sorts.filter((sort) => sort.column !== column); page = 1; pageInput = '1'; await loadData(); }
   async function clearQuery() {
     const count = filters.length;
     sorts = [];
@@ -1539,8 +1615,9 @@
     const columns = new Set((result?.columns ?? []).map((column) => column.name));
     const normalized = [...new Set(next)].filter((column) => columns.has(column));
     if (normalized.length === hiddenColumns.length && normalized.every((column, index) => column === hiddenColumns[index])) return false;
+    const before = undoPoint();
     hiddenColumns = normalized;
-    stageChange(change);
+    stageChange(change, before);
     return true;
   }
   function hideColumn(column: string) {
@@ -1746,6 +1823,7 @@
     if (edit) void focusCell(edit.row, edit.column);
   }
   async function commitCellEdit(move?: CellMove) {
+    const before = undoPoint();
     const edit = editingCell;
     const current = result;
     const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
@@ -1786,7 +1864,7 @@
       editingCell = null;
       page = next.page;
       pageInput = String(next.page);
-      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } }, current.sql);
+      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } }, before);
       if (move) moveCell(edit.row, edit.column, move);
       else void focusCell(selectedCell?.row ?? edit.row, selectedCell?.column ?? edit.column);
     } catch (reason) {
@@ -1883,6 +1961,8 @@
             {loadingData} canExport={!!result} {exporting}
             pendingCount={currentHistory?.pendingChanges.length ?? 0}
             onStopRecording={stopRecording}
+            canUndo={undoStack.length > 0 && undoStack[undoStack.length - 1].historyId === currentHistory?.id}
+            onUndo={() => void undoLastChange()}
             {exportOpen}
             inert={!!inspectorMode || tableExpanded}
           >

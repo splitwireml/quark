@@ -20,4 +20,5 @@ export type IconName =
   | 'expand'
   | 'collapse'
   | 'braces'
-  | 'link';
+  | 'link'
+  | 'undo';
