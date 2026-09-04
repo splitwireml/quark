@@ -278,7 +278,9 @@ export interface VersionDiff {
   changes: VersionChange[];
 }
 
-export type ExportFormat = 'csv' | 'xlsx';
+export type ExportFormat = 'csv' | 'xlsx' | 'parquet' | 'json';
+
+export type JsonLayout = 'rows' | 'columns';
 
 export interface ExportSheetRequest {
   node_id: string;
@@ -293,6 +295,7 @@ export interface ExportOption extends ExportSheetRequest {
 
 export interface ExportRequest {
   format: ExportFormat;
+  json_layout?: JsonLayout;
   filename?: string;
   sheets: ExportSheetRequest[];
 }

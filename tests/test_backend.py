@@ -301,11 +301,57 @@ def test_export_rejects_non_read_only_unknown_and_external_sql(client, tmp_path)
     assert list(tmp_path.glob("*.xlsx")) == []
 
 
+def test_export_parquet_writes_typed_columns(client, tmp_path):
+    node = upload(client, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
+
+    response = client.post("/api/exports", json={
+        "format": "parquet",
+        "filename": "../people",
+        "sheets": [export_sheet(node, "People", "SELECT * FROM people ORDER BY id")],
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/vnd.apache.parquet"
+    assert 'filename="people.parquet"' in response.headers["content-disposition"]
+    written = tmp_path / "written.parquet"
+    written.write_bytes(response.content)
+    with duckdb.connect() as con:
+        assert con.execute(f"SELECT id, name FROM read_parquet('{written}') ORDER BY id").fetchall() == [(1, "Ada"), (2, "Bob")]
+    assert list(tmp_path.glob(".export-*")) == []
+
+
+def test_export_json_row_objects_and_column_lists(client, tmp_path):
+    node = upload(client, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
+    sheet = export_sheet(node, "People", "SELECT * FROM people ORDER BY id")
+
+    rows = client.post("/api/exports", json={"format": "json", "filename": "people", "sheets": [sheet]})
+    assert rows.status_code == 200, rows.text
+    assert rows.headers["content-type"] == "application/json"
+    assert 'filename="people.json"' in rows.headers["content-disposition"]
+    assert json.loads(rows.text) == [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Bob"}]
+
+    columns = client.post("/api/exports", json={
+        "format": "json", "json_layout": "columns", "sheets": [sheet],
+    })
+    assert columns.status_code == 200, columns.text
+    assert json.loads(columns.text) == {"id": [1, 2], "name": ["Ada", "Bob"]}
+
+    duplicated = client.post("/api/exports", json={
+        "format": "json",
+        "json_layout": "columns",
+        "sheets": [export_sheet(node, "People", "SELECT id, id FROM people")],
+    })
+    assert duplicated.status_code == 422
+    assert "unique column names" in duplicated.json()["detail"]
+    assert list(tmp_path.glob(".export-*")) == []
+
+
 def test_export_csv_requires_exactly_one_sheet_and_payload_bounds(client):
     node = upload(client, "items.csv", b"value\n1\n")
     sheet = export_sheet(node, "Items", "SELECT * FROM items")
-    for sheets in ([], [sheet, sheet]):
-        assert client.post("/api/exports", json={"format": "csv", "sheets": sheets}).status_code == 422
+    for single in ("csv", "parquet", "json"):
+        for sheets in ([], [sheet, sheet]):
+            assert client.post("/api/exports", json={"format": single, "sheets": sheets}).status_code == 422
     assert client.post("/api/exports", json={
         "format": "xlsx", "sheets": [sheet] * 101,
     }).status_code == 422

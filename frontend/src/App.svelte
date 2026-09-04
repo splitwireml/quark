@@ -9,7 +9,7 @@
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import type { AggregateCount, AggregateMetric, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
   import TitleBar from './components/organisms/TitleBar.svelte';
@@ -145,6 +145,7 @@
   let mutationError = $state('');
   let exportOpen = $state(false);
   let exportFormat = $state<ExportFormat>('csv');
+  let exportJsonLayout = $state<JsonLayout>('rows');
   let exportOptions = $state.raw<ExportOption[]>([]);
   let exportSelectedKeys = $state<string[]>(['current']);
   let exportLoading = $state(false);
@@ -530,6 +531,7 @@
     exportTrigger = trigger;
     exportOpen = true;
     exportFormat = 'csv';
+    exportJsonLayout = 'rows';
     exportSelectedKeys = ['current'];
     exportOptions = [];
     exportError = '';
@@ -563,21 +565,22 @@
     tick().then(() => trigger?.focus());
   }
 
-  function setExportFormat(format: ExportFormat) { exportFormat = format; if (format === 'csv') exportSelectedKeys = ['current']; }
+  function setExportFormat(format: ExportFormat) { exportFormat = format; if (format !== 'xlsx') exportSelectedKeys = ['current']; }
   function toggleExportOption(key: string, checked: boolean) { exportSelectedKeys = checked ? [...new Set([...exportSelectedKeys, key])] : exportSelectedKeys.filter((item) => item !== key); }
 
   async function runExport() {
     const current = currentExportOption;
     if (!current || exporting || exportLoading) return;
     const choices = [current, ...exportOptions];
-    const selected = exportFormat === 'csv' ? [current] : choices.filter((option) => exportSelectedKeys.includes(option.key));
+    const selected = exportFormat === 'xlsx' ? choices.filter((option) => exportSelectedKeys.includes(option.key)) : [current];
     if (!selected.length) return;
     exporting = true;
     exportError = '';
     try {
       const download = await api.exportData({
         format: exportFormat,
-        filename: exportFormat === 'csv' ? current.name : 'quark-export',
+        ...(exportFormat === 'json' ? { json_layout: exportJsonLayout } : {}),
+        filename: exportFormat === 'xlsx' ? 'quark-export' : current.name,
         sheets: selected.map(({ node_id, name, sql }) => ({ node_id, name, sql }))
       });
       const url = URL.createObjectURL(download.blob);
@@ -1881,7 +1884,8 @@
               <ExportMenu
                 open={exportOpen} current={currentExportOption} options={exportOptions}
                 selectedKeys={exportSelectedKeys} loading={exportLoading} {exporting} error={exportError}
-                setFormat={setExportFormat} onToggle={toggleExportOption}
+                setFormat={setExportFormat} setJsonLayout={(layout) => exportJsonLayout = layout}
+                onToggle={toggleExportOption}
                 onExport={runExport} onClose={closeExport}
               />
             {/snippet}

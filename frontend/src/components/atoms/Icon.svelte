@@ -1,5 +1,5 @@
 <script lang="ts">
-  type Props = { name: 'upload' | 'database' | 'chevron' | 'file' | 'link' | 'plus' | 'arrow-right' | 'download' | 'grid' | 'list'; size?: number };
+  type Props = { name: 'upload' | 'database' | 'chevron' | 'file' | 'link' | 'plus' | 'arrow-right' | 'download' | 'grid' | 'list' | 'columns' | 'braces'; size?: number };
   let { name, size = 16 }: Props = $props();
   const paths: Record<Props['name'], string> = {
     upload: 'M8 10.5V2.5M8 2.5 5 5.5M8 2.5l3 3M2.5 10v2.5a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V10',
@@ -11,6 +11,8 @@
     'arrow-right': 'M3 8h10M9 4l4 4-4 4',
     grid: 'M2.75 2.75h4v4h-4zM9.25 2.75h4v4h-4zM2.75 9.25h4v4h-4zM9.25 9.25h4v4h-4z',
     list: 'M2.75 4h10.5M2.75 8h10.5M2.75 12h10.5',
+    columns: 'M4 2.75v10.5M8 2.75v10.5M12 2.75v10.5',
+    braces: 'M6.5 2.5C5 2.5 5 3.9 5 5.2c0 1.3-.5 1.8-1.5 2.8 1 1 1.5 1.5 1.5 2.8 0 1.3 0 2.7 1.5 2.7M9.5 2.5c1.5 0 1.5 1.4 1.5 2.7 0 1.3.5 1.8 1.5 2.8-1 1-1.5 1.5-1.5 2.8 0 1.3 0 2.7-1.5 2.7',
     link: 'M6.5 9.5a2.5 2.5 0 0 0 3.54 0l2.46-2.46a2.5 2.5 0 0 0-3.54-3.54l-.9.9M9.5 6.5a2.5 2.5 0 0 0-3.54 0L3.5 8.96a2.5 2.5 0 0 0 3.54 3.54l.9-.9',
   };
 </script>

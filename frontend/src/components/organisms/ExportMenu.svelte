@@ -2,7 +2,7 @@
   import Button from '../atoms/Button.svelte';
   import Checkbox from '../atoms/Checkbox.svelte';
   import Icon from '../atoms/Icon.svelte';
-  import type { ExportFormat, ExportOption } from '../../lib/types';
+  import type { ExportFormat, ExportOption, JsonLayout } from '../../lib/types';
 
   type Props = {
     open: boolean;
@@ -13,6 +13,7 @@
     exporting: boolean;
     error: string;
     setFormat: (format: ExportFormat) => void;
+    setJsonLayout: (layout: JsonLayout) => void;
     onToggle: (key: string, checked: boolean) => void;
     onExport: () => void;
     onClose: () => void;
@@ -20,12 +21,12 @@
 
   let {
     open, current, options, selectedKeys, loading, exporting, error,
-    setFormat, onToggle, onExport, onClose
+    setFormat, setJsonLayout, onToggle, onExport, onClose
   }: Props = $props();
 
   // The panel holds one of two panes; choosing Excel deepens this surface
   // instead of replacing it, so the frame morphs and the pane cross-fades.
-  let pane = $state<'root' | 'sheets'>('root');
+  let pane = $state<'root' | 'sheets' | 'json'>('root');
   let paneHeight = $state(0);
   let measured = $state(false);
   let panel = $state<HTMLDivElement | null>(null);
@@ -52,20 +53,26 @@
     pane = 'sheets';
   }
 
+  function openJson() {
+    setFormat('json');
+    pane = 'json';
+  }
+
   function backToRoot() {
     setFormat('csv');
     pane = 'root';
   }
 
-  function exportCsv() {
-    setFormat('csv');
+  function exportNow(format: ExportFormat, layout?: JsonLayout) {
+    setFormat(format);
+    if (layout) setJsonLayout(layout);
     onExport();
   }
 
   function onKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape' || exporting) return;
     event.stopPropagation();
-    if (pane === 'sheets') { backToRoot(); return; }
+    if (pane !== 'root') { backToRoot(); return; }
     onClose();
   }
 
@@ -84,6 +91,7 @@
   <div
     class="panel"
     class:wide={pane === 'sheets'}
+    class:tall={pane === 'json'}
     class:measured
     bind:this={panel}
     role="group"
@@ -93,8 +101,8 @@
     <div class="pane" bind:clientHeight={paneHeight}>
       {#if pane === 'root'}
         <div class="rows" data-pane="root">
-          <button type="button" class="row" onclick={exportCsv} disabled={!current || exporting}>
-            <Icon name="download" size={14} />
+          <button type="button" class="row" onclick={() => exportNow('csv')} disabled={!current || exporting}>
+            <Icon name="file" size={14} />
             <span class="text">
               <span class="title">{exporting ? 'Preparing CSV…' : 'CSV'}</span>
               <span class="sub">{current?.name ?? 'No result available'}</span>
@@ -108,6 +116,44 @@
             </span>
             <span class="chevron" aria-hidden="true"><Icon name="chevron" size={12} /></span>
           </button>
+          <button type="button" class="row" onclick={() => exportNow('parquet')} disabled={!current || exporting}>
+            <Icon name="database" size={14} />
+            <span class="text">
+              <span class="title">Parquet</span>
+              <span class="sub">Typed columnar file</span>
+            </span>
+          </button>
+          <button type="button" class="row" onclick={openJson} disabled={!current || exporting} aria-expanded="false">
+            <Icon name="braces" size={14} />
+            <span class="text">
+              <span class="title">JSON</span>
+              <span class="sub">Choose the shape</span>
+            </span>
+            <span class="chevron" aria-hidden="true"><Icon name="chevron" size={12} /></span>
+          </button>
+        </div>
+      {:else if pane === 'json'}
+        <div class="rows" data-pane="json">
+          <button type="button" class="back" onclick={backToRoot} disabled={exporting}>
+            <span class="chevron back-chevron" aria-hidden="true"><Icon name="chevron" size={12} /></span>
+            JSON
+          </button>
+          <div class="shapes">
+            <button type="button" class="row" onclick={() => exportNow('json', 'rows')} disabled={!current || exporting}>
+              <Icon name="list" size={14} />
+              <span class="text">
+                <span class="title">One object per row</span>
+                <span class="sub">[&#123; column: value &#125;, …]</span>
+              </span>
+            </button>
+            <button type="button" class="row" onclick={() => exportNow('json', 'columns')} disabled={!current || exporting}>
+              <Icon name="columns" size={14} />
+              <span class="text">
+                <span class="title">Columns as keys</span>
+                <span class="sub">&#123; column: [values] &#125;</span>
+              </span>
+            </button>
+          </div>
         </div>
       {:else}
         <div class="rows" data-pane="sheets">
@@ -173,6 +219,7 @@
      so the panel opens at its true size and morphs on the pane change. */
   .panel.measured { transition: height 260ms cubic-bezier(0.32, 0.72, 0, 1), width 260ms cubic-bezier(0.32, 0.72, 0, 1); }
   .panel.wide { width: 288px; }
+  .panel.tall { width: 262px; }
 
   @keyframes panel-in {
     from { opacity: 0; transform: translateY(-6px) scale(0.96); }
@@ -182,6 +229,7 @@
   .pane { padding: 5px; }
   .rows { display: flex; flex-direction: column; gap: 2px; animation: pane-in 220ms cubic-bezier(0.32, 0.72, 0, 1); }
   .rows[data-pane='root'] { animation-name: pane-in-back; }
+  .shapes { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; padding-top: 4px; border-top: 1px solid var(--line-soft); }
 
   @keyframes pane-in { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
   @keyframes pane-in-back { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }

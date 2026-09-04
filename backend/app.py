@@ -94,7 +94,8 @@ class ExportSheet(BaseModel):
 
 class ExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    format: Literal["csv", "xlsx"]
+    format: Literal["csv", "xlsx", "parquet", "json"]
+    json_layout: Literal["rows", "columns"] = "rows"
     filename: str | None = None
     sheets: list[ExportSheet] = Field(min_length=1, max_length=100)
 
@@ -257,6 +258,45 @@ def export_filename(name: str | None, extension: str) -> str:
     stem = Path(basename).stem
     stem = re.sub(r"[\x00-\x1f\x7f]", "", stem).strip(" .") or "export"
     return stem + extension
+
+
+EXPORT_TYPES = {
+    "csv": (".csv", "text/csv"),
+    "xlsx": (".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "parquet": (".parquet", "application/vnd.apache.parquet"),
+    "json": (".json", "application/json"),
+}
+
+
+def export_relation(con: Any, sql: str, path: Path, format_: str, layout: str) -> None:
+    """Copy the result into a throwaway connection and let DuckDB write the file.
+
+    The source connection has no file access at all, so it can never write the
+    export itself; the writer connection never runs user SQL and can only reach
+    the export directory.
+    """
+    relation = con.sql(sql)
+    columns, types = relation.columns, relation.types
+    if len(set(columns)) != len(columns):
+        raise HTTPException(422, f"{format_.upper()} export requires unique column names")
+    target = "'" + str(path).replace("'", "''") + "'"
+    writer = duckdb.connect()
+    try:
+        writer.execute("SET allowed_directories = ?", [[str(path.parent)]])
+        writer.execute(f"CREATE TABLE export_data({', '.join(f'{quote(name)} {type_}' for name, type_ in zip(columns, types))})")
+        placeholders = ", ".join("?" * len(columns))
+        result = con.execute(sql)
+        while rows := result.fetchmany(1000):
+            writer.executemany(f"INSERT INTO export_data VALUES ({placeholders})", rows)
+        if format_ == "parquet":
+            writer.execute(f"COPY export_data TO {target} (FORMAT PARQUET)")
+        elif layout == "columns":
+            projection = ", ".join(f"COALESCE(list({quote(name)}), CAST([] AS {type_}[])) AS {quote(name)}" for name, type_ in zip(columns, types))
+            writer.execute(f"COPY (SELECT {projection} FROM export_data) TO {target} (FORMAT JSON)")
+        else:
+            writer.execute(f"COPY export_data TO {target} (FORMAT JSON, ARRAY true)")
+    finally:
+        writer.close()
 
 
 def profile_kind(type_: str) -> str | None:
@@ -788,10 +828,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @api.post("/api/exports")
     @serialized
     def export(request: ExportRequest):
-        if request.format == "csv" and len(request.sheets) != 1:
-            raise HTTPException(422, "CSV export requires exactly one sheet")
-        extension = ".csv" if request.format == "csv" else ".xlsx"
-        media_type = "text/csv" if request.format == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if request.format != "xlsx" and len(request.sheets) != 1:
+            raise HTTPException(422, f"{request.format.upper()} export requires exactly one sheet")
+        extension, media_type = EXPORT_TYPES[request.format]
         sheets = []
         for sheet in request.sheets:
             con = get_connection(sheet.node_id)
@@ -799,7 +838,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         with tempfile.NamedTemporaryFile(dir=root, prefix=".export-", suffix=extension, delete=False) as temporary:
             path = Path(temporary.name)
         try:
-            if request.format == "csv":
+            if request.format in ("parquet", "json"):
+                _, con, sql = sheets[0]
+                export_relation(con, sql, path, request.format, request.json_layout)
+            elif request.format == "csv":
                 _, con, sql = sheets[0]
                 with path.open("w", encoding="utf-8", newline="") as output:
                     writer = csv.writer(output)
