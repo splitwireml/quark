@@ -4,10 +4,24 @@ import { buildAggregateSql } from '../src/lib/aggregate-sql.ts';
 
 const source = 'SELECT * FROM "main"."cars" WHERE "active" = true';
 
-test('count on one column creates its distribution', () => {
+test('a column can be grouped and measured with multiple operations', () => {
   assert.equal(
-    buildAggregateSql(source, [], [{ column: 'Make', metrics: ['count'] }]),
-    'SELECT "Make", count(*) AS "count" FROM (SELECT * FROM "main"."cars" WHERE "active" = true) AS filtered GROUP BY "Make" ORDER BY "Make"'
+    buildAggregateSql('SELECT * FROM "main"."orders_2024"', ['customer', 'status'], [{ column: 'status', metrics: ['count', 'distinct'] }]),
+    'SELECT "customer", "status", count("status") AS "count", count(DISTINCT "status") AS "distinct" FROM (SELECT * FROM "main"."orders_2024") AS filtered GROUP BY "customer", "status" ORDER BY "customer"'
+  );
+});
+
+test('repeated measure entries remain independent', () => {
+  assert.equal(
+    buildAggregateSql(source, ['Make'], [{ column: 'Price', metrics: ['count'] }, { column: 'Price', metrics: ['distinct'] }]),
+    'SELECT "Make", count("Price") AS "Price count", count(DISTINCT "Price") AS "Price distinct" FROM (SELECT * FROM "main"."cars" WHERE "active" = true) AS filtered GROUP BY "Make" ORDER BY "Make"'
+  );
+});
+
+test('count on a field remains an aggregate within a group', () => {
+  assert.equal(
+    buildAggregateSql(source, ['Make'], [{ column: 'Price', metrics: ['count'] }]),
+    'SELECT "Make", count("Price") AS "count" FROM (SELECT * FROM "main"."cars" WHERE "active" = true) AS filtered GROUP BY "Make" ORDER BY "Make"'
   );
 });
 

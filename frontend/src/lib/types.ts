@@ -191,6 +191,7 @@ export interface DateColumnStats extends ColumnStatsBase {
 export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColumnStats;
 
 export type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
+export type AggregateRecipeItem = { id: number; column: string; metrics: AggregateMetric[] | null };
 export type RowDensity = 'compact' | 'default' | 'comfortable';
 export type DistributionMode = 'count' | 'percent';
 

@@ -9,7 +9,7 @@
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import type { AggregateCount, AggregateMetric, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
 
   import Button from './components/atoms/Button.svelte';
   import TitleBar from './components/organisms/TitleBar.svelte';
@@ -65,9 +65,9 @@
   let dedupeColumns = $state<string[]>([]);
   let dedupeDraft = $state<string[]>([]);
   let aggregateColumnSearch = $state('');
-  let aggregateColumns = $state<string[]>([]);
-  let aggregateFieldMetrics = $state<Record<string, AggregateMetric[]>>({});
-  let focusedAggregateColumn = $state('');
+  let aggregateRecipe = $state.raw<AggregateRecipeItem[]>([]);
+  let focusedAggregateItemId = $state<number | null>(null);
+  let nextAggregateRecipeId = 0;
   let aggregateSourceSql = $state('');
   let aggregateSourceColumns = $state.raw<ColumnInfo[]>([]);
   let joinLeftViewId = $state('');
@@ -229,11 +229,13 @@
   });
   let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
   let aggregateColumnMatches = $derived.by(() => { const query = aggregateColumnSearch.trim().toLowerCase(); return query ? aggregateFieldOptions.filter((column) => column.name.toLowerCase().includes(query)) : aggregateFieldOptions; });
-  let aggregateFields = $derived(aggregateColumns.filter(isAggregateField));
-  let aggregateIndexes = $derived(aggregateColumns.filter((column) => !isAggregateField(column)));
-  let aggregateMetrics = $derived(focusedAggregateColumn ? aggregateFieldMetrics[focusedAggregateColumn] ?? [] : []);
-  let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateColumn));
+  let aggregateFields = $derived(aggregateRecipe.filter((item) => item.metrics !== null));
+  let aggregateIndexes = $derived(aggregateRecipe.filter((item) => item.metrics === null).map((item) => item.column));
+  let focusedAggregateItem = $derived(aggregateRecipe.find((item) => item.id === focusedAggregateItemId));
+  let aggregateMetrics = $derived(focusedAggregateItem?.metrics ?? []);
+  let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateItem?.column));
   let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
+  let canCreateAggregate = $derived(aggregateRecipe.length > 0 && aggregateFields.some((item) => (item.metrics?.length ?? 0) > 0));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
   let columnMenuRegexResult = $derived(matchColumnsByRegex(columnOrder, columnMenuSearch.trim()));
   let columnMenuItems = $derived.by(() => {
@@ -263,7 +265,6 @@
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
   function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
-  function isAggregateField(column: string): boolean { return Object.prototype.hasOwnProperty.call(aggregateFieldMetrics, column); }
   function filterSummary(filter: FilterCondition): string {
     const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most' };
     if (filter.operator === 'is_null' || filter.operator === 'not_null') return `${filter.column} ${labels[filter.operator]}`;
@@ -282,7 +283,7 @@
       prepareJoinPicker();
     }
   }
-  function clearAggregateDraft() { aggregateColumnSearch = ''; aggregateColumns = []; aggregateFieldMetrics = {}; focusedAggregateColumn = ''; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
+  function clearAggregateDraft() { aggregateColumnSearch = ''; aggregateRecipe = []; focusedAggregateItemId = null; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
   function clearJoinPreview() { joinPreviewRequestId++; joinPreview = null; joinPreviewLoading = false; joinPreviewError = ''; }
   function clearJoinDraft() {
     clearJoinPreview();
@@ -421,42 +422,40 @@
       addView(result?.sql ?? query, request, `${joinLeftView.name} + ${joinRightView.name}`);
     }
   }
-  function toggleAggregateColumn(column: string, checked: boolean) {
-    if (checked) {
-      if (!column || aggregateColumns.includes(column)) return;
-      aggregateColumns = [...aggregateColumns, column];
-      if (aggregateColumns.length === 1) {
-        aggregateFieldMetrics = { ...aggregateFieldMetrics, [column]: ['count'] };
-        focusedAggregateColumn = column;
-      }
+  function addAggregateColumn(column: string) {
+    if (!column) return;
+    const item: AggregateRecipeItem = {
+      id: ++nextAggregateRecipeId,
+      column,
+      metrics: aggregateRecipe.some((candidate) => candidate.column === column && candidate.metrics === null) ? [] : null
+    };
+    aggregateRecipe = [...aggregateRecipe, item];
+    if (item.metrics !== null) focusedAggregateItemId = item.id;
+  }
+  function removeAggregateColumn(id: number) {
+    aggregateRecipe = aggregateRecipe.filter((item) => item.id !== id);
+    if (focusedAggregateItemId === id) focusedAggregateItemId = aggregateRecipe.find((item) => item.metrics !== null)?.id ?? null;
+  }
+  function focusAggregate(id: number) {
+    if (aggregateRecipe.some((item) => item.id === id && item.metrics !== null)) focusedAggregateItemId = id;
+  }
+  function toggleAggregateRole(id: number) {
+    const item = aggregateRecipe.find((candidate) => candidate.id === id);
+    if (!item) return;
+    if (item.metrics === null) {
+      aggregateRecipe = aggregateRecipe.map((candidate) => candidate.id === id ? { ...candidate, metrics: ['count'] } : candidate);
+      focusedAggregateItemId = id;
       return;
     }
-    removeAggregateColumn(column);
-  }
-  function removeAggregateColumn(column: string) {
-    aggregateColumns = aggregateColumns.filter((item) => item !== column);
-    const metrics = { ...aggregateFieldMetrics };
-    delete metrics[column];
-    aggregateFieldMetrics = metrics;
-    if (focusedAggregateColumn === column) focusedAggregateColumn = aggregateColumns.find(isAggregateField) ?? '';
-  }
-  function focusAggregate(column: string) { if (isAggregateField(column)) focusedAggregateColumn = column; }
-  function toggleAggregateRole(column: string) {
-    if (!aggregateColumns.includes(column)) return;
-    if (isAggregateField(column)) {
-      const metrics = { ...aggregateFieldMetrics };
-      delete metrics[column];
-      aggregateFieldMetrics = metrics;
-      if (focusedAggregateColumn === column) focusedAggregateColumn = aggregateColumns.find((item) => Object.prototype.hasOwnProperty.call(metrics, item)) ?? '';
-      return;
-    }
-    aggregateFieldMetrics = { ...aggregateFieldMetrics, [column]: ['count'] };
-    focusedAggregateColumn = column;
+    if (aggregateRecipe.some((candidate) => candidate.id !== id && candidate.column === item.column && candidate.metrics === null)) return;
+    aggregateRecipe = aggregateRecipe.map((candidate) => candidate.id === id ? { ...candidate, metrics: null } : candidate);
+    if (focusedAggregateItemId === id) focusedAggregateItemId = aggregateRecipe.find((candidate) => candidate.metrics !== null)?.id ?? null;
   }
   function toggleAggregateMetric(metric: AggregateMetric, checked: boolean) {
-    if (!focusedAggregateColumn || !isAggregateField(focusedAggregateColumn)) return;
-    const metrics = aggregateFieldMetrics[focusedAggregateColumn];
-    aggregateFieldMetrics = { ...aggregateFieldMetrics, [focusedAggregateColumn]: checked ? [...metrics, metric] : metrics.filter((item) => item !== metric) };
+    const item = aggregateRecipe.find((candidate) => candidate.id === focusedAggregateItemId);
+    if (!item || item.metrics === null) return;
+    const metrics = checked ? [...item.metrics, metric] : item.metrics.filter((candidateMetric) => candidateMetric !== metric);
+    aggregateRecipe = aggregateRecipe.map((candidate) => candidate.id === item.id ? { ...candidate, metrics } : candidate);
   }
   function isWorkbookPreview(node: NodeInfo | WorkbookPreview): node is WorkbookPreview { return node.kind === 'workbook' && 'sheets' in node && Array.isArray(node.sheets); }
   function toggleWorkbookSheet(sheet: string, checked: boolean) { workbookSheets = checked ? [...workbookSheets, sheet] : workbookSheets.filter((item) => item !== sheet); }
@@ -1420,8 +1419,8 @@
     if (blockViewExecutionWhileRecording()) return;
     const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql || sqlBase || activeSql;
     const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? [];
-    const aggregates = aggregateFields.map((column) => ({ column, metrics: aggregateFieldMetrics[column] }));
-    if (!source || !aggregates.some(({ metrics }) => metrics.length)) return;
+    const aggregates = aggregateFields.map((item) => ({ column: item.column, metrics: item.metrics ?? [] }));
+    if (!source || !canCreateAggregate) return;
     const query = buildAggregateSql(source, aggregateIndexes, aggregates);
     if (!query) return;
     aggregateSourceSql = source;
@@ -2137,11 +2136,12 @@
                     open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
                     label="Aggregate"
                     {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
-                    {aggregateColumnMatches} {aggregateColumns} {aggregateFields} {focusedAggregateColumn}
-                    onToggleColumn={toggleAggregateColumn} onRemoveColumn={removeAggregateColumn}
+                    {aggregateColumnMatches} {aggregateRecipe} {focusedAggregateItemId}
+                    onAddColumn={addAggregateColumn} onRemoveColumn={removeAggregateColumn}
                     onFocusAggregate={focusAggregate} onToggleRole={toggleAggregateRole}
                     {selectedAggregateColumn} availableMetrics={availableAggregateMetrics}
                     {aggregateMetrics} onToggleMetric={toggleAggregateMetric}
+                    {canCreateAggregate}
                     onCreateView={createAggregateView} creating={loadingData}
                   />
                 {/snippet}

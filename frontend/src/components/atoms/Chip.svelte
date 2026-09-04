@@ -42,10 +42,20 @@
   .chip.dashed { border-style: dashed; border-color: var(--faint); color: var(--faint); background: transparent; }
 
   .remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: 0;
+    border-radius: 2px;
+    background: transparent;
     color: var(--faint);
     font-size: 12px;
     line-height: 1;
     padding: 0;
+    opacity: 0.55;
   }
-  .remove:hover { color: var(--muted); }
+  .remove:hover { color: currentColor; background: color-mix(in srgb, currentColor 8%, transparent); opacity: 1; }
+  .remove:focus-visible { color: currentColor; opacity: 1; outline: 2px solid var(--action); outline-offset: 1px; }
 </style>
