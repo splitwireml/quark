@@ -142,6 +142,26 @@ button:disabled { cursor: not-allowed; }
   transform: translate(-50%, 0) scale(1);
   transition-delay: 260ms;
 }
+[data-tip-position='top']::after {
+  top: auto;
+  bottom: calc(100% + 5px);
+  transform: translate(-50%, 2px) scale(0.96);
+  transform-origin: bottom center;
+}
+[data-tip-position='top']:hover::after,
+[data-tip-position='top']:focus-visible::after { transform: translate(-50%, 0) scale(1); }
+[data-tip-align='start']::after { left: 0; transform: translate(0, -2px) scale(0.96); transform-origin: top left; }
+[data-tip-align='start']:hover::after,
+[data-tip-align='start']:focus-visible::after { transform: translate(0, 0) scale(1); }
+[data-tip-position='top'][data-tip-align='start']::after { transform: translate(0, 2px) scale(0.96); transform-origin: bottom left; }
+[data-tip-position='top'][data-tip-align='start']:hover::after,
+[data-tip-position='top'][data-tip-align='start']:focus-visible::after { transform: translate(0, 0) scale(1); }
+[data-tip-align='end']::after { right: 0; left: auto; transform: translate(0, -2px) scale(0.96); transform-origin: top right; }
+[data-tip-align='end']:hover::after,
+[data-tip-align='end']:focus-visible::after { transform: translate(0, 0) scale(1); }
+[data-tip-position='top'][data-tip-align='end']::after { transform: translate(0, 2px) scale(0.96); transform-origin: bottom right; }
+[data-tip-position='top'][data-tip-align='end']:hover::after,
+[data-tip-position='top'][data-tip-align='end']:focus-visible::after { transform: translate(0, 0) scale(1); }
 [data-tip][aria-expanded='true']::after, [data-tip][open]::after { content: none; }
 
 /* Menu triggers: an icon at rest that expands to name itself on hover, on

@@ -21,4 +21,6 @@ export type IconName =
   | 'collapse'
   | 'braces'
   | 'link'
+  | 'eye'
+  | 'eye-off'
   | 'undo';

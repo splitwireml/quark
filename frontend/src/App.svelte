@@ -104,7 +104,8 @@
   let filterValue = $state('');
   let columnSearch = $state('');
   let columnMenuSearch = $state('');
-  let nullThreshold = $state(50);
+  let columnMenuRegex = $state(false);
+  let nullThreshold = $state(100);
   let activeColumnMatch = $state(0);
   let selectedCell = $state<{ row: number; column: string; expanded?: boolean } | null>(null);
   let editingCell = $state<{ row: number; column: string; value: string; original: string } | null>(null);
@@ -234,7 +235,15 @@
   let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateColumn));
   let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
-  let columnMenuItems = $derived.by(() => { const query = columnMenuSearch.trim().toLowerCase(); return query ? orderedColumns.filter((column) => column.name.toLowerCase().includes(query)) : orderedColumns; });
+  let columnMenuRegexResult = $derived(matchColumnsByRegex(columnOrder, columnMenuSearch.trim()));
+  let columnMenuItems = $derived.by(() => {
+    const query = columnMenuSearch.trim();
+    if (!query) return orderedColumns;
+    if (!columnMenuRegex) return orderedColumns.filter((column) => column.name.toLowerCase().includes(query.toLowerCase()));
+    if (columnMenuRegexResult.error) return [];
+    const matches = new Set(columnMenuRegexResult.matches);
+    return orderedColumns.filter((column) => matches.has(column.name));
+  });
   let columnTypes = $derived([...new Set((result?.columns ?? []).map((column) => column.type))]);
   let columnTypeCounts = $derived.by(() => { const counts: Record<string, number> = Object.create(null); for (const column of result?.columns ?? []) counts[column.type] = (counts[column.type] ?? 0) + 1; return counts; });
   let aggregateRowTones = $derived.by(() => {
@@ -1707,6 +1716,10 @@
     if (setHidden([], { kind: 'show', summary: 'Show all columns', details: { columns: [...hiddenColumns] } })) lastHiddenColumn = null;
     shownColumnTypes = [];
   }
+  function hideAllColumns() {
+    const columns = visibleColumns.filter((column) => !isColumnProtected(column.name)).map((column) => column.name);
+    if (columns.length && setHidden([...hiddenColumns, ...columns], { kind: 'hide', summary: 'Hide all columns', details: { columns } })) lastHiddenColumn = columns[columns.length - 1];
+  }
   function isTypeShown(type: string): boolean { return shownColumnTypes.length === 0 || shownColumnTypes.includes(type); }
   function showColumnsOfTypes(types: string[]) {
     const columns = result?.columns ?? [];
@@ -2089,10 +2102,12 @@
                     open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}
                     visibleCount={visibleColumns.length} totalCount={result?.columns.length ?? 0}
                     {columnMenuSearch} setColumnMenuSearch={(value) => columnMenuSearch = value}
+                    {columnMenuRegex} setColumnMenuRegex={(value) => columnMenuRegex = value}
+                    columnMenuRegexError={columnMenuRegex ? columnMenuRegexResult.error : ''}
                     {columnTypes} {columnTypeCounts} {isTypeShown} {toggleShownType} {typeToggleDisabled}
                     {nullThreshold} setNullThreshold={(value) => nullThreshold = value}
-                    onHideFullyEmpty={() => hideColumnsAtNullFraction(1)}
                     onApplyThreshold={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}
+                    onHideAll={hideAllColumns}
                     onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
                     {columnMenuItems} {hiddenColumns} {isColumnProtected}
                     visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
