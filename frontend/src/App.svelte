@@ -33,7 +33,7 @@
   import ProfileInspector from './components/organisms/ProfileInspector.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
   import FormulaMenu from './components/organisms/FormulaMenu.svelte';
-  import ExportDialog from './components/organisms/ExportDialog.svelte';
+  import ExportMenu from './components/organisms/ExportMenu.svelte';
   import ProjectsScreen from './components/organisms/ProjectsScreen.svelte';
   import AppShell from './components/templates/AppShell.svelte';
 
@@ -143,7 +143,6 @@
   let mutationTarget = $state<{ kind: 'insert'; insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | { kind: 'modify'; column: ColumnInfo } | null>(null);
   let mutationApplying = $state(false);
   let mutationError = $state('');
-  let exportDialog = $state<HTMLDialogElement | null>(null);
   let exportOpen = $state(false);
   let exportFormat = $state<ExportFormat>('csv');
   let exportOptions = $state.raw<ExportOption[]>([]);
@@ -526,7 +525,8 @@
   }
 
   async function openExport(trigger: HTMLButtonElement) {
-    if (!currentExportOption || exportOpen) return;
+    if (!currentExportOption) return;
+    if (exportOpen) { closeExport(); return; }
     exportTrigger = trigger;
     exportOpen = true;
     exportFormat = 'csv';
@@ -536,7 +536,6 @@
     exportLoading = false;
     exportRequestId++;
     await tick();
-    exportDialog?.showModal();
     exportOptions = projectViews.filter((view) => view.id !== currentHistory?.id).reduce<ExportOption[]>((options, view) => {
       const version = view.versions.find((item) => item.id === view.activeVersionId);
       if (!version) return options;
@@ -551,7 +550,8 @@
     }, []);
   }
 
-  function finishExportClose() {
+  function closeExport() {
+    if (exporting) return;
     const trigger = exportTrigger;
     exportRequestId++;
     exportOpen = false;
@@ -559,7 +559,6 @@
     exportSelectedKeys = ['current'];
     exportError = '';
     exportLoading = false;
-    exporting = false;
     exportTrigger = null;
     tick().then(() => trigger?.focus());
   }
@@ -589,7 +588,8 @@
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
-      exportDialog?.close();
+      exporting = false;
+      closeExport();
     } catch (reason) { exportError = message(reason); }
     finally { exporting = false; }
   }
@@ -1874,8 +1874,18 @@
             {loadingData} canExport={!!result} {exporting}
             pendingCount={currentHistory?.pendingChanges.length ?? 0}
             onStopRecording={stopRecording}
+            {exportOpen}
             inert={!!inspectorMode || tableExpanded}
-          />
+          >
+            {#snippet exportMenu()}
+              <ExportMenu
+                open={exportOpen} current={currentExportOption} options={exportOptions}
+                selectedKeys={exportSelectedKeys} loading={exportLoading} {exporting} error={exportError}
+                setFormat={setExportFormat} onToggle={toggleExportOption}
+                onExport={runExport} onClose={closeExport}
+              />
+            {/snippet}
+          </DatasetHead>
           <DatasetTabsBar
             {workspaceTab} {tableExpanded} {rowDensity}
             historyCount={currentHistory?.versions.length ?? 0}
@@ -2103,20 +2113,6 @@
     onClose={finishMutationClose}
     onCancelAttempt={(event) => { if (mutationApplying) event.preventDefault(); }}
     onApply={applyMutation}
-  />
-{/if}
-
-{#if exportOpen}
-  <ExportDialog
-    format={exportFormat} current={currentExportOption} options={exportOptions}
-    selectedKeys={exportSelectedKeys} loading={exportLoading} {exporting} error={exportError}
-    setDialog={(element) => exportDialog = element}
-    setFormat={setExportFormat} onToggle={toggleExportOption}
-    onClose={finishExportClose}
-    onCancelAttempt={(event) => { if (exporting) event.preventDefault(); }}
-    onBackdropClick={(event) => { if (event.target === exportDialog && !exporting) exportDialog?.close(); }}
-    onCancel={() => exportDialog?.close()}
-    onExport={runExport}
   />
 {/if}
 

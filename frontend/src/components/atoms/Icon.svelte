@@ -1,8 +1,9 @@
 <script lang="ts">
-  type Props = { name: 'upload' | 'database' | 'chevron' | 'file' | 'link' | 'plus' | 'arrow-right' | 'grid' | 'list'; size?: number };
+  type Props = { name: 'upload' | 'database' | 'chevron' | 'file' | 'link' | 'plus' | 'arrow-right' | 'download' | 'grid' | 'list'; size?: number };
   let { name, size = 16 }: Props = $props();
   const paths: Record<Props['name'], string> = {
     upload: 'M8 10.5V2.5M8 2.5 5 5.5M8 2.5l3 3M2.5 10v2.5a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V10',
+    download: 'M8 2.5V10M8 10 5 7M8 10l3-3M2.5 10v2.5a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V10',
     database: 'M13 4c0 1.1-2.24 2-5 2S3 5.1 3 4s2.24-2 5-2 5 .9 5 2ZM3 4v8c0 1.1 2.24 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.24 2 5 2s5-.9 5-2',
     chevron: 'm6 3.5 4.5 4.5L6 12.5',
     file: 'M9 2H4.5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.5L9 2ZM9 2v3.5h3.5',
