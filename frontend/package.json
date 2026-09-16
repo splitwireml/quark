@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --experimental-strip-types --test tests/aggregate-sql.test.js tests/clipboard.test.js tests/join-sql.test.js tests/mutation-sql.test.js tests/row-scrollbar.test.js tests/versioning.test.js",
-    "test:mutation": "node --experimental-strip-types --test tests/mutation-sql.test.js"
+    "test": "node --experimental-strip-types --test tests/aggregate-sql.test.js tests/clipboard.test.js tests/join-sql.test.js tests/mutation-sql.test.js tests/row-scrollbar.test.js tests/scroll-prefetch.test.js tests/versioning.test.js",
+    "test:mutation": "node --experimental-strip-types --test tests/mutation-sql.test.js",
+    "test:scroll-browser": "node tests/scroll-browser.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "latest",

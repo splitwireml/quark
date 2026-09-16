@@ -65,8 +65,8 @@ export function queryDataset(nodeId: string, dataset: string, body: QueryRequest
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/query`, json(body));
 }
 
-export function querySql(nodeId: string, body: SqlQueryRequest): Promise<QueryResponse> {
-  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, json(body));
+export function querySql(nodeId: string, body: SqlQueryRequest, signal?: AbortSignal): Promise<QueryResponse> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, { ...json(body), signal });
 }
 
 export function previewJoinWorkspace(body: JoinWorkspaceRequest): Promise<JoinWorkspaceResponse> {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { clampAbsoluteRow, thumbGeometry } from '../../lib/row-scrollbar';
 
   type Props = {
@@ -13,15 +14,41 @@
     disabled: boolean;
     // Absolute dataset row to reveal; the caller changes pages when it leaves the loaded page.
     onSeek: (absoluteRow: number) => void;
+    // Fires continuously while the thumb moves so the grid can scroll live.
+    onDragLive: (absoluteRow: number) => void;
+    // Fires once when the thumb rests while still held, for a snapshot preview.
+    onDragRest: (absoluteRow: number) => void;
+    // Tracks whether the thumb is currently held, so the controller can tell a
+    // held rest (snapshot only) from a free settle (full page turn).
+    onDragHeld: (held: boolean) => void;
   };
 
-  let { totalRows, totalLabel, firstVisibleRow, visibleRows, trackHeight, controls, disabled, onSeek }: Props = $props();
+  let { totalRows, totalLabel, firstVisibleRow, visibleRows, trackHeight, controls, disabled, onSeek, onDragLive, onDragRest, onDragHeld }: Props = $props();
 
   // Direct manipulation only: the thumb tracks the pointer 1:1 with no animation,
   // so there is no motion to gate behind prefers-reduced-motion.
   let track = $state<HTMLDivElement | null>(null);
   let dragFirst = $state<number | null>(null);
   let dragGrab = $state(0);
+  // When pointer capture is unavailable the thumb only sees events under the
+  // cursor, so window-level handlers cover moves and releases elsewhere.
+  let captured = false;
+  let restTimer = 0;
+  let restFired = false;
+  const REST_MS = 350;
+
+  function clearRest() { if (restTimer) clearTimeout(restTimer); restTimer = 0; }
+  onDestroy(() => { clearRest(); if (dragFirst !== null) onDragHeld(false); });
+  function armRest() {
+    clearRest();
+    restFired = false;
+    restTimer = window.setTimeout(() => {
+      restTimer = 0;
+      if (dragFirst === null || restFired) return;
+      restFired = true;
+      onDragRest(clampAbsoluteRow(Math.round(dragFirst), totalRows));
+    }, REST_MS);
+  }
 
   const shownFirst = $derived(dragFirst ?? firstVisibleRow);
   const geometry = $derived(thumbGeometry(trackHeight, totalRows, shownFirst, visibleRows));
@@ -39,7 +66,13 @@
     const thumb = event.currentTarget as HTMLDivElement;
     dragGrab = event.clientY - thumb.getBoundingClientRect().top;
     dragFirst = Math.min(Math.max(firstVisibleRow, 0), maxFirst);
-    thumb.setPointerCapture(event.pointerId);
+    captured = false;
+    try {
+      thumb.setPointerCapture(event.pointerId);
+      captured = true;
+    } catch { /* window handlers below take over */ }
+    onDragHeld(true);
+    armRest();
   }
 
   function moveThumbDrag(event: PointerEvent) {
@@ -49,14 +82,30 @@
     const travel = Math.max(0, rect.height - geometry.thumbHeight);
     const offset = event.clientY - rect.top - dragGrab;
     dragFirst = travel <= 0 ? 0 : (Math.min(Math.max(offset, 0), travel) / travel) * maxFirst;
+    onDragLive(clampAbsoluteRow(Math.round(dragFirst), totalRows));
+    armRest();
   }
 
   function endThumbDrag() {
     if (dragFirst === null) return;
     const target = clampAbsoluteRow(Math.round(dragFirst), totalRows);
     dragFirst = null;
+    captured = false;
+    clearRest();
+    onDragHeld(false);
     onSeek(target);
   }
+
+  function abortThumbDrag() {
+    if (dragFirst === null) return;
+    dragFirst = null;
+    captured = false;
+    clearRest();
+    onDragHeld(false);
+  }
+
+  function windowThumbMove(event: PointerEvent) { if (!captured) moveThumbDrag(event); }
+  function windowThumbUp() { if (!captured) endThumbDrag(); }
 
   function jumpTrack(event: PointerEvent) {
     if (disabled || event.button !== 0) return;
@@ -82,6 +131,8 @@
     onSeek(clampAbsoluteRow(Math.round(targets[event.key]), totalRows));
   }
 </script>
+
+<svelte:window onpointermove={windowThumbMove} onpointerup={windowThumbUp} onpointercancel={abortThumbDrag} onblur={abortThumbDrag} />
 
 {#if geometry.scrollable}
   <!-- The track itself is a pointer-only shortcut; the thumb below is the keyboard control. -->
@@ -109,7 +160,8 @@
       onpointerdown={startThumbDrag}
       onpointermove={moveThumbDrag}
       onpointerup={endThumbDrag}
-      onpointercancel={() => { dragFirst = null; }}
+      onpointercancel={abortThumbDrag}
+      onlostpointercapture={abortThumbDrag}
       onkeydown={seekKey}
     ></div>
     {#if dragFirst !== null}

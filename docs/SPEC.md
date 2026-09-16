@@ -110,6 +110,8 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 ## Acceptance criteria
 - A 100k+ row CSV opens without sending the whole dataset to the browser.
 - Pagination, page size, repeated filters, and ordered multi-sort are executed server-side.
+- Scrolling virtualizes the whole dataset. Slow scans prefetch within the last 10% of a page; faster motion extends the lead using measured fetch latency, capped at two pages and two concurrent page requests. The cache retains the current page, only one previous page, and up to two forward pages.
+- Thumb dragging keeps retained rows moving without loading full pages. A 350 ms held pause fetches small viewport slices; release loads the landing page without resetting the scroll position. Retained placeholder values cannot be edited or selected. Query changes cancel stale requests, and failed visible pages offer Retry.
 - Nullity gauges appear for every column.
 - Numeric stats and histogram load on demand.
 - Projects and their uploaded/attached sources survive backend restart; sources remain isolated to their project.

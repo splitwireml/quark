@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { basicSetup, EditorView } from 'codemirror';
   import { autocompletion, completionStatus, startCompletion, type CompletionSource } from '@codemirror/autocomplete';
   import { keywordCompletionSource, schemaCompletionSource, sql, StandardSQL, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
@@ -9,6 +9,7 @@
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
   import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
+  import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
 
@@ -116,6 +117,57 @@
   let columnMutationError = $state('');
   let renamingColumn = $state<{ original: string; value: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
+  let gridApi = $state<{ scrollToAbsoluteRow: (absolute: number, onlyIfOutside?: boolean) => void } | null>(null);
+  type CachedPage = { page: number; rows: Record<string, unknown>[] };
+  // One previous page, at most two incoming pages, and one viewport preview.
+  let neighborCache = $state.raw<CachedPage | null>(null);
+  let aheadCache = $state.raw<CachedPage[]>([]);
+  let snapshotCache = $state.raw<{ start: number; rows: Record<string, unknown>[] } | null>(null);
+  let pendingSelect: { absRow: number; column: string } | null = null;
+  let renderedQueryKey = $state('');
+  let lastDir: 1 | -1 = 1;
+  let dragHeld = false;
+  let latencyMs = 300;
+  type ViewportReport = { firstRow: number; lastRow: number; velocity: number };
+  let latestViewport: ViewportReport | null = null;
+  const pendingPages = new Map<number, AbortController>();
+  let snapshotRequest: AbortController | null = null;
+  const fetchFailures = new Map<number, { at: number; message: string }>();
+  let gridLoadError = $state('');
+  const FETCH_FAIL_COOLDOWN_MS = 5000;
+
+  function currentQueryKey(): string {
+    return JSON.stringify({
+      node: activeSqlNodeId || selectedNodeId,
+      sql: sqlBase || activeSql || activeVersion?.sql || '',
+      filters, sorts, dedupe: dedupeColumns, size: pageSize,
+    });
+  }
+  function cancelSnapshot() {
+    snapshotRequest?.abort();
+    snapshotRequest = null;
+  }
+  function resetBackground() {
+    for (const request of pendingPages.values()) request.abort();
+    pendingPages.clear();
+    cancelSnapshot();
+    neighborCache = null;
+    aheadCache = [];
+    snapshotCache = null;
+    pendingSelect = null;
+    latestViewport = null;
+    fetchFailures.clear();
+    gridLoadError = '';
+    dragHeld = false;
+  }
+  onDestroy(resetBackground);
+  $effect(() => {
+    const key = currentQueryKey();
+    if (key !== renderedQueryKey) {
+      resetBackground();
+      renderedQueryKey = key;
+    }
+  });
   let categoryValues = $state.raw<CategoryValue[]>([]);
   let categorySearch = $state('');
   let categoryTotal = $state<AggregateCount>(0);
@@ -492,6 +544,7 @@
     if (!current || !targetNodeId || mutationApplying) return false;
     if (!query) { if (mutationTarget) mutationError = 'Could not build the column query.'; else columnMutationError = 'Could not build the column query.'; return false; }
     const id = ++requestId;
+    resetBackground();
     mutationApplying = true;
     loadingData = true;
     mutationError = '';
@@ -1188,6 +1241,7 @@
   function clearWorkspaceState() {
     replayRequestId++;
     requestId++;
+    resetBackground();
     sourceRequestId++;
     closeInspector();
     resetSql(undefined);
@@ -1516,6 +1570,7 @@
       if (!keepAggregateBuilder) clearAggregateDraft();
     }
     const id = ++requestId;
+    resetBackground();
     loadingData = true;
     error = '';
     sqlError = '';
@@ -1538,7 +1593,9 @@
       }
       page = next.page;
       pageInput = String(next.page);
-      if (sqlOpen) { await tick(); createSqlEditor(); }
+      await tick();
+      gridApi?.scrollToAbsoluteRow((next.page - 1) * next.page_size);
+      if (sqlOpen) createSqlEditor();
       return true;
     } catch (reason) { if (id === requestId) sqlError = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
@@ -1755,19 +1812,144 @@
     })) lastHiddenColumn = action === 'hide' ? columns[columns.length - 1] : null;
     return '';
   }
-  async function changePage(next: number) { if (next < 1 || next > totalPages || next === page) return; page = next; await loadActiveData(); }
-  // The custom scrollbar seeks absolute dataset rows: crossing a page boundary
-  // loads the target page first, then restores the intra-page scroll position.
+  async function changePage(next: number) {
+    if (next < 1 || next > totalPages || next === result?.page) return;
+    await seekRow((next - 1) * Math.max(1, result?.page_size ?? pageSize));
+  }
   async function seekRow(absoluteRow: number) {
     if (loadingData || !result) return;
+    cancelSnapshot();
+    const total = safeTotalRows(result.total_rows);
+    if (total <= 0) return;
+    const clamped = clampAbsoluteRow(absoluteRow, total);
+    gridApi?.scrollToAbsoluteRow(clamped);
+    const visible = cellPageSize();
+    handleViewport({ firstRow: clamped, lastRow: Math.min(total - 1, clamped + visible), velocity: 0 });
+    await consumePendingSelect();
+  }
+  async function previewSeek(absoluteRow: number, column: string) {
+    if (!result || loadingData) return;
+    pendingSelect = { absRow: Math.floor(absoluteRow), column };
+    await seekRow(absoluteRow);
+  }
+  async function consumePendingSelect() {
+    const pending = pendingSelect;
+    if (!pending || !result) return;
+    const start = (result.page - 1) * Math.max(1, result.page_size);
+    const index = pending.absRow - start;
+    if (index < 0 || index >= result.rows.length) return;
+    const name = visibleColumns.some((column) => column.name === pending.column) ? pending.column : visibleColumns[0]?.name;
+    pendingSelect = null;
+    if (!name) return;
+    selectedCell = { row: index, column: name, expanded: false };
+    await focusCell(index, name);
+  }
+  function promotePage(cache: CachedPage) {
+    if (!result || cache.page === result.page) return;
+    const left = { page: result.page, rows: result.rows };
+    result = { ...result, rows: cache.rows, page: cache.page };
+    neighborCache = left;
+    aheadCache = aheadCache.filter((entry) => entry.page !== cache.page);
+    selectedCell = null;
+    editingCell = null;
+    page = cache.page;
+    pageInput = String(cache.page);
+    void consumePendingSelect();
+  }
+  function prefetchContext() {
+    const targetNodeId = activeSqlNodeId || selectedNodeId;
+    const sql = sqlBase || activeSql || activeVersion?.sql;
+    if (!targetNodeId || !sql || !result) return null;
+    return { targetNodeId, sql, filters, sorts, dedupe_columns: dedupeColumns, key: currentQueryKey(), generation: requestId };
+  }
+  async function fetchPageBackground(page: number) {
+    const context = prefetchContext();
+    if (!context || !result || pendingPages.has(page) || pendingPages.size >= 2) return;
+    const failedAt = fetchFailures.get(page);
+    if (failedAt !== undefined && performance.now() - failedAt.at < FETCH_FAIL_COOLDOWN_MS) return;
+    const controller = new AbortController();
+    pendingPages.set(page, controller);
+    const started = performance.now();
+    try {
+      const next = await api.querySql(context.targetNodeId, { sql: context.sql, page, page_size: result.page_size, filters: context.filters, sorts: context.sorts, dedupe_columns: context.dedupe_columns }, controller.signal);
+      if (controller.signal.aborted || context.generation !== requestId || context.key !== currentQueryKey() || !result) return;
+      latencyMs = latencyEma(latencyMs, performance.now() - started);
+      aheadCache = [...aheadCache.filter((entry) => entry.page !== next.page), { page: next.page, rows: next.rows }].slice(-2);
+      fetchFailures.delete(page);
+    } catch (reason) {
+      if (!controller.signal.aborted && context.generation === requestId && context.key === currentQueryKey()) {
+        fetchFailures.set(page, { at: performance.now(), message: message(reason) });
+      }
+    } finally {
+      if (pendingPages.get(page) === controller) pendingPages.delete(page);
+      if (!controller.signal.aborted && context.generation === requestId && latestViewport) handleViewport(latestViewport);
+    }
+  }
+  async function fetchSnapshot(absoluteRow: number) {
+    cancelSnapshot();
+    const context = prefetchContext();
+    if (!context || !result || !dragHeld) return;
+    const total = safeTotalRows(result.total_rows);
+    const clamped = clampAbsoluteRow(absoluteRow, total);
+    const visible = cellPageSize() + 8;
+    const end = Math.min(total - 1, clamped + visible);
+    const window = snapshotWindow(clamped, visible);
+    const size = Math.max(1, result.page_size);
+    const covers = (start: number, length: number) => clamped >= start && end < start + length;
+    if (covers((result.page - 1) * size, result.rows.length)) return;
+    if (snapshotCache && covers(snapshotCache.start, snapshotCache.rows.length)) return;
+    const controller = new AbortController();
+    snapshotRequest = controller;
+    try {
+      // A viewport straddling the preview grid needs both small slices.
+      const pages = pagesForRange(clamped, end, window.size, Math.ceil(total / window.size));
+      const chunks = await Promise.all(pages.map((page) => api.querySql(context.targetNodeId, { sql: context.sql, page, page_size: window.size, filters: context.filters, sorts: context.sorts, dedupe_columns: context.dedupe_columns }, controller.signal)));
+      if (controller.signal.aborted || !dragHeld || context.generation !== requestId || context.key !== currentQueryKey()) return;
+      snapshotCache = { start: (pages[0] - 1) * window.size, rows: chunks.reduce<Record<string, unknown>[]>((rows, chunk) => [...rows, ...chunk.rows], []) };
+    } catch { /* Retain visible rows; releasing retries with a full page. */ }
+    finally { if (snapshotRequest === controller) snapshotRequest = null; }
+  }
+  function thumbHeld(held: boolean) {
+    dragHeld = held;
+    cancelSnapshot();
+    if (held) {
+      for (const request of pendingPages.values()) request.abort();
+      pendingPages.clear();
+    }
+  }
+  function snapshotRest(absoluteRow: number) {
+    if (!result || loadingData) return;
+    void fetchSnapshot(absoluteRow);
+  }
+  function retryGridLoad() {
+    fetchFailures.clear();
+    gridLoadError = '';
+    if (latestViewport) handleViewport(latestViewport);
+  }
+  function handleViewport(report: ViewportReport) {
+    latestViewport = report;
+    if (!result || loadingData || cellEditSaving || currentQueryKey() !== renderedQueryKey) return;
+    if (dragHeld) { cancelSnapshot(); return; }
     const total = safeTotalRows(result.total_rows);
     if (total <= 0) return;
     const size = Math.max(1, result.page_size);
-    const { page: next, intraRow } = absoluteRowToPage(clampAbsoluteRow(absoluteRow, total), size, Math.max(totalPages, 1));
-    if (next !== page) await changePage(next);
-    await tick();
-    const rowHeight = tableScroll?.querySelector('tbody tr:not(.spacer)')?.getBoundingClientRect().height || 34;
-    if (tableScroll) tableScroll.scrollTop = Math.max(0, intraRow * rowHeight);
+    if (report.velocity !== 0) lastDir = report.velocity > 0 ? 1 : -1;
+    const target = absoluteRowToPage(clampAbsoluteRow(report.firstRow, total), size, Math.max(totalPages, 1)).page;
+    gridLoadError = pagesForRange(report.firstRow, report.lastRow, size, totalPages).map((page) => fetchFailures.get(page)?.message).find(Boolean) ?? '';
+    const cached = [neighborCache, ...aheadCache].find((entry) => entry?.page === target);
+    if (cached) promotePage(cached);
+    const wanted = criticalPages({ ...report, pageSize: size, totalPages: Math.max(totalPages, 1), currentPage: result.page, coveredPages: [result.page], latencyMs, lastDir });
+    aheadCache = aheadCache.filter((entry) => wanted.includes(entry.page));
+    for (const [page, controller] of pendingPages) {
+      if (!wanted.includes(page)) { controller.abort(); pendingPages.delete(page); }
+    }
+    const covered = [result.page, ...(neighborCache ? [neighborCache.page] : []), ...aheadCache.map((entry) => entry.page)];
+    for (const page of wanted) if (!covered.includes(page)) void fetchPageBackground(page);
+    if (snapshotCache) {
+      const loaded = [result, neighborCache, ...aheadCache].filter((entry) => entry !== null);
+      const visiblePages = pagesForRange(report.firstRow, Math.min(total - 1, report.lastRow), size, totalPages);
+      if (visiblePages.every((page) => loaded.some((entry) => entry.page === page))) snapshotCache = null;
+    }
   }
   async function jumpPage() { const next = Math.min(Math.max(1, Number.parseInt(pageInput) || 1), Math.max(totalPages, 1)); pageInput = String(next); await changePage(next); }
   async function changePageSize(event: Event) { pageSize = Number((event.currentTarget as HTMLSelectElement).value); page = 1; await loadActiveData(); }
@@ -1872,11 +2054,12 @@
     cellEditError = '';
   }
   async function focusCell(row: number, column: string) {
+    if (result) gridApi?.scrollToAbsoluteRow((result.page - 1) * result.page_size + row, true);
     await tick();
     const cell = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('td[data-row][data-column]') ?? [])].find(
       (element) => Number(element.dataset.row) === row && element.dataset.column === column,
     );
-    cell?.focus();
+    cell?.focus({ preventScroll: true });
   }
   // One screen of rows, used by PageUp/PageDown. The grid is a single tab stop, so these
   // are the only way a keyboard user crosses a long page without holding an arrow key.
@@ -1943,6 +2126,7 @@
     const query = buildCellEditSql(current.sql, current.columns.map((column) => column.name), rowNumber, edit.column, edit.value);
     if (!query) { cellEditError = 'Could not build the cell edit query.'; return; }
     const id = ++requestId;
+    resetBackground();
     cellEditSaving = true;
     cellEditError = '';
     try {
@@ -2101,8 +2285,8 @@
             {/snippet}
           </DatasetHead>
           {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
-            {#if error}
-              <div class="banner error-banner" role="alert"><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => loadData()}>Retry</button></div>
+            {#if error || gridLoadError}
+              <div class="banner error-banner" role="alert"><div><strong>Request failed</strong><p>{error || gridLoadError}</p></div><button onclick={() => gridLoadError ? retryGridLoad() : loadData()}>Retry</button></div>
             {/if}
             {#if selectedDataset}
               <QueryConditionBar
@@ -2199,8 +2383,13 @@
                       <div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
                     {:else if result}
                       <DataGridTable
+                        bind:this={gridApi}
                         columns={visibleColumns} bodyColumns={rowColumns} rows={result.rows}
                         rowOffset={(result.page - 1) * result.page_size}
+                        pageSize={result.page_size}
+                        neighbor={neighborCache} ahead={aheadCache} snapshot={snapshotCache}
+                        onSnapshotRest={snapshotRest} onThumbHeld={thumbHeld} onViewportNeed={handleViewport}
+                        onPreviewSelect={previewSeek}
                         pinnedColumns={livePins} onTogglePin={togglePinColumn}
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
                         {rowDensity} {fitColumnsToContent}

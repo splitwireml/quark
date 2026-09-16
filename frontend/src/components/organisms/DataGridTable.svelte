@@ -2,6 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import Icon from '../atoms/Icon.svelte';
   import RowScrollbar from '../atoms/RowScrollbar.svelte';
+  import { scrollRowStep, smoothVelocity } from '../../lib/scroll-prefetch';
   import InsertionHandle from '../atoms/InsertionHandle.svelte';
   import ColumnHeaderCell from '../molecules/ColumnHeaderCell.svelte';
   import { rangeToHtml, rangeToText } from '../../lib/clipboard';
@@ -64,8 +65,18 @@
     onCancelReorder: () => void;
     totalRows: number;
     totalLabel: string;
+    pageSize: number;
     seekDisabled: boolean;
     onSeekRow: (row: number) => void;
+    // One cached non-current page and one transient snapshot window, positioned below.
+    neighbor: { page: number; rows: Record<string, unknown>[] } | null;
+    ahead: { page: number; rows: Record<string, unknown>[] }[];
+    snapshot: { start: number; rows: Record<string, unknown>[] } | null;
+    onSnapshotRest: (row: number) => void;
+    onThumbHeld: (held: boolean) => void;
+    onViewportNeed: (report: { firstRow: number; lastRow: number; velocity: number }) => void;
+    // Clicks on cached/snapshot rows settle that position instead of selecting.
+    onPreviewSelect: (absoluteRow: number, column: string) => void;
   };
 
   let {
@@ -75,53 +86,78 @@
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
     renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename,
     onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder,
-    totalRows, totalLabel, seekDisabled, onSeekRow
+    totalRows, totalLabel, pageSize, seekDisabled, onSeekRow,
+    neighbor, ahead, snapshot, onSnapshotRest, onThumbHeld, onViewportNeed, onPreviewSelect
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
   // Rank is only worth showing once the sort is actually ordered across columns.
   function sortRankFor(name: string): number { return sorts.length > 1 ? sorts.findIndex((sort) => sort.column === name) + 1 : 0; }
 
-  // Only the rows near the viewport are rendered; the rest are represented by two spacer rows
-  // that hold the scrollbar at full height. Rows are a uniform height per density, so the
-  // window is pure arithmetic and needs no per-row measurement.
+  // The canvas spans the whole dataset, not just the loaded page: only rows near
+  // the viewport render, positioned by absolute spacers. Loaded segments (current
+  // page, previous page, lookahead, snapshot) fill their rows; missing rows keep
+  // the last page moving until the controller backfills them. Rows are
+  // a uniform height per density, so the window is pure arithmetic.
   const OVERSCAN = 8;
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
   // Keep in step with the `--row-height` fallback on td below.
   const DEFAULT_ROW_HEIGHT = 34;
-  let rowHeight = $state(DEFAULT_ROW_HEIGHT);
+  const ROW_HEIGHTS: Record<string, number> = { compact: 26, default: DEFAULT_ROW_HEIGHT, comfortable: 42 };
+  const rowHeight = $derived(ROW_HEIGHTS[rowDensity] ?? DEFAULT_ROW_HEIGHT);
+  let velocity = $state(0);
 
-  // Absolute dataset position of the viewport top: the page's first row plus the
-  // scrolled distance inside the page. Drives the total-based custom scrollbar.
-  const firstVisibleRow = $derived(rowOffset + (rowHeight > 0 ? scrollTop / rowHeight : 0));
-  const visibleRowCount = $derived(rowHeight > 0 ? viewportHeight / rowHeight : 0);
+  const visibleRowCount = $derived(Math.max(0, viewportHeight - 48) / rowHeight);
+  const pxPerRow = $derived(scrollRowStep(totalRows, rowHeight, Math.max(0, viewportHeight - 48)));
+  const firstVisibleRow = $derived(Math.min(Math.max(0, totalRows - visibleRowCount), scrollTop / pxPerRow));
+  const lastVisibleRow = $derived(Math.min(totalRows - 1, firstVisibleRow + visibleRowCount));
 
-  const windowSize = $derived(Math.ceil(viewportHeight / rowHeight) + OVERSCAN * 2);
-  const scrollFirstRow = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
-  // A selected cell must stay rendered even when it sits outside the scrolled window: it carries
-  // the grid's only tab stop, and focusing it is what scrolls the window back to it.
-  const firstRow = $derived(
-    selectedCell && (selectedCell.row < scrollFirstRow || selectedCell.row >= scrollFirstRow + windowSize)
-      ? Math.max(0, Math.min(selectedCell.row - OVERSCAN, Math.max(0, rows.length - windowSize)))
-      : scrollFirstRow,
-  );
-  const lastRow = $derived(Math.min(rows.length, firstRow + windowSize));
-  const windowRows = $derived(rows.slice(firstRow, lastRow));
+  type Segment = { kind: 'current' | 'neighbor' | 'snapshot' | 'retained'; start: number; rows: Record<string, unknown>[] };
+  const size = $derived(Math.max(1, Math.floor(pageSize)));
+  const segments = $derived<Segment[]>([
+    { kind: 'current', start: rowOffset, rows },
+    ...(neighbor && neighbor.rows.length ? [{ kind: 'neighbor' as const, start: (neighbor.page - 1) * size, rows: neighbor.rows }] : []),
+    ...ahead.map((entry) => ({ kind: 'neighbor' as const, start: (entry.page - 1) * size, rows: entry.rows })),
+    ...(snapshot && snapshot.rows.length ? [{ kind: 'snapshot' as const, start: snapshot.start, rows: snapshot.rows }] : []),
+  ]);
+  function segmentAt(absolute: number): Segment | undefined {
+    return segments.find((segment) => absolute >= segment.start && absolute < segment.start + segment.rows.length);
+  }
+
+  type Block = { key: string; seg: Segment['kind']; cells: { abs: number; row: Record<string, unknown> }[] };
+  function windowFirst(): number { return Math.max(0, Math.floor(firstVisibleRow) - OVERSCAN); }
+  const blocks = $derived.by<Block[]>(() => {
+    const first = windowFirst();
+    const last = Math.min(totalRows, Math.ceil(firstVisibleRow + visibleRowCount) + OVERSCAN);
+    const list: Block[] = [];
+    for (let cursor = first; cursor < last; cursor += 1) {
+      const segment = segmentAt(cursor);
+      const kind = segment?.kind ?? 'retained';
+      // Keep the previous data moving under the pointer while a destination is
+      // pending. Retained values are non-interactive and hidden from AT.
+      const row = segment ? segment.rows[cursor - segment.start] : rows[cursor % Math.max(1, rows.length)];
+      if (!row) continue;
+      let block = list[list.length - 1];
+      if (!block || block.seg !== kind) {
+        block = { key: `${kind}-${cursor}`, seg: kind, cells: [] };
+        list.push(block);
+      }
+      block.cells.push({ abs: cursor, row });
+    }
+    return list;
+  });
+  const topPad = $derived(Math.max(0, scrollTop - (firstVisibleRow - windowFirst()) * rowHeight));
+  const bottomPad = $derived(Math.max(0, Math.min(10_000_000, totalRows * rowHeight) - topPad - blocks.reduce((sum, block) => sum + block.cells.length * rowHeight, 0)));
 
   // Roving tabindex: the grid is one tab stop, not one per cell. Arrow keys move within it.
   const activeColumn = $derived(
     bodyColumns.some((column) => column.name === selectedCell?.column) ? selectedCell!.column : bodyColumns[0]?.name,
   );
-  const activeRow = $derived(selectedCell?.row ?? firstRow);
-  const padTop = $derived(firstRow * rowHeight);
-  const padBottom = $derived(Math.max(0, (rows.length - lastRow) * rowHeight));
+  const activeRow = $derived(selectedCell?.row ?? -1);
   const bodyCellCount = $derived(bodyColumns.length * 2);
   const lastColumn = $derived(columns[columns.length - 1]);
 
-  // Mirrors the --row-height values set per density in App.svelte.
-  const ROW_HEIGHTS: Record<string, number> = { compact: 26, default: DEFAULT_ROW_HEIGHT, comfortable: 42 };
-  $effect(() => { rowHeight = ROW_HEIGHTS[rowDensity] ?? DEFAULT_ROW_HEIGHT; });
 
   let contextMenu = $state<{ column: ColumnInfo; x: number; y: number } | null>(null);
   let contextMenuElement = $state<HTMLDivElement | null>(null);
@@ -154,18 +190,74 @@
     }
   }
 
+  // Programmatic API for the parent (via bind:this): absolute dataset rows.
+  export function scrollToAbsoluteRow(absolute: number, onlyIfOutside = false) {
+    if (!scrollElement) return;
+    if (onlyIfOutside && absolute >= firstVisibleRow && absolute < lastVisibleRow - 1) return;
+    scrollElement.scrollTop = Math.max(0, absolute * pxPerRow);
+    scrollTop = scrollElement.scrollTop;
+  }
+
+  let lastScrollTop = 0;
+  let lastScrollTime = 0;
+  let reportTimer = 0;
+  let restTimer = 0;
+  const REPORT_MS = 100;
+  const REST_MS = 150;
+
+  function emitViewport() {
+    onViewportNeed({ firstRow: firstVisibleRow, lastRow: lastVisibleRow, velocity });
+  }
+  function clearViewportTimers() {
+    if (reportTimer) clearTimeout(reportTimer);
+    if (restTimer) clearTimeout(restTimer);
+    reportTimer = 0;
+    restTimer = 0;
+  }
+
   function scrollHost(node: HTMLDivElement) {
     scrollElement = node;
     setTableScroll(node);
     viewportHeight = node.clientHeight;
-    const onScroll = () => { scrollTop = node.scrollTop; };
+    lastScrollTop = node.scrollTop;
+    lastScrollTime = 0;
+    const onScroll = () => {
+      const now = performance.now();
+      scrollTop = node.scrollTop;
+      const elapsed = lastScrollTime > 0 ? Math.max(1, now - lastScrollTime) : 0;
+      const instant = ((node.scrollTop - lastScrollTop) / pxPerRow / (elapsed || 16)) * 1000;
+      velocity = smoothVelocity(velocity, instant);
+      lastScrollTop = node.scrollTop;
+      lastScrollTime = now;
+      if (restTimer) clearTimeout(restTimer);
+      restTimer = window.setTimeout(() => { restTimer = 0; velocity = 0; emitViewport(); }, REST_MS);
+      if (!reportTimer) {
+        emitViewport();
+        reportTimer = window.setTimeout(() => { reportTimer = 0; emitViewport(); }, REPORT_MS);
+      }
+    };
+    // The compressed canvas changes scrollbar travel, never wheel/trackpad speed.
+    const onWheel = (event: WheelEvent) => {
+      if (pxPerRow >= rowHeight || event.ctrlKey || event.shiftKey || !event.deltaY) return;
+      event.preventDefault();
+      const unit = event.deltaMode === 1 ? rowHeight : event.deltaMode === 2 ? node.clientHeight : 1;
+      node.scrollTop += event.deltaY * unit * pxPerRow / rowHeight;
+      node.scrollLeft += event.deltaX * unit;
+    };
+    node.addEventListener('wheel', onWheel, { passive: false });
     node.addEventListener('scroll', onScroll, { passive: true });
-    const observer = new ResizeObserver(() => { viewportHeight = node.clientHeight; });
+    const observer = new ResizeObserver(() => {
+      viewportHeight = node.clientHeight;
+      emitViewport();
+    });
     observer.observe(node);
+    requestAnimationFrame(() => emitViewport());
     return {
       destroy: () => {
+        node.removeEventListener('wheel', onWheel);
         node.removeEventListener('scroll', onScroll);
         observer.disconnect();
+        clearViewportTimers();
         scrollElement = null;
         setTableScroll(null);
       },
@@ -472,31 +564,36 @@
         {/each}
       </tr>
     </thead>
-    <tbody>
-      {#if padTop > 0}
-        <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${padTop}px`}></td></tr>
+    <tbody aria-busy={blocks.some((block) => block.seg === 'retained')}>
+      {#if topPad > 0}
+        <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${topPad}px`}></td></tr>
       {/if}
-      {#each windowRows as row, windowIndex (row)}
-        {@const index = firstRow + windowIndex}
-        {@const rowActive = !!range && index >= range.top && index <= range.bottom}
-        <tr aria-rowindex={rowOffset + index + 2} class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
+      {#each blocks as block (block.key)}
+          {#each block.cells as item (item.abs)}
+            {@const abs = item.abs}
+            {@const row = item.row}
+            {@const pending = block.seg === 'retained'}
+            {@const inCurrent = block.seg === 'current'}
+            {@const index = abs - rowOffset}
+            {@const rowActive = inCurrent && !!range && index >= range.top && index <= range.bottom}
+        <tr aria-rowindex={pending ? undefined : abs + 2} aria-hidden={pending || undefined} class:pending class:striped={abs % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={inCurrent && aggregateRowTones[index]}>
           <th
             scope="row"
             class="gutter"
             class:row-active={rowActive}
             title="Select row"
-            onpointerdown={(event) => startRowSelect(event, index)}
-            onpointerenter={() => extendRow(index)}
-          ><span class="sr-only">Row {rowOffset + index + 1}</span></th>
+            onpointerdown={(event) => { if (inCurrent) startRowSelect(event, index); else if (!pending && bodyColumns[0]) onPreviewSelect(abs, bodyColumns[0].name); }}
+            onpointerenter={() => { if (inCurrent) extendRow(index); }}
+          ><span class="sr-only">Row {abs + 1}</span></th>
           {#each bodyColumns as column, columnIndex (column.name)}
-            {@const selected = selectedCell?.row === index && selectedCell.column === column.name}
+            {@const selected = inCurrent && selectedCell?.row === index && selectedCell.column === column.name}
             {@const expanded = selected && selectedCell?.expanded}
-            {@const editing = editingCell?.row === index && editingCell.column === column.name}
+            {@const editing = inCurrent && editingCell?.row === index && editingCell.column === column.name}
             {@const inRange = !!range && rowActive && columnIndex >= range.left && columnIndex <= range.right}
             <td
-              tabindex={index === activeRow && column.name === activeColumn ? 0 : -1}
+              tabindex={inCurrent && index === activeRow && column.name === activeColumn ? 0 : -1}
               aria-selected={selected}
-              data-row={index}
+              data-row={inCurrent ? index : undefined}
               data-column={column.name}
               class:selected-cell={selected}
               class:expanded-cell={expanded}
@@ -504,11 +601,11 @@
               class:in-range={inRange}
               class:pinned={pinLefts.has(column.name)}
               style:left={pinLefts.get(column.name) === undefined ? undefined : `${pinLefts.get(column.name)}px`}
-              onpointerdown={(event) => startSelect(event, index, columnIndex)}
-              onpointerenter={() => extendTo(index, columnIndex)}
-              onclick={(event) => { onSelectCell(event, index, column.name); onExpandCell(event, index, column.name); }}
-              ondblclick={() => { if (!editing) onFilterCategoricalCell(column, row[column.name]); }}
-              onkeydown={(event) => onCellKeydown(event, index, column.name)}
+              onpointerdown={(event) => { if (inCurrent) startSelect(event, index, columnIndex); }}
+              onpointerenter={() => { if (inCurrent) extendTo(index, columnIndex); }}
+              onclick={(event) => { if (inCurrent) { onSelectCell(event, index, column.name); onExpandCell(event, index, column.name); } else if (!pending) onPreviewSelect(abs, column.name); }}
+              ondblclick={() => { if (inCurrent) { if (!editing) onFilterCategoricalCell(column, row[column.name]); } else if (!pending) onPreviewSelect(abs, column.name); }}
+              onkeydown={(event) => { if (inCurrent) onCellKeydown(event, index, column.name); }}
               title={expanded || editing ? undefined : cellTitle(column, row[column.name])}
             >
               {#if editing}
@@ -533,9 +630,10 @@
             <td class="insertion-gap" aria-hidden="true" class:pinned={pinLefts.has(column.name)} class:pin-edge={lastPinned === column.name} style:left={pinLefts.has(column.name) ? `${pinLefts.get(column.name)! + (headerFor(column.name)?.getBoundingClientRect().width ?? 0)}px` : undefined}></td>
           {/each}
         </tr>
+          {/each}
       {/each}
-      {#if padBottom > 0}
-        <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${padBottom}px`}></td></tr>
+      {#if bottomPad > 0}
+        <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${bottomPad}px`}></td></tr>
       {/if}
     </tbody>
     </table>
@@ -556,6 +654,7 @@
   <RowScrollbar
     {totalRows} {totalLabel} {firstVisibleRow} visibleRows={visibleRowCount} trackHeight={viewportHeight}
     controls="data-grid-scroll" disabled={seekDisabled} onSeek={onSeekRow}
+    onDragLive={scrollToAbsoluteRow} onDragRest={onSnapshotRest} onDragHeld={onThumbHeld}
   />
 </div>
 
@@ -576,7 +675,7 @@
 
 <style>
   .table-wrap { position: relative; width: 100%; height: 100%; }
-  .table-scroll { width: 100%; height: 100%; overflow: auto; scrollbar-width: none; }
+  .table-scroll { overflow-anchor: none; width: 100%; height: 100%; overflow: auto; scrollbar-width: none; }
   .table-scroll::-webkit-scrollbar:vertical { display: none; }
   .table-scroll::-webkit-scrollbar:horizontal { height: 10px; }
   .table-scroll::-webkit-scrollbar-thumb:horizontal { background: var(--faint); border-radius: 8px; }
@@ -669,6 +768,7 @@
   }
   tbody tr.striped td, tbody tr.striped .gutter { background: var(--surface-inset); }
   tbody tr.spacer td { padding: 0; border: 0; background: var(--surface); }
+  tbody tr.pending { pointer-events: none; }
   tbody tr.aggregate-row td, tbody tr.aggregate-row .gutter { background: var(--surface); }
   tbody tr.aggregate-row.aggregate-row-alt td, tbody tr.aggregate-row.aggregate-row-alt .gutter { background: var(--surface-inset); }
   /* Hover shades the cell under the pointer; holding shift widens it to the whole row. */
