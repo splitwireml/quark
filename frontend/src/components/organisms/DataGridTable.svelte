@@ -75,6 +75,7 @@
     snapshot: { start: number; rows: TableRows } | null;
     onSnapshotRest: (row: number) => void;
     onThumbHeld: (held: boolean) => void;
+    onThumbMove: () => void;
     onViewportNeed: (report: { firstRow: number; lastRow: number; velocity: number }) => void;
     // Clicks on cached/snapshot rows settle that position instead of selecting.
     onPreviewSelect: (absoluteRow: number, column: string) => void;
@@ -88,7 +89,7 @@
     renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename,
     onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder,
     totalRows, totalLabel, pageSize, seekDisabled, onSeekRow,
-    neighbor, ahead, snapshot, onSnapshotRest, onThumbHeld, onViewportNeed, onPreviewSelect
+    neighbor, ahead, snapshot, onSnapshotRest, onThumbHeld, onThumbMove, onViewportNeed, onPreviewSelect
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
@@ -126,12 +127,13 @@
     return segments.find((segment) => absolute >= segment.start && absolute < segment.start + segment.rows.length);
   }
 
-  type Block = { key: string; seg: Segment['kind']; cells: { abs: number; index: number; rows: TableRows }[] };
+  // Segment changes update cells in place; absolute row keys survive scrolling and cache promotion.
+  type RenderRow = { abs: number; index: number; rows: TableRows; kind: Segment['kind'] };
   function windowFirst(): number { return Math.max(0, Math.floor(firstVisibleRow) - OVERSCAN); }
-  const blocks = $derived.by<Block[]>(() => {
+  const renderRows = $derived.by<RenderRow[]>(() => {
     const first = windowFirst();
     const last = Math.min(totalRows, Math.ceil(firstVisibleRow + visibleRowCount) + OVERSCAN);
-    const list: Block[] = [];
+    const list: RenderRow[] = [];
     for (let cursor = first; cursor < last; cursor += 1) {
       const segment = segmentAt(cursor);
       const kind = segment?.kind ?? 'retained';
@@ -140,17 +142,12 @@
       const source = segment?.rows ?? rows;
       const index = segment ? cursor - segment.start : cursor % Math.max(1, rows.length);
       if (!source.length) continue;
-      let block = list[list.length - 1];
-      if (!block || block.seg !== kind) {
-        block = { key: `${kind}-${cursor}`, seg: kind, cells: [] };
-        list.push(block);
-      }
-      block.cells.push({ abs: cursor, index, rows: source });
+      list.push({ abs: cursor, index, rows: source, kind });
     }
     return list;
   });
   const topPad = $derived(Math.max(0, scrollTop - (firstVisibleRow - windowFirst()) * rowHeight));
-  const bottomPad = $derived(Math.max(0, Math.min(10_000_000, totalRows * rowHeight) - topPad - blocks.reduce((sum, block) => sum + block.cells.length * rowHeight, 0)));
+  const bottomPad = $derived(Math.max(0, Math.min(10_000_000, totalRows * rowHeight) - topPad - renderRows.length * rowHeight));
 
   // Roving tabindex: the grid is one tab stop, not one per cell. Arrow keys move within it.
   const activeColumn = $derived(
@@ -202,18 +199,17 @@
 
   let lastScrollTop = 0;
   let lastScrollTime = 0;
-  let reportTimer = 0;
+  let reportFrame = 0;
   let restTimer = 0;
-  const REPORT_MS = 100;
-  const REST_MS = 150;
+  const REST_MS = 40;
 
   function emitViewport() {
     onViewportNeed({ firstRow: firstVisibleRow, lastRow: lastVisibleRow, velocity });
   }
   function clearViewportTimers() {
-    if (reportTimer) clearTimeout(reportTimer);
+    if (reportFrame) cancelAnimationFrame(reportFrame);
     if (restTimer) clearTimeout(restTimer);
-    reportTimer = 0;
+    reportFrame = 0;
     restTimer = 0;
   }
 
@@ -233,10 +229,8 @@
       lastScrollTime = now;
       if (restTimer) clearTimeout(restTimer);
       restTimer = window.setTimeout(() => { restTimer = 0; velocity = 0; emitViewport(); }, REST_MS);
-      if (!reportTimer) {
-        emitViewport();
-        reportTimer = window.setTimeout(() => { reportTimer = 0; emitViewport(); }, REPORT_MS);
-      }
+      // Coalesce pointer/wheel events into the next frame instead of waiting for a pause.
+      if (!reportFrame) reportFrame = requestAnimationFrame(() => { reportFrame = 0; emitViewport(); });
     };
     // The compressed canvas changes scrollbar travel, never wheel/trackpad speed.
     const onWheel = (event: WheelEvent) => {
@@ -565,15 +559,14 @@
         {/each}
       </tr>
     </thead>
-    <tbody aria-busy={blocks.some((block) => block.seg === 'retained')}>
+    <tbody aria-busy={renderRows.some((row) => row.kind === 'retained')}>
       {#if topPad > 0}
         <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${topPad}px`}></td></tr>
       {/if}
-      {#each blocks as block (block.key)}
-          {#each block.cells as item (item.abs)}
+      {#each renderRows as item (item.abs)}
             {@const abs = item.abs}
-            {@const pending = block.seg === 'retained'}
-            {@const inCurrent = block.seg === 'current'}
+            {@const pending = item.kind === 'retained'}
+            {@const inCurrent = item.kind === 'current'}
             {@const index = abs - rowOffset}
             {@const rowActive = inCurrent && !!range && index >= range.top && index <= range.bottom}
         <tr aria-rowindex={pending ? undefined : abs + 2} aria-hidden={pending || undefined} class:pending class:striped={abs % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={inCurrent && aggregateRowTones[index]}>
@@ -631,7 +624,6 @@
             <td class="insertion-gap" aria-hidden="true" class:pinned={pinLefts.has(column.name)} class:pin-edge={lastPinned === column.name} style:left={pinLefts.has(column.name) ? `${pinLefts.get(column.name)! + (headerFor(column.name)?.getBoundingClientRect().width ?? 0)}px` : undefined}></td>
           {/each}
         </tr>
-          {/each}
       {/each}
       {#if bottomPad > 0}
         <tr class="spacer" aria-hidden="true"><td class="gutter"></td><td colspan={bodyCellCount} style:height={`${bottomPad}px`}></td></tr>
@@ -655,7 +647,7 @@
   <RowScrollbar
     {totalRows} {totalLabel} {firstVisibleRow} visibleRows={visibleRowCount} trackHeight={viewportHeight}
     controls="data-grid-scroll" disabled={seekDisabled} onSeek={onSeekRow}
-    onDragLive={scrollToAbsoluteRow} onDragRest={onSnapshotRest} onDragHeld={onThumbHeld}
+    onDragLive={(row) => { onThumbMove(); scrollToAbsoluteRow(row); }} onDragRest={onSnapshotRest} onDragHeld={onThumbHeld}
   />
 </div>
 

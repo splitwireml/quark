@@ -396,10 +396,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         temporary.write_text(json.dumps(registered_nodes, indent=2))
         temporary.replace(registry_path)
 
-    def _xlsx_typed_view(
+    def _xlsx_table(
         con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str, schema: str | None = None,
     ) -> None:
-        """Keep Excel's styled date cells typed while safely coercing consistent text columns."""
+        """Import a worksheet once so paging never reparses Excel; preserve styled dates and text coercion."""
         typed_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}')"
         raw_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}', all_varchar = true)"
         declared = {item[0]: str(item[1]).upper() for item in con.execute(f"SELECT * FROM {typed_expr} LIMIT 0").description}
@@ -434,7 +434,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             else:
                 selects.append(cq)
         target = f"{quote(schema)}.{quote(name)}" if schema else quote(name)
-        con.execute(f"CREATE VIEW {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
+        # ponytail: one import per connection; share imports if workbook memory becomes limiting.
+        con.execute(f"CREATE TABLE {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
 
     def scan_expression(source: Path) -> str:
         source_sql = str(source).replace("'", "''")
@@ -459,7 +460,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             con.execute("INSTALL excel; LOAD excel")
             for sheet in node["sheets"] if "sheets" in node else workbook_sheets(source):
                 sheet_sql = sheet.replace("'", "''")
-                _xlsx_typed_view(con, source_sql, sheet_sql, sheet)
+                _xlsx_table(con, source_sql, sheet_sql, sheet)
         else:
             con.execute(
                 f"CREATE VIEW {quote(node.get('dataset_name', 'data'))} AS SELECT * FROM {scan_expression(source)}"
@@ -534,7 +535,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             )
         elif source.suffix.lower() == ".xlsx":
             con.execute("INSTALL excel; LOAD excel")
-            _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+            _xlsx_table(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
         else:
             con.execute(f"CREATE VIEW {target} AS SELECT * FROM {scan_expression(source)}")
         return target
@@ -592,7 +593,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     )
                 elif source.suffix.lower() == ".xlsx":
                     con.execute(f"CREATE SCHEMA {quote(schema)}")
-                    _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+                    _xlsx_table(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
                 else:
                     target = mount_dataset(con, schema, node, item)
                 columns = [row[0] for row in source_con.execute(

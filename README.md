@@ -61,4 +61,6 @@ The scrolling browser regression suite starts its own frontend server and mocks 
 
 With the backend running, `cd frontend && npm run benchmark:arrow` compares JSON and Arrow against the registered AllSpecs source, including a 50-column projection. It checks cell parity and real scrolling, and reports payload bytes, fetch latency, decode plus viewport access, and scroll-to-paint medians. It does not change source data. The same `PLAYWRIGHT_MODULE` option applies; `QUARK_API_URL` and `QUARK_BENCH_SOURCE` can select another backend/source (the scroll test needs more than 11,000 rows).
 
+Set `QUARK_SCROLL_MAX_MS=200` to make that benchmark fail if either the Arrow scroll-to-paint median or held-preview latency exceeds 200 ms. XLSX sources are imported into typed DuckDB tables once per connection so scrolling does not repeatedly parse Excel.
+
 See [`docs/SPEC.md`](docs/SPEC.md) for behavior and limits.

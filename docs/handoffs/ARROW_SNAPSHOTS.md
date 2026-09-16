@@ -1,5 +1,26 @@
 # Arrow table snapshots
 
+## Scroll-latency follow-up — September 17, 2026
+
+The follow-up fixes the delayed data swap after scrolling. Excel worksheets now become typed DuckDB tables once per connection, instead of views that parse the workbook for every count, page, and null-fraction query. The original upload is unchanged. This trades connection-local server memory for fast reads; initial import still costs time, and imports are rebuilt after restart or workspace invalidation.
+
+Viewport reports run on the next animation frame; the velocity reset is 40 ms and the held-thumb pause is 60 ms. Snapshot cancellation happens when the thumb actually moves, not when a delayed settle or resize report arrives. Visible rows are keyed directly by absolute row position, so scrolling and transitions between retained, preview, and current data update cells without rebuilding the overlapping rows.
+
+The live AllSpecs benchmark now passes `QUARK_SCROLL_MAX_MS=200`:
+
+| Arrow, 100 rows | Fetch median | Scroll-to-paint median | Held preview |
+| --- | ---: | ---: | ---: |
+| Native 22 columns | 7.5 ms | 111.2 ms | 67.1 ms |
+| 50-column projection | 10.6 ms | 191.1 ms | 67.8 ms |
+
+Scroll-to-paint is now timed inside the browser using animation frames, avoiding Playwright locator-polling overhead in the original figures below. The held preview is measured from the final pointer movement to visible loaded rows. These are local measurements after initial import, not a guarantee for arbitrary SQL, very large datasets, or remote networks.
+
+Before the fix, the same AllSpecs endpoint took 611 ms and the 200 ms scroll check failed at 1,348 ms. Importing the worksheet alone reduced fetch latency to 7.7 ms, but the old held-pause timer still failed at 377 ms. A direct query experiment isolated workbook parsing: count/page/null-stat stages took 293/140/296 ms over the workbook, versus 0.2/1.2/2.9 ms over the imported table.
+
+Regression coverage includes a worksheet paging test that removes its test upload after mounting both the legacy and project connections; pages and metadata must still work. Browser checks require previews to start within 200 ms, survive an unchanged-position resize report, and retain DOM cells across scrolling and cache promotion. The clipboard check now waits for the asynchronous write rather than racing it. Backend tests: 85; frontend unit tests: 71; six browser scenario groups; type checks, production build, and Svelte autofixer passed.
+
+The following sections preserve the original transport-only implementation and measurements.
+
 Implemented on `codex/arrow-table-snapshots`, after checkpointing the scroll handoff in `e0f2c3a`. Both paged query routes negotiate Arrow IPC through the Accept header; other clients retain JSON. The frontend keeps Arrow vectors in the existing bounded caches and reads cells for rendering, copy, and editing. Preview concatenation retains the original buffers.
 
 Normal integers, floats, booleans, strings, and binary values use native Arrow. Dates, decimals, 128-bit integers, and nested values retain the previous JSON cell semantics inside individual string columns. Mixed pages currently materialize Python tuples on the backend for those conversions. No source data or project registrations were changed.

@@ -95,11 +95,17 @@ try {
       const paint = [];
       for (const row of [1000, 3000, 5000, 7000, 9000, 11000]) {
         assert.ok(row < Number(measured.total), 'Benchmark needs more than 11,000 rows');
-        const start = performance.now();
-        await grid.locator('.table-scroll').evaluate((element, row) => { element.scrollTop = row * 34; }, row);
-        await grid.locator(`tbody tr:not(.pending)[aria-rowindex="${row + 2}"]`).waitFor();
-        await grid.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        paint.push(performance.now() - start);
+        paint.push(await grid.locator('.table-scroll').evaluate(async (element, row) => {
+          const start = performance.now();
+          element.scrollTop = row * 34;
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          while (!element.querySelector(`tbody tr:not(.pending)[aria-rowindex="${row + 2}"]`)) {
+            if (performance.now() - start > 10000) throw new Error('Destination rows did not render');
+            await frame();
+          }
+          await frame(); await frame();
+          return performance.now() - start;
+        }, row));
         assert.ok(await grid.locator('tbody tr:not(.spacer)').count() < 60);
       }
       // Exercise the real backend's held preview and full-page release path too.
@@ -108,15 +114,22 @@ try {
       await grid.mouse.move(bar.x + bar.width / 2, bar.y + bar.height * 0.7);
       await grid.mouse.down();
       await grid.mouse.move(bar.x + bar.width / 2, bar.y + bar.height * 0.7 + 100, { steps: 5 });
+      const stopped = performance.now();
       assert.ok((await preview).ok());
       await visibleLoaded(grid);
+      const previewMs = performance.now() - stopped;
       const landing = grid.waitForResponse(response => response.url().endsWith('/sql') && response.request().postDataJSON().page_size === 100);
       await grid.mouse.up();
       assert.ok((await landing).ok());
       await visibleLoaded(grid);
       const bytes = Buffer.from(measured.payloads[format]);
-      const result = { format, columns: width, rows: measured.rows, total_rows: measured.total, bytes: bytes.length, gzip_bytes: gzipSync(bytes).length, fetch_median_ms: round(median(measured.samples[format])), decode_viewport_median_ms: round(median(measured.timings[format])), scroll_paint_median_ms: round(median(paint)) };
+      const result = { format, columns: width, rows: measured.rows, total_rows: measured.total, bytes: bytes.length, gzip_bytes: gzipSync(bytes).length, fetch_median_ms: round(median(measured.samples[format])), decode_viewport_median_ms: round(median(measured.timings[format])), scroll_paint_median_ms: round(median(paint)), held_preview_ms: round(previewMs) };
       console.log(JSON.stringify(result));
+      if (process.env.QUARK_SCROLL_MAX_MS && format === 'arrow') {
+        const limit = Number(process.env.QUARK_SCROLL_MAX_MS);
+        assert.ok(result.scroll_paint_median_ms < limit, `Scroll median ${result.scroll_paint_median_ms} ms exceeds ${limit} ms`);
+        assert.ok(result.held_preview_ms < limit, `Held preview ${result.held_preview_ms} ms exceeds ${limit} ms`);
+      }
       await grid.close();
     }
   }

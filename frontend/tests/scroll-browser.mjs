@@ -78,16 +78,20 @@ try {
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.locator('td[data-row="0"][data-column="id"]').click();
     await page.keyboard.press('Control+c');
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), '0', 'copy must read an Arrow cell');
+    await page.waitForFunction(async () => await navigator.clipboard.readText() === '0');
     await page.keyboard.press('Enter');
     assert.equal(await page.getByRole('textbox', { name: 'Edit row 1, id', exact: true }).inputValue(), '0', 'editing must read an Arrow cell');
     await page.keyboard.press('Escape');
+    const retainedCell = await page.locator('tr[aria-rowindex="12"] td[data-column="id"]').elementHandle();
     // A slow scan remains well before the critical point.
-    for (let row = 1; row <= 6; row++) { await scroll(page, row); await page.waitForTimeout(180); }
+    for (let row = 1; row <= 12; row++) { await scroll(page, row); await page.waitForTimeout(180); }
     assert.equal(requests.length, 1, "slow scan must wait for the critical point");
+    assert.ok(await retainedCell.evaluate(cell => cell.isConnected), "overlapping visible cells must survive scrolling");
     await scroll(page, 90);
     await loaded(page, 100);
+    const promotedCell = await page.locator('tr[aria-rowindex="107"] td[data-column="id"]').elementHandle();
     await scroll(page, 110); await page.waitForTimeout(450);
+    assert.ok(await promotedCell.evaluate(cell => cell.isConnected), "cache promotion must update cells without rebuilding them");
     const beforeReturn = requests.filter(q => q.page === 1).length;
     await scroll(page, 70); await loaded(page, 70); await page.waitForTimeout(250);
     assert.equal(requests.filter(q => q.page === 1).length, beforeReturn, "the previous page must remain cached");
@@ -103,14 +107,18 @@ try {
     await page.close();
   }
   {
-    const { page, requests } = await openGrid(10000, q => q.page_size === 100 ? 200 : 120);
+    const { page, requests } = await openGrid(10000, q => q.page_size === 100 ? 200 : 300);
     const box = await page.getByRole("scrollbar").boundingBox();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
     await page.mouse.move(box.x + box.width / 2, box.y + 300, { steps: 5 });
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(30);
     assert.ok((await visibleRows(page)).length > 10, "moving thumb must retain visible rows");
     assert.equal(requests.length, 1, "moving held thumb must not fetch full pages");
-    await page.waitForTimeout(550);
+    await page.waitForTimeout(170);
+    assert.ok(requests.length > 1, "held preview must start within 200 ms of stopping");
+    // A delayed settle/resize report must not cancel a preview for the same held position.
+    await page.setViewportSize({ width: 1281, height: 900 });
+    await page.waitForTimeout(400);
     assert.ok(requests.length > 1 && requests.slice(1).every(q => q.page_size < 100), "held rest must fetch only small snapshots");
     assert.ok((await visibleRows(page)).every(row => !row.pending), "snapshot must cover the entire viewport across slice boundaries");
     const heldHead = Number(await page.getByRole("scrollbar").getAttribute("aria-valuenow"));

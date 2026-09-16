@@ -539,6 +539,29 @@ def test_workbook_dates_are_typed_summarized_by_year_and_identifiers_stay_text(c
     assert stats.json()["year_counts"] == [{"year": "2024", "count": 1}, {"year": "2025", "count": 1}]
 
 
+def test_workbook_scroll_pages_do_not_reopen_upload(client, tmp_path):
+    workbook = tmp_path / "scroll.xlsx"
+    with duckdb.connect() as con:
+        con.execute("LOAD excel")
+        con.execute("COPY (SELECT i AS id FROM range(1000) t(i)) TO ? (FORMAT xlsx, HEADER true, SHEET 'Rows')", [str(workbook)])
+    preview = upload(client, "scroll.xlsx", workbook.read_bytes())
+    node = client.post(f"/api/nodes/upload/{preview['id']}/confirm", json={"sheets": ["Rows"]}).json()
+    view = next(view for view in client.get('/api/projects/default/views').json() if view['source_id'] == node['id'])
+    # Removing this test upload makes any accidental Excel rescan fail deterministically.
+    Path(node['source']).unlink()
+    for node_id, sql in [(node['id'], 'SELECT * FROM "Rows"'), (view['node_id'], view['sql'])]:
+        response = client.post(f"/api/nodes/{node_id}/sql", json={
+            "sql": sql, "page": 3, "page_size": 100,
+            "sorts": [{"column": "id", "direction": "asc"}],
+        })
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body['total_rows'] == 1000
+        assert body['rows'][0] == {'id': 200}
+        assert body['rows'][-1] == {'id': 299}
+        assert body['columns'][0]['null_fraction'] == 0
+
+
 def test_workbook_confirmation_validates_selection_and_cancel(client, tmp_path):
     preview = workbook_preview(client, tmp_path)
     confirm = f"/api/nodes/upload/{preview['id']}/confirm"

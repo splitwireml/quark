@@ -35,7 +35,7 @@
   let captured = false;
   let restTimer = 0;
   let restFired = false;
-  const REST_MS = 350;
+  const REST_MS = 60;
 
   function clearRest() { if (restTimer) clearTimeout(restTimer); restTimer = 0; }
   onDestroy(() => { clearRest(); if (dragFirst !== null) onDragHeld(false); });

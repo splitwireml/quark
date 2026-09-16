@@ -26,6 +26,7 @@ A project is the top-level local tenant. Its sources share an isolated DuckDB ex
 - Attach path: opens an existing local `.duckdb`/`.db` file read-only.
 - Active nodes are persisted in a small JSON registry and reopened after restart when their source still exists.
 - Existing registries migrate into a default project without rewriting source metadata merely on startup.
+- Confirmed XLSX worksheets are imported into typed DuckDB tables once per backend connection. Paging and profiling read those tables rather than reparsing the workbook. The original upload remains unchanged; connection shutdown releases the imported tables, and restart imports them again.
 - “Running” means registered and connectable by this backend. Cross-process DuckDB connection discovery is not portable; no process scanning or remote SQL protocol is invented.
 
 ### Supported files
@@ -115,7 +116,7 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 - A 100k+ row CSV opens without sending the whole dataset to the browser.
 - Pagination, page size, repeated filters, and ordered multi-sort are executed server-side.
 - Scrolling virtualizes the whole dataset. Slow scans prefetch within the last 10% of a page; faster motion extends the lead using measured fetch latency, capped at two pages and two concurrent page requests. The cache retains the current page, only one previous page, and up to two forward pages.
-- Thumb dragging keeps retained rows moving without loading full pages. A 350 ms held pause fetches small viewport slices; release loads the landing page without resetting the scroll position. Retained placeholder values cannot be edited or selected. Query changes cancel stale requests, and failed visible pages offer Retry.
+- Thumb dragging keeps retained rows moving without loading full pages. A 60 ms held pause fetches small viewport slices; release loads the landing page without resetting the scroll position. Wheel and trackpad viewport reports are coalesced into the next animation frame, with velocity settling after 40 ms. Retained placeholder values cannot be edited or selected. Query changes cancel stale requests, and failed visible pages offer Retry.
 - Nullity gauges appear for every column.
 - Numeric stats and histogram load on demand.
 - Projects and their uploaded/attached sources survive backend restart; sources remain isolated to their project.

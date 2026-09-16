@@ -1930,7 +1930,7 @@
   function handleViewport(report: ViewportReport) {
     latestViewport = report;
     if (!result || loadingData || cellEditSaving || currentQueryKey() !== renderedQueryKey) return;
-    if (dragHeld) { cancelSnapshot(); return; }
+    if (dragHeld) return;
     const total = safeTotalRows(result.total_rows);
     if (total <= 0) return;
     const size = Math.max(1, result.page_size);
@@ -2389,7 +2389,7 @@
                         rowOffset={(result.page - 1) * result.page_size}
                         pageSize={result.page_size}
                         neighbor={neighborCache} ahead={aheadCache} snapshot={snapshotCache}
-                        onSnapshotRest={snapshotRest} onThumbHeld={thumbHeld} onViewportNeed={handleViewport}
+                        onSnapshotRest={snapshotRest} onThumbHeld={thumbHeld} onThumbMove={cancelSnapshot} onViewportNeed={handleViewport}
                         onPreviewSelect={previewSeek}
                         pinnedColumns={livePins} onTogglePin={togglePinColumn}
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
