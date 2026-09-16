@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import Icon from '../atoms/Icon.svelte';
+  import RowScrollbar from '../atoms/RowScrollbar.svelte';
   import InsertionHandle from '../atoms/InsertionHandle.svelte';
   import ColumnHeaderCell from '../molecules/ColumnHeaderCell.svelte';
   import { rangeToHtml, rangeToText } from '../../lib/clipboard';
@@ -61,6 +62,10 @@
     onPreviewReorder: (dragged: string, target: string, placement: Placement) => void;
     onCommitReorder: () => void;
     onCancelReorder: () => void;
+    totalRows: number;
+    totalLabel: string;
+    seekDisabled: boolean;
+    onSeekRow: (row: number) => void;
   };
 
   let {
@@ -69,7 +74,8 @@
     selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
     renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename,
-    onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder
+    onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder,
+    totalRows, totalLabel, seekDisabled, onSeekRow
   }: Props = $props();
 
   function sortFor(name: string): SortCondition | undefined { return sorts.find((sort) => sort.column === name); }
@@ -85,6 +91,11 @@
   // Keep in step with the `--row-height` fallback on td below.
   const DEFAULT_ROW_HEIGHT = 34;
   let rowHeight = $state(DEFAULT_ROW_HEIGHT);
+
+  // Absolute dataset position of the viewport top: the page's first row plus the
+  // scrolled distance inside the page. Drives the total-based custom scrollbar.
+  const firstVisibleRow = $derived(rowOffset + (rowHeight > 0 ? scrollTop / rowHeight : 0));
+  const visibleRowCount = $derived(rowHeight > 0 ? viewportHeight / rowHeight : 0);
 
   const windowSize = $derived(Math.ceil(viewportHeight / rowHeight) + OVERSCAN * 2);
   const scrollFirstRow = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
@@ -415,9 +426,10 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div use:scrollHost class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader} onkeydown={copyKeydown}>
+<div class="table-wrap">
+<div use:scrollHost id="data-grid-scroll" class="table-scroll" role="region" tabindex="0" aria-label="Scrollable View table" ondragover={tableDragOver} ondrop={dropHeader} onkeydown={copyKeydown}>
   <div class="table-canvas" class:fit-columns={fitColumnsToContent}>
-    <table role="grid" aria-rowcount={rows.length + 1} aria-colcount={bodyColumns.length + 1} class:row-hover={shiftHeld || rowMode}>
+    <table role="grid" aria-rowcount={totalRows + 1} aria-colcount={bodyColumns.length + 1} class:row-hover={shiftHeld || rowMode}>
     <caption class="sr-only">{caption}</caption>
     <thead>
       <tr aria-rowindex="1">
@@ -467,7 +479,7 @@
       {#each windowRows as row, windowIndex (row)}
         {@const index = firstRow + windowIndex}
         {@const rowActive = !!range && index >= range.top && index <= range.bottom}
-        <tr aria-rowindex={index + 2} class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
+        <tr aria-rowindex={rowOffset + index + 2} class:striped={index % 2 === 1} class:aggregate-row={aggregateRowTones.length > 0} class:aggregate-row-alt={aggregateRowTones[index]}>
           <th
             scope="row"
             class="gutter"
@@ -541,6 +553,11 @@
     {/if}
   </div>
 </div>
+  <RowScrollbar
+    {totalRows} {totalLabel} {firstVisibleRow} visibleRows={visibleRowCount} trackHeight={viewportHeight}
+    controls="data-grid-scroll" disabled={seekDisabled} onSeek={onSeekRow}
+  />
+</div>
 
 {#if contextMenu}
   <div bind:this={contextMenuElement} class="context-menu" role="menu" aria-label={`Actions for ${contextMenu.column.name}`} style:left={`${contextMenu.x}px`} style:top={`${contextMenu.y}px`}>
@@ -558,7 +575,12 @@
 {/if}
 
 <style>
-  .table-scroll { width: 100%; height: 100%; overflow: auto; }
+  .table-wrap { position: relative; width: 100%; height: 100%; }
+  .table-scroll { width: 100%; height: 100%; overflow: auto; scrollbar-width: none; }
+  .table-scroll::-webkit-scrollbar:vertical { display: none; }
+  .table-scroll::-webkit-scrollbar:horizontal { height: 10px; }
+  .table-scroll::-webkit-scrollbar-thumb:horizontal { background: var(--faint); border-radius: 8px; }
+  .table-scroll::-webkit-scrollbar-track:horizontal { background: transparent; }
   .table-canvas { min-width: 100%; min-height: 100%; display: flex; align-items: stretch; }
   tbody { user-select: none; }
   table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: 12px var(--font-mono); }

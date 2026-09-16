@@ -8,6 +8,7 @@
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
+  import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
 
@@ -1755,6 +1756,19 @@
     return '';
   }
   async function changePage(next: number) { if (next < 1 || next > totalPages || next === page) return; page = next; await loadActiveData(); }
+  // The custom scrollbar seeks absolute dataset rows: crossing a page boundary
+  // loads the target page first, then restores the intra-page scroll position.
+  async function seekRow(absoluteRow: number) {
+    if (loadingData || !result) return;
+    const total = safeTotalRows(result.total_rows);
+    if (total <= 0) return;
+    const size = Math.max(1, result.page_size);
+    const { page: next, intraRow } = absoluteRowToPage(clampAbsoluteRow(absoluteRow, total), size, Math.max(totalPages, 1));
+    if (next !== page) await changePage(next);
+    await tick();
+    const rowHeight = tableScroll?.querySelector('tbody tr:not(.spacer)')?.getBoundingClientRect().height || 34;
+    if (tableScroll) tableScroll.scrollTop = Math.max(0, intraRow * rowHeight);
+  }
   async function jumpPage() { const next = Math.min(Math.max(1, Number.parseInt(pageInput) || 1), Math.max(totalPages, 1)); pageInput = String(next); await changePage(next); }
   async function changePageSize(event: Event) { pageSize = Number((event.currentTarget as HTMLSelectElement).value); page = 1; await loadActiveData(); }
 
@@ -2205,6 +2219,8 @@
                         onCommitRename={commitColumnRename} onCancelRename={cancelColumnRename}
                         onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
                         onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
+                        totalRows={safeTotalRows(result.total_rows)} totalLabel={count(result.total_rows)}
+                        seekDisabled={loadingData} onSeekRow={seekRow}
                       />
                       {#if cellEditError || columnMutationError}<div class="cell-edit-error" role="alert">{cellEditError || columnMutationError}</div>{/if}
                       {#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}
