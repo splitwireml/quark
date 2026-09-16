@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { concatRows, type TableRows } from './lib/table-rows';
   import { onMount, onDestroy, tick } from 'svelte';
   import { basicSetup, EditorView } from 'codemirror';
   import { autocompletion, completionStatus, startCompletion, type CompletionSource } from '@codemirror/autocomplete';
@@ -118,11 +119,11 @@
   let renamingColumn = $state<{ original: string; value: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
   let gridApi = $state<{ scrollToAbsoluteRow: (absolute: number, onlyIfOutside?: boolean) => void } | null>(null);
-  type CachedPage = { page: number; rows: Record<string, unknown>[] };
+  type CachedPage = { page: number; rows: TableRows };
   // One previous page, at most two incoming pages, and one viewport preview.
   let neighborCache = $state.raw<CachedPage | null>(null);
   let aheadCache = $state.raw<CachedPage[]>([]);
-  let snapshotCache = $state.raw<{ start: number; rows: Record<string, unknown>[] } | null>(null);
+  let snapshotCache = $state.raw<{ start: number; rows: TableRows } | null>(null);
   let pendingSelect: { absRow: number; column: string } | null = null;
   let renderedQueryKey = $state('');
   let lastDir: 1 | -1 = 1;
@@ -305,11 +306,11 @@
   let columnTypes = $derived([...new Set((result?.columns ?? []).map((column) => column.type))]);
   let columnTypeCounts = $derived.by(() => { const counts: Record<string, number> = Object.create(null); for (const column of result?.columns ?? []) counts[column.type] = (counts[column.type] ?? 0) + 1; return counts; });
   let aggregateRowTones = $derived.by(() => {
-    const rows = result?.rows ?? [];
+    const rows = result?.rows;
     const majorIndex = queryMode === 'sql' && aggregateSourceSql ? aggregateIndexes[0] : '';
-    if (!majorIndex) return [];
+    if (!majorIndex || !rows) return [];
     let alternate = false;
-    return rows.map((row, index) => { if (index && !Object.is(row[majorIndex], rows[index - 1][majorIndex])) alternate = !alternate; return alternate; });
+    return Array.from({ length: rows.length }, (_, index) => { if (index && !Object.is(rows.cell(index, majorIndex), rows.cell(index - 1, majorIndex))) alternate = !alternate; return alternate; });
   });
   let operators = $derived.by(() => filterColumn ? [...baseOperators, ...(!filterColumn.numeric && isTextType(filterColumn.type) ? textOperators : []), ...(filterColumn.numeric || isOrderedType(filterColumn.type) ? orderedOperators : [])] : baseOperators);
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
@@ -1905,7 +1906,7 @@
       const pages = pagesForRange(clamped, end, window.size, Math.ceil(total / window.size));
       const chunks = await Promise.all(pages.map((page) => api.querySql(context.targetNodeId, { sql: context.sql, page, page_size: window.size, filters: context.filters, sorts: context.sorts, dedupe_columns: context.dedupe_columns }, controller.signal)));
       if (controller.signal.aborted || !dragHeld || context.generation !== requestId || context.key !== currentQueryKey()) return;
-      snapshotCache = { start: (pages[0] - 1) * window.size, rows: chunks.reduce<Record<string, unknown>[]>((rows, chunk) => [...rows, ...chunk.rows], []) };
+      snapshotCache = { start: (pages[0] - 1) * window.size, rows: concatRows(chunks.map((chunk) => chunk.rows)) };
     } catch { /* Retain visible rows; releasing retries with a full page. */ }
     finally { if (snapshotRequest === controller) snapshotRequest = null; }
   }
@@ -2048,7 +2049,7 @@
   function cellEditText(value: unknown): string { return value == null ? '' : display(value); }
   function startCellEdit(row: number, column: string, initial?: string) {
     if (!result || loadingData || cellEditSaving) return;
-    const original = cellEditText(result.rows[row]?.[column]);
+    const original = cellEditText(result.rows.cell(row, column));
     selectedCell = { row, column, expanded: false };
     editingCell = { row, column, value: initial ?? original, original };
     cellEditError = '';

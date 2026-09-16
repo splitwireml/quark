@@ -728,6 +728,43 @@ def test_sql_query_pages_with_metadata_and_safe_values(client):
     assert body["elapsed_ms"] >= 0
 
 
+@pytest.mark.parametrize("exotic", [False, True])
+def test_arrow_query_matches_json_pages_and_metadata(client, exotic):
+    import pyarrow as pa
+
+    node = upload(client, "arrow.csv", b"id,name\n1,alpha\n2,beta\n3,\n")
+    fields = "id, name, 9007199254740993::BIGINT AS big, 18446744073709551615::UBIGINT AS unsigned, 'NaN'::DOUBLE AS nan, from_hex('00ff') AS blob"
+    if exotic:
+        fields += ", DATE '2025-01-02' AS day, TIMESTAMP '2025-01-02 03:04:05.123456' AS stamp, 12.345::DECIMAL(9,3) AS decimal, 170141183460469231731687303715884105727::HUGEINT AS huge, [1, NULL] AS nested, {'x': 1} AS object, INTERVAL '2 days' AS duration"
+    sql = f"SELECT {fields} FROM arrow"
+    endpoint = f"/api/nodes/{node['id']}/sql"
+    for page in [1, 2, 4]:
+        body = {"sql": sql, "page": page, "page_size": 1, "sorts": [{"column": "id", "direction": "desc"}]}
+        expected = client.post(endpoint, json=body).json()
+        response = client.post(endpoint, json=body, headers={"Accept": backend_app.ARROW_MEDIA_TYPE})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == backend_app.ARROW_MEDIA_TYPE
+        assert response.headers["vary"] == "Accept"
+        table = pa.ipc.open_stream(response.content).read_all()
+        metadata = json.loads(table.schema.metadata[b"quark"])
+        encoded_columns = metadata.pop("json_columns")
+        actual = [{name: json.loads(value) if name in encoded_columns else safe(value) for name, value in row.items()} for row in table.to_pylist()]
+        assert actual == expected.pop("rows")
+        assert pa.types.is_int64(table.schema.field("id").type)
+        metadata.pop("elapsed_ms")
+        expected.pop("elapsed_ms")
+        assert metadata == expected
+
+    dataset_id = dataset(client, node, "arrow")["id"]
+    response = client.post(f"/api/nodes/{node['id']}/datasets/{dataset_id}/query", json={
+        "filters": [{"column": "id", "operator": ">", "value": 1}],
+    }, headers={"Accept": backend_app.ARROW_MEDIA_TYPE})
+    assert pa.ipc.open_stream(response.content).read_all().num_rows == 2
+    rejected = client.post(endpoint, json={"sql": "DROP TABLE arrow"}, headers={"Accept": backend_app.ARROW_MEDIA_TYPE})
+    assert rejected.status_code == 422
+    assert "detail" in rejected.json()
+
+
 def test_sql_result_controls_filter_sort_categories_and_profile(client):
     node = upload(client, "items.csv", b"category,price\na,10\na,20\nb,30\n")
     sql = 'SELECT category, sum(price) AS total FROM "main"."items" GROUP BY category'

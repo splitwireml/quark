@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { TableRows } from '../../lib/table-rows';
   import { onDestroy, tick } from 'svelte';
   import Icon from '../atoms/Icon.svelte';
   import RowScrollbar from '../atoms/RowScrollbar.svelte';
@@ -17,7 +18,7 @@
   type Props = {
     columns: ColumnInfo[];
     bodyColumns: ColumnInfo[];
-    rows: Record<string, unknown>[];
+    rows: TableRows;
     rowOffset: number;
     pinnedColumns: string[];
     onTogglePin: (column: ColumnInfo) => void;
@@ -69,9 +70,9 @@
     seekDisabled: boolean;
     onSeekRow: (row: number) => void;
     // One cached non-current page and one transient snapshot window, positioned below.
-    neighbor: { page: number; rows: Record<string, unknown>[] } | null;
-    ahead: { page: number; rows: Record<string, unknown>[] }[];
-    snapshot: { start: number; rows: Record<string, unknown>[] } | null;
+    neighbor: { page: number; rows: TableRows } | null;
+    ahead: { page: number; rows: TableRows }[];
+    snapshot: { start: number; rows: TableRows } | null;
     onSnapshotRest: (row: number) => void;
     onThumbHeld: (held: boolean) => void;
     onViewportNeed: (report: { firstRow: number; lastRow: number; velocity: number }) => void;
@@ -113,7 +114,7 @@
   const firstVisibleRow = $derived(Math.min(Math.max(0, totalRows - visibleRowCount), scrollTop / pxPerRow));
   const lastVisibleRow = $derived(Math.min(totalRows - 1, firstVisibleRow + visibleRowCount));
 
-  type Segment = { kind: 'current' | 'neighbor' | 'snapshot' | 'retained'; start: number; rows: Record<string, unknown>[] };
+  type Segment = { kind: 'current' | 'neighbor' | 'snapshot' | 'retained'; start: number; rows: TableRows };
   const size = $derived(Math.max(1, Math.floor(pageSize)));
   const segments = $derived<Segment[]>([
     { kind: 'current', start: rowOffset, rows },
@@ -125,7 +126,7 @@
     return segments.find((segment) => absolute >= segment.start && absolute < segment.start + segment.rows.length);
   }
 
-  type Block = { key: string; seg: Segment['kind']; cells: { abs: number; row: Record<string, unknown> }[] };
+  type Block = { key: string; seg: Segment['kind']; cells: { abs: number; index: number; rows: TableRows }[] };
   function windowFirst(): number { return Math.max(0, Math.floor(firstVisibleRow) - OVERSCAN); }
   const blocks = $derived.by<Block[]>(() => {
     const first = windowFirst();
@@ -136,14 +137,15 @@
       const kind = segment?.kind ?? 'retained';
       // Keep the previous data moving under the pointer while a destination is
       // pending. Retained values are non-interactive and hidden from AT.
-      const row = segment ? segment.rows[cursor - segment.start] : rows[cursor % Math.max(1, rows.length)];
-      if (!row) continue;
+      const source = segment?.rows ?? rows;
+      const index = segment ? cursor - segment.start : cursor % Math.max(1, rows.length);
+      if (!source.length) continue;
       let block = list[list.length - 1];
       if (!block || block.seg !== kind) {
         block = { key: `${kind}-${cursor}`, seg: kind, cells: [] };
         list.push(block);
       }
-      block.cells.push({ abs: cursor, row });
+      block.cells.push({ abs: cursor, index, rows: source });
     }
     return list;
   });
@@ -411,8 +413,8 @@
   function extendTo(row: number, column: number) { if (dragging) head = { row, column }; }
   function extendRow(row: number) { if (dragging && head) head = { row, column: head.column }; }
 
-  function cellText(row: Record<string, unknown>, name: string): string {
-    const value = row[name];
+  function cellText(row: number, name: string): string {
+    const value = rows.cell(row, name);
     return value == null ? '' : display(value);
   }
   function rangeMatrix(): string[][] | null {
@@ -420,8 +422,7 @@
     const names = bodyColumns.slice(range.left, range.right + 1).map((column) => column.name);
     const matrix: string[][] = [];
     for (let row = range.top; row <= range.bottom; row += 1) {
-      const values = rows[row];
-      if (values) matrix.push(names.map((name) => cellText(values, name)));
+      if (row >= 0 && row < rows.length) matrix.push(names.map((name) => cellText(row, name)));
     }
     return matrix.length ? matrix : null;
   }
@@ -571,7 +572,6 @@
       {#each blocks as block (block.key)}
           {#each block.cells as item (item.abs)}
             {@const abs = item.abs}
-            {@const row = item.row}
             {@const pending = block.seg === 'retained'}
             {@const inCurrent = block.seg === 'current'}
             {@const index = abs - rowOffset}
@@ -586,6 +586,7 @@
             onpointerenter={() => { if (inCurrent) extendRow(index); }}
           ><span class="sr-only">Row {abs + 1}</span></th>
           {#each bodyColumns as column, columnIndex (column.name)}
+            {@const value = item.rows.cell(item.index, column.name)}
             {@const selected = inCurrent && selectedCell?.row === index && selectedCell.column === column.name}
             {@const expanded = selected && selectedCell?.expanded}
             {@const editing = inCurrent && editingCell?.row === index && editingCell.column === column.name}
@@ -604,9 +605,9 @@
               onpointerdown={(event) => { if (inCurrent) startSelect(event, index, columnIndex); }}
               onpointerenter={() => { if (inCurrent) extendTo(index, columnIndex); }}
               onclick={(event) => { if (inCurrent) { onSelectCell(event, index, column.name); onExpandCell(event, index, column.name); } else if (!pending) onPreviewSelect(abs, column.name); }}
-              ondblclick={() => { if (inCurrent) { if (!editing) onFilterCategoricalCell(column, row[column.name]); } else if (!pending) onPreviewSelect(abs, column.name); }}
+              ondblclick={() => { if (inCurrent) { if (!editing) onFilterCategoricalCell(column, value); } else if (!pending) onPreviewSelect(abs, column.name); }}
               onkeydown={(event) => { if (inCurrent) onCellKeydown(event, index, column.name); }}
-              title={expanded || editing ? undefined : cellTitle(column, row[column.name])}
+              title={expanded || editing ? undefined : cellTitle(column, value)}
             >
               {#if editing}
                 <input
@@ -621,7 +622,7 @@
                   onclick={(event) => event.stopPropagation()}
                 />
               {:else}
-                <span>{display(row[column.name])}</span>
+                <span>{display(value)}</span>
                 {#if expanded}
                   <button class="collapse" onclick={(event) => { event.stopPropagation(); onCollapseCell(index, column.name); }} aria-label={`Collapse ${column.name}`}>Collapse</button>
                 {/if}

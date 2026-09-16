@@ -1,5 +1,7 @@
 # Scroll loading handoff
 
+Subsequent transport work and real AllSpecs measurements are recorded in [Arrow table snapshots](ARROW_SNAPSHOTS.md).
+
 ## Session status
 
 The user asked to audit and finish an earlier adaptive-loading implementation, then approved committing the result. Completed work is in `7c9a0f5` (`feat(table): add adaptive scroll loading and previews`). Its predecessor, `fa46b98`, contains the custom scrollbar foundation.

@@ -1,6 +1,7 @@
 // Run with npm run test:scroll-browser. Use PLAYWRIGHT_MODULE for a shared install.
 // Every API is mocked: this exercises the real App without touching user data.
 import assert from "node:assert/strict";
+import { tableFromArrays, tableToIPC } from "apache-arrow";
 import { createServer } from "vite";
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const server = await createServer({ root: new URL("..", import.meta.url).pathname, server: { host: "127.0.0.1", port: 0 } });
@@ -9,11 +10,11 @@ const browser = await chromium.launch({ headless: true });
 const url = server.resolvedUrls.local[0];
 const errors = [];
 
-async function openGrid(total = 10000, delay = () => 100, fail = () => false) {
+async function openGrid(total = 10000, delay = () => 100, fail = () => false, width = 1, format = "arrow") {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const requests = [];
   page.on("pageerror", e => errors.push(e.message));
-  const view = { id: "view", project_id: "test", source_id: "source", source_name: "Rows.csv", node_id: "node", name: "Rows", schema: "main", type: "VIEW", columns: ["id"], sql: "SELECT * FROM rows" };
+  const view = { id: "view", project_id: "test", source_id: "source", source_name: "Rows.csv", node_id: "node", name: "Rows", schema: "main", type: "VIEW", columns: ["id", ...Array.from({ length: width - 1 }, (_, i) => `column_${i}`)], sql: "SELECT * FROM rows" };
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     let body;
@@ -22,6 +23,7 @@ async function openGrid(total = 10000, delay = () => 100, fail = () => false) {
     else if (path.endsWith("/sources/source")) body = { id: "source", name: "Rows.csv", kind: "upload", project_id: "test", views: [view] };
     else if (path.endsWith("/views")) body = [view];
     else if (path.endsWith("/sql")) {
+      assert.equal(route.request().headers().accept, "application/vnd.apache.arrow.stream");
       const q = route.request().postDataJSON();
       requests.push(q);
       await new Promise(resolve => setTimeout(resolve, delay(q)));
@@ -32,6 +34,17 @@ async function openGrid(total = 10000, delay = () => 100, fail = () => false) {
         rows: Array.from({ length: Math.max(0, Math.min(q.page_size, total - start)) }, (_, i) => ({ id: q.sorts.length ? total - 1 - start - i : start + i })),
         page: q.page, page_size: q.page_size, total_rows: total, total_pages: Math.ceil(total / q.page_size), elapsed_ms: 100, sql: q.sql,
       };
+      for (const name of view.columns.slice(1)) {
+        body.columns.push({ name, type: "VARCHAR", numeric: false, null_fraction: 0, profile_kind: "categorical" });
+        for (const row of body.rows) row[name] = `value-${row.id}`;
+      }
+      if (format === "arrow") {
+        const { rows, ...metadata } = body;
+        const table = tableFromArrays(Object.fromEntries(view.columns.map(name => [name, rows.map(row => row[name])])));
+        table.schema.metadata.set("quark", JSON.stringify(metadata));
+        await route.fulfill({ contentType: "application/vnd.apache.arrow.stream", body: Buffer.from(tableToIPC(table)) }).catch(() => {});
+        return;
+      }
     } else throw new Error(`Unexpected API: ${path}`);
     await route.fulfill({ json: body }).catch(() => {}); // A canceled request can outlive its tab.
   });
@@ -60,8 +73,15 @@ async function visibleRows(page) {
 }
 try {
   {
-    const { page, requests } = await openGrid();
+    const { page, requests } = await openGrid(10000, () => 100, () => false, 50);
     assert.equal(requests.length, 1, "idle opening must not prefetch");
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.locator('td[data-row="0"][data-column="id"]').click();
+    await page.keyboard.press('Control+c');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), '0', 'copy must read an Arrow cell');
+    await page.keyboard.press('Enter');
+    assert.equal(await page.getByRole('textbox', { name: 'Edit row 1, id', exact: true }).inputValue(), '0', 'editing must read an Arrow cell');
+    await page.keyboard.press('Escape');
     // A slow scan remains well before the critical point.
     for (let row = 1; row <= 6; row++) { await scroll(page, row); await page.waitForTimeout(180); }
     assert.equal(requests.length, 1, "slow scan must wait for the critical point");
@@ -146,7 +166,7 @@ try {
     await page.close();
   }
   {
-    const { page } = await openGrid();
+    const { page } = await openGrid(10000, () => 100, () => false, 1, "json");
     await page.locator('td[data-row="0"][data-column="id"]').click();
     for (let i = 0; i < 3; i++) {
       await page.keyboard.press("PageDown");

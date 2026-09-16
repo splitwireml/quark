@@ -67,6 +67,10 @@ Every identifier is validated against DuckDB metadata and quoted. Values are bou
 
 `POST /api/nodes/{node_id}/sql` accepts one read-only `SELECT` plus `page` and `page_size`, and returns the same paged row shape. Multiple statements and mutating/DDL commands are rejected with HTTP 422. Query-builder responses include their executable SQL equivalent so filters, sorts, and dedupe queries can be saved and re-run.
 
+Both query endpoints return an Arrow IPC stream when requested with `Accept: application/vnd.apache.arrow.stream`. JSON remains the default for other clients. Arrow schema metadata under `quark` contains the same response metadata, excluding `rows`, plus `json_columns`: fields whose cells preserve the existing JSON value semantics inside UTF-8 vectors. Ordinary numeric, boolean, text, and binary columns use native Arrow buffers. Dates, decimals, 128-bit integers, and nested values use the compatibility encoding. Errors remain JSON.
+
+The frontend requests Arrow for table pages, prefetches, and held-scroll snapshots. Its bounded page cache retains column buffers; rendering, copying, and editing read individual cells. Combining adjacent preview slices retains their buffers without expanding them into row objects. Scroll timing, cancellation, query-generation checks, and cache limits remain as specified below.
+
 ### Views and Versions
 - Every source table and every derived result is a View with Version 1.
 - Cell edits and column add/modify/rename/hide/show/reorder are replayable Version changes on the active View.
