@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { concatRows, type TableRows } from './lib/table-rows';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { basicSetup, EditorView } from 'codemirror';
   import { autocompletion, completionStatus, startCompletion, type CompletionSource } from '@codemirror/autocomplete';
   import { keywordCompletionSource, schemaCompletionSource, sql, StandardSQL, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
@@ -8,17 +9,23 @@
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
+  import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
+  import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import type { AggregateCount, AggregateMetric, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
 
+  import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, type ActionMenuMode, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
+  import CommandHint from './components/molecules/CommandHint.svelte';
+  import CommandDialog from './components/organisms/CommandDialog.svelte';
+  import SettingsPage from './components/organisms/SettingsPage.svelte';
+  import CellFinder from './components/organisms/CellFinder.svelte';
   import Button from './components/atoms/Button.svelte';
   import TitleBar from './components/organisms/TitleBar.svelte';
   import SourceRail from './components/organisms/SourceRail.svelte';
   import SourceDisclosure from './components/organisms/SourceDisclosure.svelte';
   import WelcomeScreen from './components/organisms/WelcomeScreen.svelte';
   import DatasetHead from './components/organisms/DatasetHead.svelte';
-  import DatasetTabsBar from './components/organisms/DatasetTabsBar.svelte';
-  import VersionsViewsPane from './components/organisms/VersionsViewsPane.svelte';
+  import VersionMenu from './components/organisms/VersionMenu.svelte';
   import VersionDiffDialog from './components/organisms/VersionDiffDialog.svelte';
   import QueryConditionBar from './components/organisms/QueryConditionBar.svelte';
   import ColumnsMenuPopover from './components/organisms/ColumnsMenuPopover.svelte';
@@ -33,7 +40,7 @@
   import ProfileInspector from './components/organisms/ProfileInspector.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
   import FormulaMenu from './components/organisms/FormulaMenu.svelte';
-  import ExportDialog from './components/organisms/ExportDialog.svelte';
+  import ExportMenu from './components/organisms/ExportMenu.svelte';
   import ProjectsScreen from './components/organisms/ProjectsScreen.svelte';
   import AppShell from './components/templates/AppShell.svelte';
 
@@ -43,7 +50,8 @@
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
   const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
   const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
-  type CellMove = 'up' | 'down' | 'left' | 'right';
+  type CellMove = 'up' | 'down' | 'left' | 'right' | 'rowStart' | 'rowEnd' | 'pageUp' | 'pageDown' | 'gridStart' | 'gridEnd';
+  type JoinStep = 0 | 1 | 2;
 
 
   let projects = $state.raw<ProjectInfo[]>([]);
@@ -56,6 +64,7 @@
   let datasets = $state.raw<BaseViewInfo[]>([]);
   let loadedSourceIds = $state.raw<string[]>([]);
   let loadingSourceId = $state('');
+  let highlightToken = $state(0);
   let selectedNodeId = $state('');
   let selectedDataset = $state('');
   let result = $state.raw<QueryResponse | null>(null);
@@ -64,17 +73,22 @@
   let dedupeColumns = $state<string[]>([]);
   let dedupeDraft = $state<string[]>([]);
   let aggregateColumnSearch = $state('');
-  let aggregateColumns = $state<string[]>([]);
-  let aggregateFieldMetrics = $state<Record<string, AggregateMetric[]>>({});
-  let focusedAggregateColumn = $state('');
+  let aggregateRecipe = $state.raw<AggregateRecipeItem[]>([]);
+  let focusedAggregateItemId = $state<number | null>(null);
+  let nextAggregateRecipeId = 0;
   let aggregateSourceSql = $state('');
   let aggregateSourceColumns = $state.raw<ColumnInfo[]>([]);
   let joinLeftViewId = $state('');
   let joinRightViewId = $state('');
+  let joinLeftSourceId = $state('');
+  let joinRightSourceId = $state('');
   let joinLeftKeys = $state<string[]>([]);
   let joinRightKeys = $state<string[]>([]);
   let joinLeftColumns = $state<string[]>([]);
   let joinRightColumns = $state<string[]>([]);
+  let joinStep = $state<JoinStep>(0);
+  let joinStepDirection = $state<-1 | 1>(1);
+  let joinSourceSide = $state<'left' | 'right'>('right');
   let joinPreview = $state.raw<JoinWorkspaceResponse | null>(null);
   let joinPreviewLoading = $state(false);
   let joinPreviewError = $state('');
@@ -83,7 +97,7 @@
   let reorderOrigin = $state.raw<string[] | null>(null);
   let lastHiddenColumn = $state<string | null>(null);
   let railCollapsed = $state(false);
-  let tableExpanded = $state(false);
+  let fitColumnsToContent = $state(false);
   let rowDensity = $state<RowDensity>('default');
   let page = $state(1);
   let pageSize = $state(100);
@@ -98,15 +112,68 @@
   let filterValue = $state('');
   let columnSearch = $state('');
   let columnMenuSearch = $state('');
-  let nullThreshold = $state(50);
+  let columnMenuRegex = $state(false);
+  let nullThreshold = $state(100);
   let activeColumnMatch = $state(0);
   let selectedCell = $state<{ row: number; column: string; expanded?: boolean } | null>(null);
+  let pinnedColumns = $state<string[]>([]);
   let editingCell = $state<{ row: number; column: string; value: string; original: string } | null>(null);
   let cellEditSaving = $state(false);
   let cellEditError = $state('');
   let columnMutationError = $state('');
   let renamingColumn = $state<{ original: string; value: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
+  let gridApi = $state<{ scrollToAbsoluteRow: (absolute: number, onlyIfOutside?: boolean) => void; requestPin: (column: ColumnInfo) => void } | null>(null);
+  type CachedPage = { page: number; rows: TableRows };
+  // One previous page, at most two incoming pages, and one viewport preview.
+  let neighborCache = $state.raw<CachedPage | null>(null);
+  let aheadCache = $state.raw<CachedPage[]>([]);
+  let snapshotCache = $state.raw<{ start: number; rows: TableRows } | null>(null);
+  let pendingSelect: { absRow: number; column: string } | null = null;
+  let renderedQueryKey = $state('');
+  let lastDir: 1 | -1 = 1;
+  let dragHeld = false;
+  let latencyMs = 300;
+  type ViewportReport = { firstRow: number; lastRow: number; velocity: number };
+  let latestViewport: ViewportReport | null = null;
+  const pendingPages = new Map<number, AbortController>();
+  let snapshotRequest: AbortController | null = null;
+  const fetchFailures = new Map<number, { at: number; message: string }>();
+  let gridLoadError = $state('');
+  const FETCH_FAIL_COOLDOWN_MS = 5000;
+
+  function currentQueryKey(): string {
+    return JSON.stringify({
+      node: activeSqlNodeId || selectedNodeId,
+      sql: sqlBase || activeSql || activeVersion?.sql || '',
+      filters, sorts, dedupe: dedupeColumns, size: pageSize,
+    });
+  }
+  function cancelSnapshot() {
+    snapshotRequest?.abort();
+    snapshotRequest = null;
+  }
+  function resetBackground() {
+    for (const request of pendingPages.values()) request.abort();
+    pendingPages.clear();
+    cancelSnapshot();
+    neighborCache = null;
+    aheadCache = [];
+    snapshotCache = null;
+    pendingSelect = null;
+    latestViewport = null;
+    fetchFailures.clear();
+    gridLoadError = '';
+    dragHeld = false;
+  }
+  onDestroy(resetBackground);
+  $effect(() => {
+    const key = currentQueryKey();
+    if (key !== renderedQueryKey) {
+      resetBackground();
+      renderedQueryKey = key;
+    }
+  });
   let categoryValues = $state.raw<CategoryValue[]>([]);
   let categorySearch = $state('');
   let categoryTotal = $state<AggregateCount>(0);
@@ -142,9 +209,9 @@
   let mutationTarget = $state<{ kind: 'insert'; insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | { kind: 'modify'; column: ColumnInfo } | null>(null);
   let mutationApplying = $state(false);
   let mutationError = $state('');
-  let exportDialog = $state<HTMLDialogElement | null>(null);
   let exportOpen = $state(false);
   let exportFormat = $state<ExportFormat>('csv');
+  let exportJsonLayout = $state<JsonLayout>('rows');
   let exportOptions = $state.raw<ExportOption[]>([]);
   let exportSelectedKeys = $state<string[]>(['current']);
   let exportLoading = $state(false);
@@ -152,7 +219,7 @@
   let exportError = $state('');
   let exportTrigger = $state<HTMLButtonElement | null>(null);
   let exportRequestId = 0;
-  let workspaceTab = $state<'data' | 'history'>('data');
+  let versionsOpen = $state(false);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -165,12 +232,226 @@
   let recordingNotice = $state('');
   let versionHistories = $state.raw<ViewHistory[]>([]);
   let activeJoin = $state.raw<JoinWorkspaceRequest | undefined>(undefined);
+  type UndoPoint = {
+    historyId: string;
+    sqlBase: string; activeSql: string; activeSqlNodeId: string; sqlText: string;
+    columnOrder: string[]; hiddenColumns: string[];
+    filters: FilterCondition[]; sorts: SortCondition[]; dedupeColumns: string[];
+    join: JoinWorkspaceRequest | undefined; page: number;
+  };
+  // One entry per staged pending change, kept aligned by index with pendingChanges.
+  let undoStack = $state.raw<UndoPoint[]>([]);
   let openDiff = $state.raw<VersionDiff | null>(null);
   let diffDialog = $state<HTMLDialogElement | null>(null);
   let diffReturnFocus: HTMLElement | null = null;
   let editorHost = $state<HTMLDivElement | null>(null);
   let editorView: EditorView | null = null;
   let queryMenuOpen = $state<'columns' | 'joins' | 'aggregate' | 'dedupe' | null>(null);
+
+  let toolbarVisibility = $state<ToolbarVisibility>('show');
+  let actionMenuMode = $state<ActionMenuMode>('simple');
+  let settingsOpen = $state(false);
+  let densityMenuOpen = $state(false);
+  let settingsError = $state('');
+  let commandPrefix = $state<CommandPrefix>(null);
+  let combinationTimer: ReturnType<typeof setTimeout> | undefined;
+  let combinationId = $state(0);
+  let commandMode = $state<'wheel' | 'find-column' | 'help' | 'operation' | 'sort' | null>(null);
+  let commandQuery = $state('');
+  let columnTarget = $state('');
+  let pendingColumnAction = '';
+  let commandReturnFocus: HTMLElement | null = null;
+  let sourcePicking = $state(false);
+  let sourceDigits = $state('');
+  let sourceNumberTimer: ReturnType<typeof setTimeout> | undefined;
+  let cellFinderOpen = $state(false);
+  let cellSearchTerm = $state('');
+  let cellSearchNotice = $state('');
+  let cellSearching = $state(false);
+  let cellMatch: api.CellMatch | null = null;
+  let cellSearchKey = '';
+  let cellSearchRequest: AbortController | null = null;
+  let redoStack = $state.raw<{ point: UndoPoint; history: ViewHistory }[]>([]);
+  let versionRedo = $state.raw<{ historyId: string; versionId: string }[]>([]);
+  let historyBusy = $state(false);
+
+
+  function setToolbarVisibility(value: ToolbarVisibility) {
+    toolbarVisibility = value;
+    try { localStorage.setItem(toolbarStorageKey, value); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function setActionMenuMode(value: ActionMenuMode) {
+    actionMenuMode = value;
+    try { localStorage.setItem(actionMenuStorageKey, value); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function clearCommandSequence() {
+    commandPrefix = null; sourcePicking = false; sourceDigits = '';
+    clearTimeout(sourceNumberTimer);
+    clearTimeout(combinationTimer);
+  }
+  function startCombinationTimer() {
+    clearTimeout(combinationTimer);
+    combinationId++;
+    combinationTimer = setTimeout(clearCommandSequence, combinationTimeoutMs);
+  }
+  function closeCommands(restoreFocus = true) {
+    commandMode = null; queryMenuOpen = null; densityMenuOpen = false; pendingColumnAction = '';
+    if (restoreFocus) void tick().then(() => commandReturnFocus?.isConnected && commandReturnFocus.focus());
+  }
+  function showCommands(mode: typeof commandMode) {
+    if (!commandMode) commandReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    clearCommandSequence();
+    queryMenuOpen = null; densityMenuOpen = false; versionsOpen = false;
+    commandQuery = ''; commandMode = mode;
+  }
+  function openQueryMenu(menu: NonNullable<typeof queryMenuOpen>) {
+    queryMenuOpen = menu;
+    if (menu === 'joins') {
+      joinStep = 0; joinStepDirection = 1;
+      joinSourceSide = joinLeftViewId || joinLeftSourceId ? 'right' : 'left';
+      railCollapsed = false; prepareJoinPicker();
+    }
+  }
+  async function selectCommandColumn(name: string) {
+    const followup = pendingColumnAction;
+    closeCommands(false);
+    columnTarget = name; selectedCell = null;
+    await scrollToColumn(name);
+    const header = [...(tableScroll?.querySelectorAll<HTMLElement>('th[data-column]') ?? [])].find((item) => item.dataset.column === name);
+    header?.focus({ preventScroll: true });
+    if (followup) await executeCommand(followup);
+  }
+  async function chooseCommand(id: string) {
+    if (commandMode === 'find-column') { await selectCommandColumn(id); return; }
+    if (commandMode === 'sort') {
+      const column = commandColumn;
+      closeCommands();
+      if (column) await setColumnSort(column, id as 'asc' | 'desc' | 'none');
+      return;
+    }
+    await executeCommand(id);
+  }
+  async function executeCommand(id: string) {
+    if (id === 'wheel') { commandMode === 'wheel' ? closeCommands() : showCommands('wheel'); return; }
+    if (id === 'settings') { closeCommands(false); clearCommandSequence(); settingsOpen = !settingsOpen; return; }
+    if (id === 'sidebar') { closeCommands(false); clearCommandSequence(); railCollapsed = !railCollapsed; return; }
+    if (id === 'sources') { closeCommands(false); clearCommandSequence(); railCollapsed = false; sourcePicking = true; startCombinationTimer(); highlightToken++; return; }
+    if (id === 'help') { showCommands('help'); return; }
+    if (!result || loadingData || cellEditSaving || historyBusy) return;
+    if (['columns', 'joins', 'aggregate', 'dedupe'].includes(id)) {
+      showCommands('operation'); openQueryMenu(id as NonNullable<typeof queryMenuOpen>);
+      await tick();
+      document.querySelector<HTMLElement>('.popover-host[open] .popover input, .popover-host[open] .popover button, .detached-menus .popover input, .detached-menus .popover button')?.focus();
+      return;
+    }
+    if (id === 'find-column') { showCommands('find-column'); return; }
+    if (id === 'find-values') { closeCommands(false); cellFinderOpen = true; await tick(); document.querySelector<HTMLInputElement>('.finder input')?.focus(); return; }
+    if (id === 'density') {
+      closeCommands(false); densityMenuOpen = true;
+      await tick(); document.querySelector<HTMLElement>('.density-menu button')?.focus(); return;
+    }
+    if (id === 'filter' || id === 'sort' || id === 'hide' || id === 'pin') {
+      const column = commandColumn;
+      if (!column) { showCommands('find-column'); pendingColumnAction = id; return; }
+      if (id === 'sort') { showCommands('sort'); return; }
+      closeCommands(false);
+      if (id === 'filter') await openFilter(column);
+      if (id === 'hide') { hideColumn(column.name); columnTarget = ''; selectedCell = null; tableScroll?.focus(); }
+      if (id === 'pin') gridApi?.requestPin(column);
+      return;
+    }
+    closeCommands(false);
+    if (id === 'fit') fitColumnsToContent = !fitColumnsToContent;
+    if (id === 'sql') await openSql();
+    if (id === 'versions') toggleVersions();
+    if (id === 'refresh') await loadActiveData();
+    if (id === 'save') await stopRecording();
+    if (id === 'undo') await undoCommand();
+    if (id === 'redo') await redoCommand();
+  }
+  function captureCommands(event: KeyboardEvent) {
+    if (!activeProject || event.defaultPrevented || event.isComposing) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const editable = isEditableElement(target);
+    if (target?.closest('dialog') || inspectorMode || settingsOpen) {
+      if (settingsOpen && event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); settingsOpen = false; void tick().then(() => tableScroll?.focus()); }
+      // Dialogs and editors own their keys. The wheel still has its toggle.
+      if (commandMode && !editable && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); event.stopImmediatePropagation(); closeCommands(); }
+      return;
+    }
+    if (event.key === 'Escape' && queryMenuOpen) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (commandMode === 'operation') showCommands('wheel'); else { queryMenuOpen = null; tableScroll?.focus(); }
+      return;
+    }
+    if (sourcePicking && !editable && !event.altKey && ((!event.metaKey && !event.ctrlKey) || /^[0-9]$/.test(event.key))) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (/^[0-9]$/.test(event.key)) {
+        startCombinationTimer();
+        sourceDigits += event.key;
+        clearTimeout(sourceNumberTimer);
+        const index = Number(sourceDigits) - 1;
+        const commit = () => { const node = nodes[index]; clearCommandSequence(); if (node) void loadProjectSource(node.id); };
+        if (nodes.some((_, i) => String(i + 1).startsWith(sourceDigits) && String(i + 1) !== sourceDigits)) sourceNumberTimer = setTimeout(commit, 900);
+        else commit();
+      } else if (event.key === 'Enter' && sourceDigits) { const node = nodes[Number(sourceDigits) - 1]; clearCommandSequence(); if (node) void loadProjectSource(node.id); }
+      else if (event.key === 'Escape') clearCommandSequence();
+      return;
+    }
+    const action = commandFor(event, commandPrefix, editable);
+    if (!action) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.repeat) return;
+    clearCommandSequence();
+    if (action === 'prefix-find') commandPrefix = 'find';
+    else if (action === 'prefix-column') commandPrefix = 'column';
+    else if (action === 'prefix-sidebar') commandPrefix = 'sidebar';
+    else if (action !== 'cancel') void executeCommand(action);
+    if (commandPrefix) startCombinationTimer();
+  }
+  function clearSequenceOnEdit(event: FocusEvent) { if (isEditableElement(event.target as Element)) clearCommandSequence(); }
+  onMount(() => {
+    try {
+      const value = localStorage.getItem(toolbarStorageKey); if (value === 'show' || value === 'hover' || value === 'hide') toolbarVisibility = value;
+      const menu = localStorage.getItem(actionMenuStorageKey); if (menu === 'simple' || menu === 'comprehensive') actionMenuMode = menu;
+    }
+    catch { settingsError = 'Preferences are unavailable in this browser.'; }
+    window.addEventListener('keydown', captureCommands, true);
+    window.addEventListener('blur', clearCommandSequence);
+    window.addEventListener('focusin', clearSequenceOnEdit);
+    window.addEventListener('pointerdown', clearCommandSequence);
+    return () => { window.removeEventListener('keydown', captureCommands, true); window.removeEventListener('blur', clearCommandSequence); window.removeEventListener('focusin', clearSequenceOnEdit); window.removeEventListener('pointerdown', clearCommandSequence); clearCommandSequence(); cellSearchRequest?.abort(); };
+  });
+  function resetCellSearch() { cellSearchRequest?.abort(); cellSearching = false; cellMatch = null; cellSearchNotice = ''; }
+  async function findCellValue(direction: 'next' | 'previous') {
+    if (!result || !cellSearchTerm || cellSearching || !visibleColumns.length) return;
+    cellSearchRequest?.abort();
+    const controller = new AbortController(); cellSearchRequest = controller;
+    const key = JSON.stringify([currentQueryKey(), visibleColumns.map((column) => column.name), cellSearchTerm]);
+    if (key !== cellSearchKey) cellMatch = null;
+    cellSearchKey = key;
+    cellSearching = true; cellSearchNotice = '';
+    try {
+      const { match } = await api.findCell(activeSqlNodeId || selectedNodeId, {
+        sql: result.sql, term: cellSearchTerm, columns: visibleColumns.map((column) => column.name),
+        after_row: cellMatch?.row ?? -1, after_column: cellMatch?.column_index ?? -1, direction,
+      }, controller.signal);
+      if (controller.signal.aborted || key !== JSON.stringify([currentQueryKey(), visibleColumns.map((column) => column.name), cellSearchTerm])) return;
+      cellMatch = match;
+      if (!match) { cellSearchNotice = 'No matching values in this View.'; return; }
+      const desiredPage = Math.floor(match.row / pageSize) + 1;
+      if (page !== desiredPage) { page = desiredPage; if (!await loadData()) throw new Error(sqlError || 'Could not load the matching row.'); }
+      if (controller.signal.aborted) return;
+      selectedCell = { row: match.row % pageSize, column: match.column };
+      columnTarget = match.column;
+      await scrollToColumn(match.column);
+      gridApi?.scrollToAbsoluteRow(match.row);
+      cellSearchNotice = `Row ${match.row + 1} · ${match.column}`;
+    } catch (reason) { if (!controller.signal.aborted) cellSearchNotice = message(reason); }
+    finally { if (cellSearchRequest === controller) cellSearching = false; }
+  }
 
   let currentHistory = $derived(versionHistories.find((history) => history.id === selectedDataset));
   let selectedNode = $derived(nodes.find((node) => node.id === currentHistory?.sourceId));
@@ -180,9 +461,9 @@
   let projectViews = $derived(activeProjectId ? versionHistories.filter((history) => history.projectId === activeProjectId) : []);
   let activeVersion = $derived(currentHistory?.versions.find((version) => version.id === currentHistory.activeVersionId));
   let activeVersionChildren = $derived(activeVersion ? currentHistory?.versions.filter((version) => version.parentId === activeVersion.id) ?? [] : []);
-  let versionLabel = $derived(workspaceTab === 'data' && activeVersion ? `${formatVersionLabel(activeVersion)} · ${currentHistory?.versions.length ?? 0} saved` : '');
-  let canPreviousVersion = $derived(workspaceTab === 'data' && !loadingData && !!activeVersion?.parentId);
-  let canNextVersion = $derived(workspaceTab === 'data' && !loadingData && activeVersionChildren.length === 1);
+  let versionLabel = $derived(activeVersion ? `${formatVersionLabel(activeVersion)} · ${currentHistory?.versions.length ?? 0} saved` : '');
+  let canPreviousVersion = $derived(!loadingData && !!activeVersion?.parentId);
+  let canNextVersion = $derived(!loadingData && activeVersionChildren.length === 1);
   let currentExportOption = $derived(result ? {
     key: 'current',
     node_id: activeSqlNodeId || activeProject?.node_id || selectedNodeId,
@@ -206,6 +487,13 @@
     return names.filter((name, index) => byName.has(name) && names.indexOf(name) === index).map((name) => byName.get(name)!);
   });
   let visibleColumns = $derived(orderedColumns.filter((column) => !hiddenColumns.includes(column.name)));
+  let commandColumn = $derived(visibleColumns.find((column) => column.name === (selectedCell?.column || columnTarget)));
+  let commandItems = $derived(commandMode === 'wheel' ? operationsFor(actionMenuMode).map((item) => ({ ...item, shortcut: item.key.toUpperCase(), disabled: !result || loadingData || historyBusy }))
+    : commandMode === 'find-column' ? visibleColumns.filter((column) => commandQuery.trim() && column.name.toLowerCase().includes(commandQuery.trim().toLowerCase())).map((column) => ({ id: column.name, label: column.name, detail: column.type }))
+    : commandMode === 'sort' ? [{ id: 'asc', label: 'Ascending' }, { id: 'desc', label: 'Descending' }, { id: 'none', label: 'Remove sort' }]
+    : shortcuts.filter(([, label]) => label.toLowerCase().includes(commandQuery.toLowerCase())).map(([shortcut, label, id]) => ({ id, label, shortcut })));
+  // A pin only survives while its column is still on screen.
+  let livePins = $derived(pinnedColumns.filter((name) => visibleColumns.some((column) => column.name === name)));
   let rowColumns = $derived.by(() => {
     if (!reorderOrigin) return visibleColumns;
     const byName = new Map((result?.columns ?? []).map((column) => [column.name, column]));
@@ -213,21 +501,31 @@
   });
   let aggregateFieldOptions = $derived((aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? []).filter((column) => column.profile_kind !== null));
   let aggregateColumnMatches = $derived.by(() => { const query = aggregateColumnSearch.trim().toLowerCase(); return query ? aggregateFieldOptions.filter((column) => column.name.toLowerCase().includes(query)) : aggregateFieldOptions; });
-  let aggregateFields = $derived(aggregateColumns.filter(isAggregateField));
-  let aggregateIndexes = $derived(aggregateColumns.filter((column) => !isAggregateField(column)));
-  let aggregateMetrics = $derived(focusedAggregateColumn ? aggregateFieldMetrics[focusedAggregateColumn] ?? [] : []);
-  let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateColumn));
+  let aggregateFields = $derived(aggregateRecipe.filter((item) => item.metrics !== null));
+  let aggregateIndexes = $derived(aggregateRecipe.filter((item) => item.metrics === null).map((item) => item.column));
+  let focusedAggregateItem = $derived(aggregateRecipe.find((item) => item.id === focusedAggregateItemId));
+  let aggregateMetrics = $derived(focusedAggregateItem?.metrics ?? []);
+  let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateItem?.column));
   let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
+  let canCreateAggregate = $derived(aggregateRecipe.length > 0 && aggregateFields.some((item) => (item.metrics?.length ?? 0) > 0));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
-  let columnMenuItems = $derived.by(() => { const query = columnMenuSearch.trim().toLowerCase(); return query ? orderedColumns.filter((column) => column.name.toLowerCase().includes(query)) : orderedColumns; });
+  let columnMenuRegexResult = $derived(matchColumnsByRegex(columnOrder, columnMenuSearch.trim()));
+  let columnMenuItems = $derived.by(() => {
+    const query = columnMenuSearch.trim();
+    if (!query) return orderedColumns;
+    if (!columnMenuRegex) return orderedColumns.filter((column) => column.name.toLowerCase().includes(query.toLowerCase()));
+    if (columnMenuRegexResult.error) return [];
+    const matches = new Set(columnMenuRegexResult.matches);
+    return orderedColumns.filter((column) => matches.has(column.name));
+  });
   let columnTypes = $derived([...new Set((result?.columns ?? []).map((column) => column.type))]);
   let columnTypeCounts = $derived.by(() => { const counts: Record<string, number> = Object.create(null); for (const column of result?.columns ?? []) counts[column.type] = (counts[column.type] ?? 0) + 1; return counts; });
   let aggregateRowTones = $derived.by(() => {
-    const rows = result?.rows ?? [];
+    const rows = result?.rows;
     const majorIndex = queryMode === 'sql' && aggregateSourceSql ? aggregateIndexes[0] : '';
-    if (!majorIndex) return [];
+    if (!majorIndex || !rows) return [];
     let alternate = false;
-    return rows.map((row, index) => { if (index && !Object.is(row[majorIndex], rows[index - 1][majorIndex])) alternate = !alternate; return alternate; });
+    return Array.from({ length: rows.length }, (_, index) => { if (index && !Object.is(rows.cell(index, majorIndex), rows.cell(index - 1, majorIndex))) alternate = !alternate; return alternate; });
   });
   let operators = $derived.by(() => filterColumn ? [...baseOperators, ...(!filterColumn.numeric && isTextType(filterColumn.type) ? textOperators : []), ...(filterColumn.numeric || isOrderedType(filterColumn.type) ? orderedOperators : [])] : baseOperators);
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
@@ -239,7 +537,6 @@
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
   function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
-  function isAggregateField(column: string): boolean { return Object.prototype.hasOwnProperty.call(aggregateFieldMetrics, column); }
   function filterSummary(filter: FilterCondition): string {
     const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most' };
     if (filter.operator === 'is_null' || filter.operator === 'not_null') return `${filter.column} ${labels[filter.operator]}`;
@@ -250,25 +547,81 @@
   function syncQueryMenu(menu: 'columns' | 'joins' | 'aggregate' | 'dedupe', event: Event) {
     const open = (event.currentTarget as HTMLDetailsElement).open;
     queryMenuOpen = open ? menu : queryMenuOpen === menu ? null : queryMenuOpen;
+    if (open) openQueryMenu(menu);
   }
-  function clearAggregateDraft() { aggregateColumnSearch = ''; aggregateColumns = []; aggregateFieldMetrics = {}; focusedAggregateColumn = ''; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
+
+  function clearAggregateDraft() { aggregateColumnSearch = ''; aggregateRecipe = []; focusedAggregateItemId = null; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
   function clearJoinPreview() { joinPreviewRequestId++; joinPreview = null; joinPreviewLoading = false; joinPreviewError = ''; }
   function clearJoinDraft() {
     clearJoinPreview();
     joinLeftViewId = currentHistory?.id ?? '';
     joinRightViewId = '';
+    joinLeftSourceId = currentHistory?.sourceId ?? '';
+    joinRightSourceId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
     joinLeftColumns = [...(activeVersion?.columns ?? [])];
     joinRightColumns = [];
+    joinStep = 0;
+    joinStepDirection = 1;
+    joinSourceSide = 'right';
     if (queryMenuOpen === 'joins') queryMenuOpen = null;
+  }
+  function prepareJoinPicker() {
+    if (joinLeftView) joinLeftSourceId = joinLeftView.sourceId ?? '';
+    if (joinRightView) joinRightSourceId = joinRightView.sourceId ?? '';
+    if (joinLeftViewId && !joinRightViewId && !joinLeftKeys.length && !joinRightKeys.length && !joinLeftColumns.length && !joinRightColumns.length) selectJoinView('left', joinLeftViewId);
+  }
+  async function resolveJoinView(side: 'left' | 'right'): Promise<boolean> {
+    const viewId = side === 'left' ? joinLeftViewId : joinRightViewId;
+    let view = versionHistories.find((item) => item.id === viewId && item.projectId === activeProject?.id);
+    const sourceId = view?.sourceId ?? (side === 'left' ? joinLeftSourceId : joinRightSourceId);
+    if (sourceId && !loadedSourceIds.includes(sourceId) && !await loadProjectSource(sourceId, '', false)) return false;
+    // ponytail: source-row picks use the first View; add a second-stage View choice if multi-View sources need disambiguation.
+    view = versionHistories.find((item) => item.id === viewId && item.projectId === activeProject?.id)
+      ?? versionHistories.find((item) => item.projectId === activeProject?.id && item.kind === 'source' && item.sourceId === sourceId);
+    if (!view) return false;
+    selectJoinView(side, view.id);
+    return true;
+  }
+  async function setJoinStep(next: JoinStep): Promise<boolean> {
+    if (next === 1 && joinStep === 0) {
+      joinPreviewError = '';
+      if (!await resolveJoinView('left') || !await resolveJoinView('right')) {
+        joinPreviewError = error || 'The selected source could not be loaded.';
+        return false;
+      }
+    }
+    joinStepDirection = next < joinStep ? -1 : 1;
+    joinStep = next;
+    if (next === 0) railCollapsed = false;
+    return true;
+  }
+  function pickJoinSource(id: string) {
+    clearJoinPreview();
+    if (joinSourceSide === 'left') {
+      joinLeftSourceId = id;
+      joinLeftViewId = '';
+      joinLeftColumns = [];
+      joinSourceSide = 'right';
+    } else {
+      joinRightSourceId = id;
+      joinRightViewId = '';
+      joinRightColumns = [];
+    }
+    joinLeftKeys = [];
+    joinRightKeys = [];
+  }
+  function pickJoinView(id: string) {
+    selectJoinView(joinSourceSide, id);
+    if (joinSourceSide === 'left') joinSourceSide = 'right';
   }
   function selectJoinView(side: 'left' | 'right', id: string) {
     clearJoinPreview();
-    const view = projectViews.find((item) => item.id === id);
+    const view = versionHistories.find((item) => item.id === id && item.projectId === activeProject?.id);
     const columns = view?.versions.find((version) => version.id === view.activeVersionId)?.columns ?? [];
-    if (side === 'left') { joinLeftViewId = id; joinLeftColumns = [...columns]; }
-    else { joinRightViewId = id; joinRightColumns = [...columns]; }
+    if (side === 'left') { joinLeftViewId = id; joinLeftSourceId = view?.sourceId ?? ''; joinLeftColumns = [...columns]; }
+    else { joinRightViewId = id; joinRightSourceId = view?.sourceId ?? ''; joinRightColumns = [...columns]; }
     const left = side === 'left' ? columns : joinLeftVersion?.columns ?? [];
     const right = side === 'right' ? columns : joinRightVersion?.columns ?? [];
     const common = left.find((column) => right.includes(column)) ?? '';
@@ -336,42 +689,40 @@
       addView(result?.sql ?? query, request, `${joinLeftView.name} + ${joinRightView.name}`);
     }
   }
-  function toggleAggregateColumn(column: string, checked: boolean) {
-    if (checked) {
-      if (!column || aggregateColumns.includes(column)) return;
-      aggregateColumns = [...aggregateColumns, column];
-      if (aggregateColumns.length === 1) {
-        aggregateFieldMetrics = { ...aggregateFieldMetrics, [column]: ['count'] };
-        focusedAggregateColumn = column;
-      }
+  function addAggregateColumn(column: string) {
+    if (!column) return;
+    const item: AggregateRecipeItem = {
+      id: ++nextAggregateRecipeId,
+      column,
+      metrics: aggregateRecipe.some((candidate) => candidate.column === column && candidate.metrics === null) ? [] : null
+    };
+    aggregateRecipe = [...aggregateRecipe, item];
+    if (item.metrics !== null) focusedAggregateItemId = item.id;
+  }
+  function removeAggregateColumn(id: number) {
+    aggregateRecipe = aggregateRecipe.filter((item) => item.id !== id);
+    if (focusedAggregateItemId === id) focusedAggregateItemId = aggregateRecipe.find((item) => item.metrics !== null)?.id ?? null;
+  }
+  function focusAggregate(id: number) {
+    if (aggregateRecipe.some((item) => item.id === id && item.metrics !== null)) focusedAggregateItemId = id;
+  }
+  function toggleAggregateRole(id: number) {
+    const item = aggregateRecipe.find((candidate) => candidate.id === id);
+    if (!item) return;
+    if (item.metrics === null) {
+      aggregateRecipe = aggregateRecipe.map((candidate) => candidate.id === id ? { ...candidate, metrics: ['count'] } : candidate);
+      focusedAggregateItemId = id;
       return;
     }
-    removeAggregateColumn(column);
-  }
-  function removeAggregateColumn(column: string) {
-    aggregateColumns = aggregateColumns.filter((item) => item !== column);
-    const metrics = { ...aggregateFieldMetrics };
-    delete metrics[column];
-    aggregateFieldMetrics = metrics;
-    if (focusedAggregateColumn === column) focusedAggregateColumn = aggregateColumns.find(isAggregateField) ?? '';
-  }
-  function focusAggregate(column: string) { if (isAggregateField(column)) focusedAggregateColumn = column; }
-  function toggleAggregateRole(column: string) {
-    if (!aggregateColumns.includes(column)) return;
-    if (isAggregateField(column)) {
-      const metrics = { ...aggregateFieldMetrics };
-      delete metrics[column];
-      aggregateFieldMetrics = metrics;
-      if (focusedAggregateColumn === column) focusedAggregateColumn = aggregateColumns.find((item) => Object.prototype.hasOwnProperty.call(metrics, item)) ?? '';
-      return;
-    }
-    aggregateFieldMetrics = { ...aggregateFieldMetrics, [column]: ['count'] };
-    focusedAggregateColumn = column;
+    if (aggregateRecipe.some((candidate) => candidate.id !== id && candidate.column === item.column && candidate.metrics === null)) return;
+    aggregateRecipe = aggregateRecipe.map((candidate) => candidate.id === id ? { ...candidate, metrics: null } : candidate);
+    if (focusedAggregateItemId === id) focusedAggregateItemId = aggregateRecipe.find((candidate) => candidate.metrics !== null)?.id ?? null;
   }
   function toggleAggregateMetric(metric: AggregateMetric, checked: boolean) {
-    if (!focusedAggregateColumn || !isAggregateField(focusedAggregateColumn)) return;
-    const metrics = aggregateFieldMetrics[focusedAggregateColumn];
-    aggregateFieldMetrics = { ...aggregateFieldMetrics, [focusedAggregateColumn]: checked ? [...metrics, metric] : metrics.filter((item) => item !== metric) };
+    const item = aggregateRecipe.find((candidate) => candidate.id === focusedAggregateItemId);
+    if (!item || item.metrics === null) return;
+    const metrics = checked ? [...item.metrics, metric] : item.metrics.filter((candidateMetric) => candidateMetric !== metric);
+    aggregateRecipe = aggregateRecipe.map((candidate) => candidate.id === item.id ? { ...candidate, metrics } : candidate);
   }
   function isWorkbookPreview(node: NodeInfo | WorkbookPreview): node is WorkbookPreview { return node.kind === 'workbook' && 'sheets' in node && Array.isArray(node.sheets); }
   function toggleWorkbookSheet(sheet: string, checked: boolean) { workbookSheets = checked ? [...workbookSheets, sheet] : workbookSheets.filter((item) => item !== sheet); }
@@ -398,11 +749,13 @@
   }
 
   async function applyColumnQuery(query: string, closeDialog: boolean, change: VersionChange): Promise<boolean> {
+    const before = undoPoint();
     const current = result;
     const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
     if (!current || !targetNodeId || mutationApplying) return false;
     if (!query) { if (mutationTarget) mutationError = 'Could not build the column query.'; else columnMutationError = 'Could not build the column query.'; return false; }
     const id = ++requestId;
+    resetBackground();
     mutationApplying = true;
     loadingData = true;
     mutationError = '';
@@ -430,7 +783,7 @@
       cellEditError = '';
       page = next.page;
       pageInput = String(next.page);
-      stageChange(change, current.sql);
+      stageChange(change, before);
       if (closeDialog) mutationDialog?.close();
       return true;
     } catch (reason) {
@@ -525,17 +878,19 @@
   }
 
   async function openExport(trigger: HTMLButtonElement) {
-    if (!currentExportOption || exportOpen) return;
+    if (!currentExportOption) return;
+    if (exportOpen) { closeExport(); return; }
+    versionsOpen = false;
     exportTrigger = trigger;
     exportOpen = true;
     exportFormat = 'csv';
+    exportJsonLayout = 'rows';
     exportSelectedKeys = ['current'];
     exportOptions = [];
     exportError = '';
     exportLoading = false;
     exportRequestId++;
     await tick();
-    exportDialog?.showModal();
     exportOptions = projectViews.filter((view) => view.id !== currentHistory?.id).reduce<ExportOption[]>((options, view) => {
       const version = view.versions.find((item) => item.id === view.activeVersionId);
       if (!version) return options;
@@ -550,7 +905,17 @@
     }, []);
   }
 
-  function finishExportClose() {
+  function toggleVersions() {
+    if (versionsOpen) { versionsOpen = false; return; }
+    if (!currentHistory) return;
+    closeExport();
+    versionsOpen = true;
+  }
+
+  function closeVersions() { versionsOpen = false; }
+
+  function closeExport() {
+    if (exporting) return;
     const trigger = exportTrigger;
     exportRequestId++;
     exportOpen = false;
@@ -558,26 +923,26 @@
     exportSelectedKeys = ['current'];
     exportError = '';
     exportLoading = false;
-    exporting = false;
     exportTrigger = null;
     tick().then(() => trigger?.focus());
   }
 
-  function setExportFormat(format: ExportFormat) { exportFormat = format; if (format === 'csv') exportSelectedKeys = ['current']; }
+  function setExportFormat(format: ExportFormat) { exportFormat = format; if (format !== 'xlsx') exportSelectedKeys = ['current']; }
   function toggleExportOption(key: string, checked: boolean) { exportSelectedKeys = checked ? [...new Set([...exportSelectedKeys, key])] : exportSelectedKeys.filter((item) => item !== key); }
 
   async function runExport() {
     const current = currentExportOption;
     if (!current || exporting || exportLoading) return;
     const choices = [current, ...exportOptions];
-    const selected = exportFormat === 'csv' ? [current] : choices.filter((option) => exportSelectedKeys.includes(option.key));
+    const selected = exportFormat === 'xlsx' ? choices.filter((option) => exportSelectedKeys.includes(option.key)) : [current];
     if (!selected.length) return;
     exporting = true;
     exportError = '';
     try {
       const download = await api.exportData({
         format: exportFormat,
-        filename: exportFormat === 'csv' ? current.name : 'quark-export',
+        ...(exportFormat === 'json' ? { json_layout: exportJsonLayout } : {}),
+        filename: exportFormat === 'xlsx' ? 'quark-export' : current.name,
         sheets: selected.map(({ node_id, name, sql }) => ({ node_id, name, sql }))
       });
       const url = URL.createObjectURL(download.blob);
@@ -588,7 +953,8 @@
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
-      exportDialog?.close();
+      exporting = false;
+      closeExport();
     } catch (reason) { exportError = message(reason); }
     finally { exporting = false; }
   }
@@ -750,10 +1116,90 @@
     return saved;
   }
 
-  function stageChange(change: VersionChange, _viewSql = result?.sql ?? activeSql) {
+  function undoPoint(): UndoPoint {
+    return {
+      historyId: currentHistory?.id ?? '',
+      sqlBase, activeSql, activeSqlNodeId, sqlText,
+      columnOrder: [...columnOrder], hiddenColumns: [...hiddenColumns],
+      filters: filters.map((filter) => ({ ...filter, ...(Array.isArray(filter.value) ? { value: [...filter.value] } : {}) })),
+      sorts: sorts.map((sort) => ({ ...sort })),
+      dedupeColumns: [...dedupeColumns],
+      join: activeJoin, page
+    };
+  }
+
+  function stageChange(change: VersionChange, before?: UndoPoint) {
     if (!currentHistory) return;
+    redoStack = []; versionRedo = [];
     recordingNotice = '';
+    undoStack = [...undoStack, before ?? undoPoint()];
     replaceHistory(stageVersionChange(currentHistory, change), true);
+  }
+
+  function clearPending(history: ViewHistory) {
+    undoStack = []; redoStack = []; versionRedo = [];
+    replaceHistory({ ...history, pendingParentId: null, pendingChanges: [] });
+  }
+
+  async function restoreUndoPoint(point: UndoPoint, history: ViewHistory): Promise<boolean> {
+    if (point.historyId !== currentHistory?.id) return false;
+    historyBusy = true;
+    try {
+      // Fetch before changing history so a failed replay leaves both stacks intact.
+      const next = await api.querySql(point.activeSqlNodeId || activeProject?.node_id || history.nodeId, {
+        sql: point.sqlBase || point.activeSql, page: point.page, page_size: pageSize,
+        filters: point.filters, sorts: point.sorts, dedupe_columns: point.dedupeColumns,
+      });
+      if (point.historyId !== currentHistory?.id) return false;
+      if (!replaceHistory(history)) return false;
+      closeSql(false); clearAggregateDraft(); resetBackground();
+      filters = point.filters; sorts = point.sorts;
+      dedupeColumns = [...point.dedupeColumns]; dedupeDraft = [...point.dedupeColumns];
+      columnOrder = [...point.columnOrder]; hiddenColumns = [...point.hiddenColumns];
+      activeJoin = point.join; sqlText = point.sqlText; sqlBase = point.sqlBase;
+      activeSql = next.sql; activeSqlNodeId = point.activeSqlNodeId;
+      result = next; page = next.page; pageInput = String(next.page);
+      reorderOrigin = null; selectedCell = null; editingCell = null; recordingNotice = '';
+      await tick(); gridApi?.scrollToAbsoluteRow((page - 1) * pageSize);
+      return true;
+    } catch (reason) { recordingNotice = `Could not restore change: ${message(reason)}`; return false; }
+    finally { historyBusy = false; }
+  }
+  async function undoLastChange() {
+    const history = currentHistory;
+    const point = undoStack[undoStack.length - 1];
+    if (!history?.pendingChanges.length || !point || loadingData || historyBusy) return;
+    const redo = { point: undoPoint(), history };
+    const pendingChanges = history.pendingChanges.slice(0, -1);
+    if (!await restoreUndoPoint(point, { ...history, pendingChanges, pendingParentId: pendingChanges.length ? history.pendingParentId : null })) return;
+    undoStack = undoStack.slice(0, -1);
+    redoStack = [...redoStack, redo];
+  }
+  async function undoCommand() {
+    if (currentHistory?.pendingChanges.length) { await undoLastChange(); return; }
+    const history = currentHistory;
+    const version = history?.versions.find((item) => item.id === activeVersion?.parentId);
+    if (!history || !version || !activeVersion) return;
+    const previous = { historyId: history.id, versionId: activeVersion.id };
+    await restoreVersion(version, true);
+    if (currentHistory?.activeVersionId === version.id) versionRedo = [...versionRedo, previous];
+  }
+  async function redoCommand() {
+    if (versionRedo.length) {
+      const target = versionRedo[versionRedo.length - 1];
+      const version = target?.historyId === currentHistory?.id ? currentHistory?.versions.find((item) => item.id === target.versionId) : undefined;
+      if (!version || currentHistory?.pendingChanges.length) return;
+      await restoreVersion(version, true);
+      if (currentHistory?.activeVersionId === version.id) versionRedo = versionRedo.slice(0, -1);
+      return;
+    }
+    const entry = redoStack[redoStack.length - 1];
+    if (entry && entry.point.historyId === currentHistory?.id) {
+      const before = undoPoint();
+      if (!await restoreUndoPoint(entry.point, entry.history)) return;
+      undoStack = [...undoStack, before]; redoStack = redoStack.slice(0, -1);
+      return;
+    }
   }
 
   function blockViewExecutionWhileRecording(): boolean {
@@ -783,6 +1229,8 @@
       selectedDataset = history.id;
       joinLeftViewId = history.id;
       joinRightViewId = '';
+      joinLeftSourceId = '';
+      joinRightSourceId = '';
       joinLeftKeys = [];
       joinRightKeys = [];
       joinLeftColumns = [...history.versions[0].columns];
@@ -861,14 +1309,13 @@
   }
 
   function closeSql(_restoreFocus = true) { editorView?.destroy(); editorView = null; sqlOpen = false; }
-  function toggleTableExpanded() { if (!tableExpanded) { if (sqlOpen) closeSql(false); queryMenuOpen = null; railOpen = false; } tableExpanded = !tableExpanded; }
   function resetSql(dataset: BaseViewInfo | undefined) { closeSql(); queryMode = 'builder'; sqlText = dataset?.sql ?? ''; sqlBase = ''; activeSql = ''; activeSqlNodeId = ''; sqlError = ''; }
 
   function discardPending(): boolean {
     const history = currentHistory;
     if (!history?.pendingChanges.length) return true;
     if (!window.confirm(`Discard ${history.pendingChanges.length} pending change${history.pendingChanges.length === 1 ? '' : 's'}?`)) return false;
-    replaceHistory({ ...history, pendingParentId: null, pendingChanges: [] });
+    clearPending(history);
     recordingNotice = 'Pending changes discarded.';
     return true;
   }
@@ -894,7 +1341,6 @@
   }
 
   async function replayVersionSnapshot(version: Version): Promise<boolean> {
-    workspaceTab = 'data';
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -904,9 +1350,16 @@
     return replayStored(version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns);
   }
 
-  async function restoreVersion(version: Version) {
+  async function restoreVersion(version: Version, preserveRedo = false) {
     if (!discardPending()) return;
-    if (!await replayVersionSnapshot(version)) return;
+    const before = undoPoint();
+    if (!await replayVersionSnapshot(version)) {
+      filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns;
+      dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page);
+      recordingNotice = sqlError || 'Could not open this Version.';
+      return;
+    }
+    if (!preserveRedo) { redoStack = []; versionRedo = []; }
     if (currentHistory) replaceHistory(activateVersion(currentHistory, version.id));
   }
 
@@ -940,6 +1393,8 @@
       ...(activeJoin ? { join: activeJoin } : {})
     });
     if (!replaceHistory(next)) return;
+    undoStack = [];
+    redoStack = []; versionRedo = [];
     const version = next.versions.find((item) => item.id === next.activeVersionId);
     if (version) await showDiff(next, version, tableScroll);
   }
@@ -1002,7 +1457,6 @@
     if (event.key === 'Escape') {
       if (inspectorMode) closeInspector();
       else if (sqlOpen) closeSql();
-      else if (tableExpanded) tableExpanded = false;
       else railOpen = false;
       return;
     }
@@ -1024,12 +1478,13 @@
   function isEditableElement(element: Element | null): boolean { return element instanceof HTMLInputElement && !['checkbox', 'radio'].includes(element.type) || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement || element instanceof HTMLElement && element.isContentEditable; }
 
   function clearWorkspaceState() {
+    closeCommands(false); clearCommandSequence(); resetCellSearch(); cellFinderOpen = false; settingsOpen = false; columnTarget = ""; redoStack = []; versionRedo = [];
     replayRequestId++;
     requestId++;
+    resetBackground();
     sourceRequestId++;
     closeInspector();
     resetSql(undefined);
-    workspaceTab = 'data';
     selectedNodeId = '';
     selectedDataset = '';
     datasets = [];
@@ -1045,6 +1500,8 @@
     clearJoinPreview();
     joinLeftViewId = '';
     joinRightViewId = '';
+    joinLeftSourceId = '';
+    joinRightSourceId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
     joinLeftColumns = [];
@@ -1057,7 +1514,7 @@
     error = '';
     recordingNotice = '';
     queryMenuOpen = null;
-    tableExpanded = false;
+    fitColumnsToContent = false;
     selectedCell = null;
     editingCell = null;
     railOpen = false;
@@ -1213,14 +1670,14 @@
       history = versionHistories.find((item) => item.id === id && item.projectId === activeProject?.id);
       if (!history) return;
     }
-    if (id === selectedDataset && result) { workspaceTab = 'data'; railOpen = false; return; }
+    if (id === selectedDataset && result) { railOpen = false; return; }
     if (!discardPending()) return;
     replayRequestId++;
     closeInspector();
     resetSql(datasets.find((view) => view.id === id));
     selectedNodeId = activeProject?.node_id ?? history.nodeId;
     selectedDataset = id;
-    workspaceTab = 'data';
+    columnTarget = ""; resetCellSearch(); redoStack = []; versionRedo = [];
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -1229,6 +1686,8 @@
     clearJoinPreview();
     joinLeftViewId = id;
     joinRightViewId = '';
+    joinLeftSourceId = history.sourceId ?? '';
+    joinRightSourceId = '';
     joinLeftKeys = [];
     joinRightKeys = [];
     joinLeftColumns = [];
@@ -1247,15 +1706,18 @@
 
   async function loadData(): Promise<boolean> {
     const sql = sqlBase || activeSql || activeVersion?.sql;
-    return sql ? runSql(sql, true, true, activeProject?.node_id ?? currentHistory?.nodeId) : false;
+    if (!sql) return false;
+    const loaded = await runSql(sql, true, true, activeProject?.node_id ?? currentHistory?.nodeId);
+
+    return loaded;
   }
 
   async function createAggregateView() {
     if (blockViewExecutionWhileRecording()) return;
     const source = queryMode === 'builder' ? result?.sql : aggregateSourceSql || sqlBase || activeSql;
     const columns = queryMode === 'builder' ? result?.columns ?? [] : aggregateSourceColumns.length ? aggregateSourceColumns : result?.columns ?? [];
-    const aggregates = aggregateFields.map((column) => ({ column, metrics: aggregateFieldMetrics[column] }));
-    if (!source || !aggregates.some(({ metrics }) => metrics.length)) return;
+    const aggregates = aggregateFields.map((item) => ({ column: item.column, metrics: item.metrics ?? [] }));
+    if (!source || !canCreateAggregate) return;
     const query = buildAggregateSql(source, aggregateIndexes, aggregates);
     if (!query) return;
     aggregateSourceSql = source;
@@ -1317,7 +1779,7 @@
     const after = [...columnOrder];
     reorderOrigin = null;
     if (before.length === after.length && before.every((name, index) => name === after[index])) return;
-    stageChange({ kind: 'reorder', summary: 'Reorder columns', details: { before, after } });
+    stageChange({ kind: 'reorder', summary: 'Reorder columns', details: { before, after } }, { ...undoPoint(), columnOrder: before });
   }
 
   function cancelColumnReorder() {
@@ -1349,6 +1811,7 @@
       if (!keepAggregateBuilder) clearAggregateDraft();
     }
     const id = ++requestId;
+    resetBackground();
     loadingData = true;
     error = '';
     sqlError = '';
@@ -1371,7 +1834,9 @@
       }
       page = next.page;
       pageInput = String(next.page);
-      if (sqlOpen) { await tick(); createSqlEditor(); }
+      await tick();
+      gridApi?.scrollToAbsoluteRow((next.page - 1) * next.page_size);
+      if (sqlOpen) createSqlEditor();
       return true;
     } catch (reason) { if (id === requestId) sqlError = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
@@ -1456,11 +1921,12 @@
   function toggleCategory(value: string, checked: boolean) { selectedCategories = checked ? [...selectedCategories, value] : selectedCategories.filter((item) => item !== value); }
   function selectVisibleCategories() { selectedCategories = [...new Set([...selectedCategories, ...categoryValues.map((item) => item.value)])]; }
 
-  async function applyFilterChange(next: FilterCondition[], change: VersionChange) {
+  async function applyFilterChange(next: FilterCondition[], change: VersionChange, before = undoPoint()) {
     filters = next;
     page = 1;
     pageInput = '1';
-    if (await loadData()) stageChange(change);
+    if (await loadData()) stageChange(change, before);
+    else { filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; page = before.page; pageInput = String(page); }
   }
 
   async function addCategoryFilter() {
@@ -1499,19 +1965,28 @@
     const value = Array.isArray(filter.value) ? [...filter.value] : filter.value;
     await applyFilterChange(filters.filter((_, itemIndex) => itemIndex !== index), { kind: 'filter-remove', summary: `Remove filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
   }
+  async function setColumnSort(column: ColumnInfo, direction: 'asc' | 'desc' | 'none') {
+    const before = undoPoint();
+    const exists = sorts.some((sort) => sort.column === column.name);
+    sorts = direction === 'none' ? sorts.filter((sort) => sort.column !== column.name) : exists
+      ? sorts.map((sort) => sort.column === column.name ? { ...sort, direction } : sort)
+      : [...sorts, { column: column.name, direction }];
+    page = 1; pageInput = '1';
+    if (await loadData()) stageChange({ kind: 'sort', summary: direction === 'none' ? `Remove sort ${column.name}` : `Sort ${column.name} ${direction}`, details: { column: column.name, direction } }, before);
+    else { sorts = before.sorts; page = before.page; pageInput = String(page); }
+  }
   async function cycleSort(column: ColumnInfo) {
     const existing = sorts.find((sort) => sort.column === column.name);
-    sorts = existing?.direction === 'asc' ? sorts.map((sort) => sort.column === column.name ? { ...sort, direction: 'desc' } : sort) : existing ? sorts.filter((sort) => sort.column !== column.name) : [...sorts, { column: column.name, direction: 'asc' }];
-    page = 1;
-    await loadData();
+    await setColumnSort(column, existing?.direction === 'asc' ? 'desc' : existing ? 'none' : 'asc');
   }
-  async function removeSort(column: string) { sorts = sorts.filter((sort) => sort.column !== column); page = 1; await loadData(); }
+  async function removeSort(column: string) { const item = result?.columns.find((item) => item.name === column); if (item) await setColumnSort(item, 'none'); }
   async function clearQuery() {
+    const before = undoPoint();
     const count = filters.length;
     sorts = [];
     dedupeColumns = [];
     dedupeDraft = [];
-    await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } });
+    await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } }, before);
   }
   async function backToBuilder() {
     if (!discardPending()) return;
@@ -1522,15 +1997,22 @@
     await replayVersionSnapshot(version);
   }
   function toggleDedupe(column: string, checked: boolean) { dedupeDraft = checked ? [...dedupeDraft, column] : dedupeDraft.filter((item) => item !== column); }
-  async function applyDedupe() { dedupeColumns = [...dedupeDraft]; page = 1; await loadData(); }
-  async function clearDedupe() { dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
+  async function setDedupe(columns: string[]) {
+    const before = undoPoint();
+    dedupeColumns = [...columns]; dedupeDraft = [...columns]; page = 1; pageInput = '1';
+    if (await loadData()) stageChange({ kind: 'dedupe', summary: columns.length ? `Dedupe by ${columns.join(', ')}` : 'Clear dedupe', details: { columns } }, before);
+    else { dedupeColumns = before.dedupeColumns; dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page); }
+  }
+  async function applyDedupe() { await setDedupe(dedupeDraft); }
+  async function clearDedupe() { await setDedupe([]); }
   function isColumnProtected(column: string): boolean { return [...dedupeColumns, ...dedupeDraft].includes(column); }
   function setHidden(next: string[], change: VersionChange): boolean {
     const columns = new Set((result?.columns ?? []).map((column) => column.name));
     const normalized = [...new Set(next)].filter((column) => columns.has(column));
     if (normalized.length === hiddenColumns.length && normalized.every((column, index) => column === hiddenColumns[index])) return false;
+    const before = undoPoint();
     hiddenColumns = normalized;
-    stageChange(change);
+    stageChange(change, before);
     return true;
   }
   function hideColumn(column: string) {
@@ -1546,6 +2028,10 @@
   function showAllColumns() {
     if (setHidden([], { kind: 'show', summary: 'Show all columns', details: { columns: [...hiddenColumns] } })) lastHiddenColumn = null;
     shownColumnTypes = [];
+  }
+  function hideAllColumns() {
+    const columns = visibleColumns.filter((column) => !isColumnProtected(column.name)).map((column) => column.name);
+    if (columns.length && setHidden([...hiddenColumns, ...columns], { kind: 'hide', summary: 'Hide all columns', details: { columns } })) lastHiddenColumn = columns[columns.length - 1];
   }
   function isTypeShown(type: string): boolean { return shownColumnTypes.length === 0 || shownColumnTypes.includes(type); }
   function showColumnsOfTypes(types: string[]) {
@@ -1581,7 +2067,145 @@
     })) lastHiddenColumn = action === 'hide' ? columns[columns.length - 1] : null;
     return '';
   }
-  async function changePage(next: number) { if (next < 1 || next > totalPages || next === page) return; page = next; await loadActiveData(); }
+  async function changePage(next: number) {
+    if (next < 1 || next > totalPages || next === result?.page) return;
+    await seekRow((next - 1) * Math.max(1, result?.page_size ?? pageSize));
+  }
+  async function seekRow(absoluteRow: number) {
+    if (loadingData || !result) return;
+    cancelSnapshot();
+    const total = safeTotalRows(result.total_rows);
+    if (total <= 0) return;
+    const clamped = clampAbsoluteRow(absoluteRow, total);
+    gridApi?.scrollToAbsoluteRow(clamped);
+    const visible = cellPageSize();
+    handleViewport({ firstRow: clamped, lastRow: Math.min(total - 1, clamped + visible), velocity: 0 });
+    await consumePendingSelect();
+  }
+  async function previewSeek(absoluteRow: number, column: string) {
+    if (!result || loadingData) return;
+    pendingSelect = { absRow: Math.floor(absoluteRow), column };
+    await seekRow(absoluteRow);
+  }
+  async function consumePendingSelect() {
+    const pending = pendingSelect;
+    if (!pending || !result) return;
+    const start = (result.page - 1) * Math.max(1, result.page_size);
+    const index = pending.absRow - start;
+    if (index < 0 || index >= result.rows.length) return;
+    const name = visibleColumns.some((column) => column.name === pending.column) ? pending.column : visibleColumns[0]?.name;
+    pendingSelect = null;
+    if (!name) return;
+    selectedCell = { row: index, column: name, expanded: false };
+    await focusCell(index, name);
+  }
+  function promotePage(cache: CachedPage) {
+    if (!result || cache.page === result.page) return;
+    const left = { page: result.page, rows: result.rows };
+    result = { ...result, rows: cache.rows, page: cache.page };
+    neighborCache = left;
+    aheadCache = aheadCache.filter((entry) => entry.page !== cache.page);
+    selectedCell = null;
+    editingCell = null;
+    page = cache.page;
+    pageInput = String(cache.page);
+    void consumePendingSelect();
+  }
+  function prefetchContext() {
+    const targetNodeId = activeSqlNodeId || selectedNodeId;
+    const sql = sqlBase || activeSql || activeVersion?.sql;
+    if (!targetNodeId || !sql || !result) return null;
+    return { targetNodeId, sql, filters, sorts, dedupe_columns: dedupeColumns, key: currentQueryKey(), generation: requestId };
+  }
+  async function fetchPageBackground(page: number) {
+    const context = prefetchContext();
+    if (!context || !result || pendingPages.has(page) || pendingPages.size >= 2) return;
+    const failedAt = fetchFailures.get(page);
+    if (failedAt !== undefined && performance.now() - failedAt.at < FETCH_FAIL_COOLDOWN_MS) return;
+    const controller = new AbortController();
+    pendingPages.set(page, controller);
+    const started = performance.now();
+    try {
+      const next = await api.querySql(context.targetNodeId, { sql: context.sql, page, page_size: result.page_size, filters: context.filters, sorts: context.sorts, dedupe_columns: context.dedupe_columns }, controller.signal);
+      if (controller.signal.aborted || context.generation !== requestId || context.key !== currentQueryKey() || !result) return;
+      latencyMs = latencyEma(latencyMs, performance.now() - started);
+      aheadCache = [...aheadCache.filter((entry) => entry.page !== next.page), { page: next.page, rows: next.rows }].slice(-2);
+      fetchFailures.delete(page);
+    } catch (reason) {
+      if (!controller.signal.aborted && context.generation === requestId && context.key === currentQueryKey()) {
+        fetchFailures.set(page, { at: performance.now(), message: message(reason) });
+      }
+    } finally {
+      if (pendingPages.get(page) === controller) pendingPages.delete(page);
+      if (!controller.signal.aborted && context.generation === requestId && latestViewport) handleViewport(latestViewport);
+    }
+  }
+  async function fetchSnapshot(absoluteRow: number) {
+    cancelSnapshot();
+    const context = prefetchContext();
+    if (!context || !result || !dragHeld) return;
+    const total = safeTotalRows(result.total_rows);
+    const clamped = clampAbsoluteRow(absoluteRow, total);
+    const visible = cellPageSize() + 8;
+    const end = Math.min(total - 1, clamped + visible);
+    const window = snapshotWindow(clamped, visible);
+    const size = Math.max(1, result.page_size);
+    const covers = (start: number, length: number) => clamped >= start && end < start + length;
+    if (covers((result.page - 1) * size, result.rows.length)) return;
+    if (snapshotCache && covers(snapshotCache.start, snapshotCache.rows.length)) return;
+    const controller = new AbortController();
+    snapshotRequest = controller;
+    try {
+      // A viewport straddling the preview grid needs both small slices.
+      const pages = pagesForRange(clamped, end, window.size, Math.ceil(total / window.size));
+      const chunks = await Promise.all(pages.map((page) => api.querySql(context.targetNodeId, { sql: context.sql, page, page_size: window.size, filters: context.filters, sorts: context.sorts, dedupe_columns: context.dedupe_columns }, controller.signal)));
+      if (controller.signal.aborted || !dragHeld || context.generation !== requestId || context.key !== currentQueryKey()) return;
+      snapshotCache = { start: (pages[0] - 1) * window.size, rows: concatRows(chunks.map((chunk) => chunk.rows)) };
+    } catch { /* Retain visible rows; releasing retries with a full page. */ }
+    finally { if (snapshotRequest === controller) snapshotRequest = null; }
+  }
+  function thumbHeld(held: boolean) {
+    dragHeld = held;
+    cancelSnapshot();
+    if (held) {
+      for (const request of pendingPages.values()) request.abort();
+      pendingPages.clear();
+    }
+  }
+  function snapshotRest(absoluteRow: number) {
+    if (!result || loadingData) return;
+    void fetchSnapshot(absoluteRow);
+  }
+  function retryGridLoad() {
+    fetchFailures.clear();
+    gridLoadError = '';
+    if (latestViewport) handleViewport(latestViewport);
+  }
+  function handleViewport(report: ViewportReport) {
+    latestViewport = report;
+    if (!result || loadingData || cellEditSaving || currentQueryKey() !== renderedQueryKey) return;
+    if (dragHeld) return;
+    const total = safeTotalRows(result.total_rows);
+    if (total <= 0) return;
+    const size = Math.max(1, result.page_size);
+    if (report.velocity !== 0) lastDir = report.velocity > 0 ? 1 : -1;
+    const target = absoluteRowToPage(clampAbsoluteRow(report.firstRow, total), size, Math.max(totalPages, 1)).page;
+    gridLoadError = pagesForRange(report.firstRow, report.lastRow, size, totalPages).map((page) => fetchFailures.get(page)?.message).find(Boolean) ?? '';
+    const cached = [neighborCache, ...aheadCache].find((entry) => entry?.page === target);
+    if (cached) promotePage(cached);
+    const wanted = criticalPages({ ...report, pageSize: size, totalPages: Math.max(totalPages, 1), currentPage: result.page, coveredPages: [result.page], latencyMs, lastDir });
+    aheadCache = aheadCache.filter((entry) => wanted.includes(entry.page));
+    for (const [page, controller] of pendingPages) {
+      if (!wanted.includes(page)) { controller.abort(); pendingPages.delete(page); }
+    }
+    const covered = [result.page, ...(neighborCache ? [neighborCache.page] : []), ...aheadCache.map((entry) => entry.page)];
+    for (const page of wanted) if (!covered.includes(page)) void fetchPageBackground(page);
+    if (snapshotCache) {
+      const loaded = [result, neighborCache, ...aheadCache].filter((entry) => entry !== null);
+      const visiblePages = pagesForRange(report.firstRow, Math.min(total - 1, report.lastRow), size, totalPages);
+      if (visiblePages.every((page) => loaded.some((entry) => entry.page === page))) snapshotCache = null;
+    }
+  }
   async function jumpPage() { const next = Math.min(Math.max(1, Number.parseInt(pageInput) || 1), Math.max(totalPages, 1)); pageInput = String(next); await changePage(next); }
   async function changePageSize(event: Event) { pageSize = Number((event.currentTarget as HTMLSelectElement).value); page = 1; await loadActiveData(); }
 
@@ -1650,7 +2274,7 @@
     await tick();
     const header = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('th[data-column]') ?? [])].find((element) => element.dataset.column === name);
     if (!header || !tableScroll) return;
-    tableScroll.scrollTo({ left: Math.max(0, header.offsetLeft - (tableScroll.clientWidth - header.offsetWidth) / 2), behavior: 'smooth' });
+    tableScroll.scrollTo({ left: Math.max(0, header.offsetLeft - (tableScroll.clientWidth - header.offsetWidth) / 2), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
   function findColumn() { activeColumnMatch = 0; if (columnMatches.length) scrollToColumn(columnMatches[0].name); }
   function cycleColumnMatch(event: KeyboardEvent) { if (event.key === 'Enter' && columnMatches.length) { event.preventDefault(); activeColumnMatch = (activeColumnMatch + 1) % columnMatches.length; scrollToColumn(columnMatches[activeColumnMatch].name); } }
@@ -1679,31 +2303,52 @@
   function cellEditText(value: unknown): string { return value == null ? '' : display(value); }
   function startCellEdit(row: number, column: string, initial?: string) {
     if (!result || loadingData || cellEditSaving) return;
-    const original = cellEditText(result.rows[row]?.[column]);
+    const original = cellEditText(result.rows.cell(row, column));
     selectedCell = { row, column, expanded: false };
     editingCell = { row, column, value: initial ?? original, original };
     cellEditError = '';
   }
   async function focusCell(row: number, column: string) {
+    if (result) gridApi?.scrollToAbsoluteRow((result.page - 1) * result.page_size + row, true);
     await tick();
     const cell = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('td[data-row][data-column]') ?? [])].find(
       (element) => Number(element.dataset.row) === row && element.dataset.column === column,
     );
-    cell?.focus();
+    cell?.focus({ preventScroll: true });
+  }
+  // One screen of rows, used by PageUp/PageDown. The grid is a single tab stop, so these
+  // are the only way a keyboard user crosses a long page without holding an arrow key.
+  function cellPageSize(): number {
+    const rowHeight = tableScroll?.querySelector('tbody tr:not(.spacer)')?.getBoundingClientRect().height || 34;
+    return Math.max(1, Math.floor((tableScroll?.clientHeight ?? rowHeight * 10) / rowHeight) - 1);
   }
   function moveCell(row: number, column: string, move: CellMove) {
     if (!result || !visibleColumns.length || !result.rows.length) return;
+    const lastRow = result.rows.length - 1;
+    const lastColumn = visibleColumns.length - 1;
     const columnIndex = Math.max(0, visibleColumns.findIndex((item) => item.name === column));
-    const nextRow = Math.min(result.rows.length - 1, Math.max(0, row + (move === 'down' ? 1 : move === 'up' ? -1 : 0)));
-    const nextColumnIndex = Math.min(visibleColumns.length - 1, Math.max(0, columnIndex + (move === 'right' ? 1 : move === 'left' ? -1 : 0)));
+    const page = cellPageSize();
+    const rowDelta = move === 'down' ? 1 : move === 'up' ? -1 : move === 'pageDown' ? page : move === 'pageUp' ? -page : 0;
+    const nextRow = move === 'gridStart' ? 0 : move === 'gridEnd' ? lastRow : Math.min(lastRow, Math.max(0, row + rowDelta));
+    const nextColumnIndex = move === 'rowStart' || move === 'gridStart'
+      ? 0
+      : move === 'rowEnd' || move === 'gridEnd'
+        ? lastColumn
+        : Math.min(lastColumn, Math.max(0, columnIndex + (move === 'right' ? 1 : move === 'left' ? -1 : 0)));
     const nextColumn = visibleColumns[nextColumnIndex].name;
     selectedCell = { row: nextRow, column: nextColumn, expanded: false };
     void focusCell(nextRow, nextColumn);
   }
   function handleCellKeydown(event: KeyboardEvent, row: number, column: string) {
     if (editingCell || loadingData || cellEditSaving) return;
-    const moves: Record<string, CellMove> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    const moves: Record<string, CellMove> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', PageUp: 'pageUp', PageDown: 'pageDown' };
     if (moves[event.key]) { event.preventDefault(); moveCell(row, column, moves[event.key]); return; }
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const move: CellMove = event.ctrlKey || event.metaKey ? (event.key === 'Home' ? 'gridStart' : 'gridEnd') : (event.key === 'Home' ? 'rowStart' : 'rowEnd');
+      moveCell(row, column, move);
+      return;
+    }
     if (event.key === 'Enter') { event.preventDefault(); startCellEdit(row, column); return; }
     if (event.key === 'Backspace' || event.key === 'Delete') { event.preventDefault(); startCellEdit(row, column, ''); return; }
     if (event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); startCellEdit(row, column, event.key); }
@@ -1716,6 +2361,7 @@
     if (edit) void focusCell(edit.row, edit.column);
   }
   async function commitCellEdit(move?: CellMove) {
+    const before = undoPoint();
     const edit = editingCell;
     const current = result;
     const targetNodeId = queryMode === 'sql' ? activeSqlNodeId || selectedNodeId : selectedNodeId;
@@ -1735,6 +2381,7 @@
     const query = buildCellEditSql(current.sql, current.columns.map((column) => column.name), rowNumber, edit.column, edit.value);
     if (!query) { cellEditError = 'Could not build the cell edit query.'; return; }
     const id = ++requestId;
+    resetBackground();
     cellEditSaving = true;
     cellEditError = '';
     try {
@@ -1756,7 +2403,7 @@
       editingCell = null;
       page = next.page;
       pageInput = String(next.page);
-      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } }, current.sql);
+      stageChange({ kind: 'cell', summary: `Edit row ${rowNumber}, ${edit.column}`, details: { row: rowNumber, column: edit.column } }, before);
       if (move) moveCell(edit.row, edit.column, move);
       else void focusCell(selectedCell?.row ?? edit.row, selectedCell?.column ?? edit.column);
     } catch (reason) {
@@ -1767,6 +2414,18 @@
         tableScroll?.querySelector<HTMLInputElement>('td.editing-cell input')?.focus();
       }
     } finally { cellEditSaving = false; }
+  }
+  // Pinning parks the column at the left of the grid, ahead of every unpinned one, and freezes
+  // it there; the reorder rides the same staged path as a drag so it undoes like one.
+  function togglePinColumn(column: ColumnInfo) {
+    if (livePins.includes(column.name)) { pinnedColumns = livePins.filter((name) => name !== column.name); return; }
+    const target = visibleColumns.filter((item) => !livePins.includes(item.name))[0];
+    if (target && target.name !== column.name) {
+      beginColumnReorder();
+      previewColumnReorder(column.name, target.name, 'before');
+      commitColumnReorder();
+    }
+    pinnedColumns = [...livePins, column.name];
   }
   function collapseCell(row: number, column: string) { if (selectedCell?.row === row && selectedCell.column === column) selectedCell = { row, column, expanded: false }; }
   function sortFor(column: string): SortCondition | undefined { return sorts.find((sort) => sort.column === column); }
@@ -1786,10 +2445,69 @@
 
   // -- view-layer adapters for the atomic component split below; no behavior change --
   let canQuery = $derived(!!result);
-  let aggregateMenuLabel = $derived(queryMode === 'sql' ? 'Aggregate builder' : 'Aggregate');
   function typeToggleDisabled(type: string): boolean { return isTypeShown(type) && (columnTypes.length === 1 || (shownColumnTypes.length === 1 && shownColumnTypes[0] === type)); }
   function setCategorySearchLive(value: string) { categorySearch = value; loadCategoryValues(true); }
 </script>
+
+{#snippet operationMenus()}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'columns'}
+                  <ColumnsMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}
+                    visibleCount={visibleColumns.length} totalCount={result?.columns.length ?? 0}
+                    {columnMenuSearch} setColumnMenuSearch={(value) => columnMenuSearch = value}
+                    {columnMenuRegex} setColumnMenuRegex={(value) => columnMenuRegex = value}
+                    columnMenuRegexError={columnMenuRegex ? columnMenuRegexResult.error : ''}
+                    {columnTypes} {columnTypeCounts} {isTypeShown} {toggleShownType} {typeToggleDisabled}
+                    {nullThreshold} setNullThreshold={(value) => nullThreshold = value}
+                    onApplyThreshold={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}
+                    onHideAll={hideAllColumns}
+                    onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
+                    {columnMenuItems} {hiddenColumns} {isColumnProtected}
+                    visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
+                    orderedColumnNames={orderedColumns.map((column) => column.name)}
+                    onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
+                    onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
+                    onMoveColumn={moveColumnOneStep} onRegexVisibility={applyRegexVisibility}
+                  />
+                {/if}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'joins'}
+                  <JoinMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
+                    step={joinStep} direction={joinStepDirection} sourceSide={joinSourceSide}
+                    onSetSourceSide={(side) => joinSourceSide = side} onStep={setJoinStep}
+                    sources={nodes} views={projectViews} {joinLeftViewId} {joinRightViewId} {joinLeftSourceId} {joinRightSourceId}
+                    {joinLeftKeys} {joinRightKeys} onSetKeys={setJoinKeys}
+                    {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
+                    onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? joinLeftVersion?.columns ?? [] : joinRightVersion?.columns ?? [])])}
+                    onSelectNone={(side) => selectJoinColumns(side, [])}
+                    {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
+                    onCheck={checkJoin} {count}
+                    onRun={async () => { await runJoin(); if (commandMode === 'operation' && queryMenuOpen !== 'joins') closeCommands(false); }} canRun={canRunJoin} running={loadingData} preparing={!!loadingSourceId}
+                  />
+                {/if}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'aggregate'}
+                  <AggregateMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
+                    label="Aggregate"
+                    {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
+                    {aggregateColumnMatches} {aggregateRecipe} {focusedAggregateItemId}
+                    onAddColumn={addAggregateColumn} onRemoveColumn={removeAggregateColumn}
+                    onFocusAggregate={focusAggregate} onToggleRole={toggleAggregateRole}
+                    {selectedAggregateColumn} availableMetrics={availableAggregateMetrics}
+                    {aggregateMetrics} onToggleMetric={toggleAggregateMetric}
+                    {canCreateAggregate}
+                    onCreateView={async () => { await createAggregateView(); if (commandMode === 'operation' && queryMenuOpen !== 'aggregate') closeCommands(false); }} creating={loadingData}
+                  />
+                {/if}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'dedupe'}
+                  <DedupeMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}
+                    label={`Dedupe${dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}`}
+                    columns={visibleColumns} {dedupeDraft} onToggle={toggleDedupe}
+                    onApply={applyDedupe} onClear={clearDedupe} dedupeAppliedCount={dedupeColumns.length}
+                  />
+                {/if}
+{/snippet}
 
 <svelte:window onkeydown={handleKeydown} />
 
@@ -1803,7 +2521,10 @@
   {#snippet titlebar()}
     <TitleBar
       project={activeProject!} currentView={currentHistory} {railCollapsed}
-      inert={!!inspectorMode || tableExpanded}
+      inert={!!inspectorMode}
+      onSettings={() => executeCommand('settings')}
+      onCommands={() => { settingsOpen = false; showCommands('wheel'); }}
+      canCommand={!!result && !loadingData}
       onProjects={exitProject}
       onToggleRailCollapsed={() => railCollapsed = !railCollapsed}
       onOpenRail={() => railOpen = true}
@@ -1812,10 +2533,15 @@
 
   {#snippet rail()}
     <SourceRail
-      {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen}
-      inert={!!inspectorMode || tableExpanded}
+      {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen} {highlightToken}
+      numbered={sourcePicking}
+      inert={!!inspectorMode}
+      joinPicking={queryMenuOpen === 'joins' && joinStep === 0} {joinSourceSide} {joinLeftViewId} {joinRightViewId}
+      {joinLeftSourceId} {joinRightSourceId}
       onSelectSource={(id) => { void loadProjectSource(id); }}
       onSelectView={(id) => { void selectView(id); }}
+      onPickJoinSource={pickJoinSource}
+      onPickJoinView={pickJoinView}
       onToggleSource={() => sourceOpen = !sourceOpen}
       onCloseRail={() => railOpen = false}
     >
@@ -1827,51 +2553,66 @@
 
   {#snippet main()}
     <main>
+      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
+      <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
-        <WelcomeScreen {error} {mutating} onUpload={upload} onRetry={() => loadProjectContents(activeProject!)}>
+        <WelcomeScreen
+          {error} {mutating} {nodes} {loadedSourceIds} {loadingSourceId}
+          onSelectSource={(id) => { void loadProjectSource(id); }}
+          onShowAllSources={() => { railCollapsed = false; railOpen = true; highlightToken += 1; }}
+          onUpload={upload} onRetry={() => loadProjectContents(activeProject!)}
+        >
           {#snippet attachForm()}
-            <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} idPrefix="onboarding-database-path" />
+            <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} idPrefix="onboarding-database-path" showUpload={false} />
           {/snippet}
         </WelcomeScreen>
       {:else}
-        <section class="workspace" inert={cellEditSaving}>
+        <section class="workspace" inert={cellEditSaving || historyBusy}>
           <DatasetHead
-            title={workspaceTab === 'history' ? 'Versions' : (currentHistory?.name ?? '')}
+            title={currentHistory?.name ?? ''}
             {versionLabel} {canPreviousVersion} {canNextVersion}
             onPreviousVersion={previousVersion} onNextVersion={nextVersion}
-            showMeta={workspaceTab === 'data' && !!result}
+            versionOpen={versionsOpen} onToggleVersions={toggleVersions}
+            showMeta={!!result}
             rows={result ? count(result.total_rows) : ''}
             ms={result ? compact(result.elapsed_ms) : ''}
-            showRefresh={workspaceTab === 'data'}
+            showRefresh
             onRefresh={loadActiveData}
             onExport={openExport}
             {loadingData} canExport={!!result} {exporting}
             pendingCount={currentHistory?.pendingChanges.length ?? 0}
             onStopRecording={stopRecording}
-            inert={!!inspectorMode || tableExpanded}
-          />
-          <DatasetTabsBar
-            {workspaceTab} {tableExpanded} {rowDensity}
-            historyCount={currentHistory?.versions.length ?? 0}
-            onSelectData={() => workspaceTab = 'data'}
-            onSelectHistory={() => { closeSql(); workspaceTab = 'history'; }}
-            setRowDensity={(density) => rowDensity = density}
-            onToggleExpanded={toggleTableExpanded}
-          />
-          {#if workspaceTab === 'history'}
-            <VersionsViewsPane
-              history={currentHistory} {storageError}
-              onRestore={restoreVersion}
-              onDiff={(version, trigger) => currentHistory && showDiff(currentHistory, version, trigger)}
-            />
-          {:else}
-            {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
-            {#if error}
-              <div class="banner error-banner" role="alert" inert={tableExpanded}><div><strong>Request failed</strong><p>{error}</p></div><button onclick={() => loadData()}>Retry</button></div>
+            canUndo={undoStack.length > 0 && undoStack[undoStack.length - 1].historyId === currentHistory?.id}
+            onUndo={() => void undoLastChange()}
+            {exportOpen}
+            inert={!!inspectorMode}
+          >
+            {#snippet versionMenu()}
+              <VersionMenu
+                open={versionsOpen} history={currentHistory} {storageError}
+                onRestore={restoreVersion}
+                onDiff={(version, trigger) => currentHistory && showDiff(currentHistory, version, trigger)}
+                onClose={closeVersions}
+              />
+            {/snippet}
+            {#snippet exportMenu()}
+              <ExportMenu
+                open={exportOpen} current={currentExportOption} options={exportOptions}
+                selectedKeys={exportSelectedKeys} loading={exportLoading} {exporting} error={exportError}
+                setFormat={setExportFormat} setJsonLayout={(layout) => exportJsonLayout = layout}
+                onToggle={toggleExportOption}
+                onExport={runExport} onClose={closeExport}
+              />
+            {/snippet}
+          </DatasetHead>
+          {#if recordingNotice}<div class="banner" role="status">{recordingNotice}</div>{/if}
+            {#if error || gridLoadError}
+              <div class="banner error-banner" role="alert"><div><strong>Request failed</strong><p>{error || gridLoadError}</p></div><button onclick={() => gridLoadError ? retryGridLoad() : loadData()}>Retry</button></div>
             {/if}
             {#if selectedDataset}
               <QueryConditionBar
-                inert={!!inspectorMode || tableExpanded || loadingData}
+                visibility={toolbarVisibility} menuOpen={queryMenuOpen !== null} bind:densityOpen={densityMenuOpen}
+                inert={!!inspectorMode || loadingData}
                 showBuilder={canQuery}
                 {filters} {sorts} {dedupeColumns}
                 {activeSql} {filterSummary}
@@ -1885,60 +2626,14 @@
                 onFindColumn={findColumn} onColumnSearchKeydown={cycleColumnMatch}
                 columnMatchCount={columnMatches.length}
                 {storageError}
+                {rowDensity} setRowDensity={(density) => rowDensity = density}
+                {fitColumnsToContent} onToggleFitColumns={() => fitColumnsToContent = !fitColumnsToContent}
               >
-                {#snippet columnsMenu()}
-                  <ColumnsMenuPopover
-                    open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}
-                    visibleCount={visibleColumns.length} totalCount={result?.columns.length ?? 0}
-                    {columnMenuSearch} setColumnMenuSearch={(value) => columnMenuSearch = value}
-                    {columnTypes} {columnTypeCounts} {isTypeShown} {toggleShownType} {typeToggleDisabled}
-                    {nullThreshold} setNullThreshold={(value) => nullThreshold = value}
-                    onHideFullyEmpty={() => hideColumnsAtNullFraction(1)}
-                    onApplyThreshold={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}
-                    onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
-                    {columnMenuItems} {hiddenColumns} {isColumnProtected}
-                    visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
-                    orderedColumnNames={orderedColumns.map((column) => column.name)}
-                    onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
-                    onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
-                    onMoveColumn={moveColumnOneStep} onRegexVisibility={applyRegexVisibility}
-                  />
-                {/snippet}
-                {#snippet joinMenu()}
-                  <JoinMenuPopover
-                    open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
-                    views={projectViews} {joinLeftViewId} {joinRightViewId} onSelectView={selectJoinView}
-                    {joinLeftKeys} {joinRightKeys} onSetKeys={setJoinKeys}
-                    {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
-                    onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? joinLeftVersion?.columns ?? [] : joinRightVersion?.columns ?? [])])}
-                    onSelectNone={(side) => selectJoinColumns(side, [])}
-                    {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
-                    onCheck={checkJoin} canCheck={canPreviewJoin} {count}
-                    onRun={runJoin} canRun={canRunJoin} running={loadingData}
-                  />
-                {/snippet}
-                {#snippet aggregateMenu()}
-                  <AggregateMenuPopover
-                    open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
-                    label={aggregateMenuLabel}
-                    {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
-                    {aggregateColumnMatches} {aggregateColumns} {aggregateFields} {focusedAggregateColumn}
-                    onToggleColumn={toggleAggregateColumn} onRemoveColumn={removeAggregateColumn}
-                    onFocusAggregate={focusAggregate} onToggleRole={toggleAggregateRole}
-                    {selectedAggregateColumn} availableMetrics={availableAggregateMetrics}
-                    {aggregateMetrics} onToggleMetric={toggleAggregateMetric}
-                    onCreateView={createAggregateView} creating={loadingData}
-                  />
-                {/snippet}
-                {#snippet dedupeMenu()}
-                  <DedupeMenuPopover
-                    open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}
-                    label={`Dedupe${dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}`}
-                    columns={visibleColumns} {dedupeDraft} onToggle={toggleDedupe}
-                    onApply={applyDedupe} onClear={clearDedupe} dedupeAppliedCount={dedupeColumns.length}
-                  />
-                {/snippet}
+                {#snippet menus()}{@render operationMenus()}{/snippet}
               </QueryConditionBar>
+              {#if cellFinderOpen}
+                <CellFinder term={cellSearchTerm} busy={cellSearching} notice={cellSearchNotice} onTerm={(term) => { cellSearchTerm = term; resetCellSearch(); }} onFind={findCellValue} onClose={() => { cellFinderOpen = false; resetCellSearch(); tableScroll?.focus(); }} />
+              {/if}
               {#if sqlOpen}
                 <SqlEditorPanel
                   setEditorHost={(el) => editorHost = el}
@@ -1948,13 +2643,7 @@
                   canRun={!loadingData && !!sqlText.trim()} running={loadingData}
                 />
               {/if}
-              <div class:expanded={tableExpanded} class="data-stage">
-                {#if tableExpanded}
-                  <div class="expanded-toolbar">
-                    <span>Expanded table</span>
-                    <button onclick={toggleTableExpanded}>Back <kbd>Esc</kbd></button>
-                  </div>
-                {/if}
+              <div class="data-stage">
                 <section class="table-pane {rowDensity}" aria-label="View rows" inert={!!inspectorMode}>
                   <div class="table-card" class:recording={!!currentHistory?.pendingChanges.length} aria-busy={loadingData}>
                     {#if loadingData && !result}
@@ -1963,13 +2652,23 @@
                       <div class="table-state"><strong>No matching rows</strong><span>{queryMode === 'sql' ? 'The SQL query returned no rows.' : 'Change or remove filters to see more data.'}</span></div>
                     {:else if result}
                       <DataGridTable
+                        bind:this={gridApi}
                         columns={visibleColumns} bodyColumns={rowColumns} rows={result.rows}
+                        rowOffset={(result.page - 1) * result.page_size}
+                        pageSize={result.page_size}
+                        neighbor={neighborCache} ahead={aheadCache} snapshot={snapshotCache}
+                        onSnapshotRest={snapshotRest} onThumbHeld={thumbHeld} onThumbMove={cancelSnapshot} onViewportNeed={handleViewport}
+                        onPreviewSelect={previewSeek}
+                        pinnedColumns={livePins} onTogglePin={togglePinColumn}
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
+                        {rowDensity} {fitColumnsToContent}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
                         onSort={cycleSort}
                         onFilter={(column, trigger) => openFilter(column, trigger)}
                         onProfile={(column, trigger) => openStats(column, trigger)}
                         onHide={hideColumn} {display} {cellTitle}
+                        selectedColumn={commandColumn?.name ?? ''}
+                        onSelectColumn={(name) => { columnTarget = name; selectedCell = null; }}
                         {selectedCell} {editingCell} editSaving={cellEditSaving}
                         onSelectCell={selectCell} onExpandCell={expandCell} onFilterCategoricalCell={filterCategoricalCell}
                         onCellKeydown={handleCellKeydown} onCollapseCell={collapseCell}
@@ -1980,6 +2679,8 @@
                         onCommitRename={commitColumnRename} onCancelRename={cancelColumnRename}
                         onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
                         onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
+                        totalRows={safeTotalRows(result.total_rows)} totalLabel={count(result.total_rows)}
+                        seekDisabled={loadingData} onSeekRow={seekRow}
                       />
                       {#if cellEditError || columnMutationError}<div class="cell-edit-error" role="alert">{cellEditError || columnMutationError}</div>{/if}
                       {#if loadingData}<div class="loading-overlay"><span class="spinner"></span>Refreshing rows…</div>{/if}
@@ -2045,12 +2746,26 @@
                 {/if}
               </div>
             {/if}
-          {/if}
         </section>
       {/if}
+      </div>
     </main>
   {/snippet}
 </AppShell>
+{/if}
+
+{#if commandPrefix || sourcePicking}
+  {#key combinationId}<CommandHint prefix={commandPrefix} {sourcePicking} {sourceDigits} sourceCount={nodes.length} />{/key}
+{/if}
+{#if commandMode && commandMode !== 'operation'}
+  <CommandDialog
+    title={commandMode === 'wheel' ? 'Action wheel' : commandMode === 'find-column' ? 'Find column' : commandMode === 'sort' ? `Sort ${commandColumn?.name ?? 'column'}` : 'Commands'}
+    wheel={commandMode === 'wheel'} searchable={commandMode === 'find-column' || commandMode === 'help'}
+    simple={commandMode === 'wheel' && actionMenuMode === 'simple'} compact={commandMode === 'find-column'}
+    query={commandQuery} items={commandItems} onQuery={(value) => commandQuery = value}
+    onChoose={chooseCommand} onClose={() => closeCommands()}
+    onBack={commandMode !== 'wheel' && commandMode !== 'find-column' ? () => showCommands('wheel') : undefined}
+  />
 {/if}
 
 {#if workbookPreview}
@@ -2079,31 +2794,16 @@
   />
 {/if}
 
-{#if exportOpen}
-  <ExportDialog
-    format={exportFormat} current={currentExportOption} options={exportOptions}
-    selectedKeys={exportSelectedKeys} loading={exportLoading} {exporting} error={exportError}
-    setDialog={(element) => exportDialog = element}
-    setFormat={setExportFormat} onToggle={toggleExportOption}
-    onClose={finishExportClose}
-    onCancelAttempt={(event) => { if (exporting) event.preventDefault(); }}
-    onBackdropClick={(event) => { if (event.target === exportDialog && !exporting) exportDialog?.close(); }}
-    onCancel={() => exportDialog?.close()}
-    onExport={runExport}
-  />
-{/if}
-
 {#if openDiff}
   <VersionDiffDialog diff={openDiff} setDialog={(element) => diffDialog = element} onClose={closeDiff} />
 {/if}
 
 <style>
+  .workspace-content { display: contents; }
+  .workspace-content[hidden] { display: none; }
+
   .workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .data-stage { flex: 1; min-height: 0; display: flex; position: relative; }
-  .data-stage.expanded { position: fixed; inset: 20px; z-index: 6; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-panel); }
-  .expanded-toolbar { flex: none; height: 40px; padding: 0 10px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12px; font-weight: 600; }
-  .expanded-toolbar button { height: 28px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--surface); font-size: 12px; }
-  .expanded-toolbar kbd { margin-left: 5px; font: 10px var(--font-mono); color: var(--faint); }
   .table-pane { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }
   .table-pane.compact { --row-height: 26px; }
   .table-pane.comfortable { --row-height: 42px; }

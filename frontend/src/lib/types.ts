@@ -1,3 +1,5 @@
+import type { TableRows } from './table-rows';
+
 export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=';
 export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
@@ -97,7 +99,7 @@ export interface QueryRequest {
 
 export interface QueryResponse {
   columns: ColumnInfo[];
-  rows: Record<string, unknown>[];
+  rows: TableRows;
   page: number;
   page_size: number;
   total_rows: AggregateCount;
@@ -191,6 +193,7 @@ export interface DateColumnStats extends ColumnStatsBase {
 export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColumnStats;
 
 export type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
+export type AggregateRecipeItem = { id: number; column: string; metrics: AggregateMetric[] | null };
 export type RowDensity = 'compact' | 'default' | 'comfortable';
 export type DistributionMode = 'count' | 'percent';
 
@@ -278,7 +281,9 @@ export interface VersionDiff {
   changes: VersionChange[];
 }
 
-export type ExportFormat = 'csv' | 'xlsx';
+export type ExportFormat = 'csv' | 'xlsx' | 'parquet' | 'json';
+
+export type JsonLayout = 'rows' | 'columns';
 
 export interface ExportSheetRequest {
   node_id: string;
@@ -293,6 +298,7 @@ export interface ExportOption extends ExportSheetRequest {
 
 export interface ExportRequest {
   format: ExportFormat;
+  json_layout?: JsonLayout;
   filename?: string;
   sheets: ExportSheetRequest[];
 }

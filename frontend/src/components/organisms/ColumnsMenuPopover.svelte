@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import Button from '../atoms/Button.svelte';
+  import MenuPopover from '../molecules/MenuPopover.svelte';
+  import IconButton from '../atoms/IconButton.svelte';
+  import ToggleChip from '../atoms/ToggleChip.svelte';
   import TextInput from '../atoms/TextInput.svelte';
   import type { ColumnInfo } from '../../lib/types';
 
@@ -8,11 +10,15 @@
 
   type Props = {
     open: boolean;
+    embedded?: boolean;
     ontoggle: (event: Event) => void;
     visibleCount: number;
     totalCount: number;
     columnMenuSearch: string;
     setColumnMenuSearch: (value: string) => void;
+    columnMenuRegex: boolean;
+    setColumnMenuRegex: (value: boolean) => void;
+    columnMenuRegexError: string;
     columnTypes: string[];
     columnTypeCounts: Record<string, number>;
     isTypeShown: (type: string) => boolean;
@@ -20,8 +26,8 @@
     typeToggleDisabled: (type: string) => boolean;
     nullThreshold: number;
     setNullThreshold: (value: number) => void;
-    onHideFullyEmpty: () => void;
     onApplyThreshold: () => void;
+    onHideAll: () => void;
     onShowAll: () => void;
     hiddenCount: number;
     columnMenuItems: ColumnInfo[];
@@ -39,17 +45,16 @@
   };
 
   let {
-    open, ontoggle, visibleCount, totalCount, columnMenuSearch, setColumnMenuSearch,
+    open, embedded = false, ontoggle, visibleCount, totalCount, columnMenuSearch, setColumnMenuSearch,
+    columnMenuRegex, setColumnMenuRegex, columnMenuRegexError,
     columnTypes, columnTypeCounts, isTypeShown, toggleShownType, typeToggleDisabled,
-    nullThreshold, setNullThreshold, onHideFullyEmpty, onApplyThreshold, onShowAll, hiddenCount,
+    nullThreshold, setNullThreshold, onApplyThreshold, onHideAll, onShowAll, hiddenCount,
     columnMenuItems, hiddenColumns, isColumnProtected, visibleColumnsLength, onToggleColumn,
     orderedColumnNames, onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder,
     onMoveColumn, onRegexVisibility
   }: Props = $props();
 
-  let pattern = $state('');
-  let invert = $state(false);
-  let regexError = $state('');
+  let matchesVisible = $state(true);
   let listElement: HTMLDivElement | null = null;
   let draggedName = $state<string | null>(null);
   let dropTarget = $state<{ name: string; placement: Placement } | null>(null);
@@ -57,6 +62,10 @@
   let lastClientY = 0;
   let edgeFrame = 0;
   let animations: Animation[] = [];
+  let nullScrubPointer: number | null = null;
+  let nullScrubStartX = 0;
+  let nullScrubStartY = 0;
+  let nullScrubStartValue = 0;
 
   function rowPositions(): Map<string, number> {
     return new Map([...(listElement?.querySelectorAll<HTMLElement>('.row[data-column]') ?? [])].map((row) => [row.dataset.column!, row.getBoundingClientRect().top]));
@@ -174,13 +183,39 @@
     animateRows(before);
   }
 
-  function setPattern(value: string) {
-    pattern = value;
-    regexError = '';
+  function updateSearch(value: string) {
+    setColumnMenuSearch(value);
+    if (columnMenuRegex) matchesVisible = true;
   }
 
-  function applyRegex(action: 'show' | 'hide') {
-    regexError = onRegexVisibility(pattern, invert, action);
+  function toggleSearchMode() {
+    setColumnMenuRegex(!columnMenuRegex);
+    matchesVisible = true;
+  }
+
+  function applyRegex() {
+    if (!columnMenuSearch.trim() || columnMenuRegexError) return;
+    if (!onRegexVisibility(columnMenuSearch, false, matchesVisible ? 'hide' : 'show')) matchesVisible = !matchesVisible;
+  }
+
+  function startNullScrub(event: PointerEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    nullScrubPointer = event.pointerId;
+    nullScrubStartX = event.clientX;
+    nullScrubStartY = event.clientY;
+    nullScrubStartValue = nullThreshold;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+
+  function scrubNullThreshold(event: PointerEvent) {
+    if (event.pointerId !== nullScrubPointer) return;
+    const delta = Math.round(event.clientX - nullScrubStartX - (event.clientY - nullScrubStartY));
+    setNullThreshold(Math.min(100, Math.max(0, nullScrubStartValue + delta)));
+  }
+
+  function stopNullScrub(event: PointerEvent) {
+    if (event.pointerId === nullScrubPointer) nullScrubPointer = null;
   }
 
   onDestroy(() => {
@@ -192,42 +227,64 @@
 
 <svelte:window onkeydown={menuKeydown} />
 
-<details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger" class:active={open}>Columns <small>{visibleCount}/{totalCount}</small></summary>
-  <div class="popover">
-    <header><strong>Columns</strong><span>{visibleCount} of {totalCount} visible</span></header>
+<MenuPopover {embedded} {open} {ontoggle} icon="columns" label="Columns" hint={`${visibleCount}/${totalCount}`} width={400} flush>
+  {#snippet header()}
+    <strong>Columns</strong><span>{visibleCount} of {totalCount} visible</span>
+  {/snippet}
     <div class="search">
-      <label for="column-menu-search" class="sr-only">Search columns</label>
-      <TextInput id="column-menu-search" type="search" glyph="⌕" value={columnMenuSearch} oninput={(event: Event) => setColumnMenuSearch((event.currentTarget as HTMLInputElement).value)} placeholder="Search columns" />
-    </div>
-    <div class="regex-panel">
-      <label for="column-regex">Select columns by regular expression</label>
-      <div class="regex-input">
-        <TextInput id="column-regex" value={pattern} oninput={(event: Event) => setPattern((event.currentTarget as HTMLInputElement).value)} placeholder="Pattern, e.g. id$" aria-invalid={!!regexError} aria-describedby={regexError ? 'column-regex-error' : undefined} />
-        <label class="invert"><input type="checkbox" checked={invert} onchange={(event) => invert = event.currentTarget.checked} /> Invert</label>
-      </div>
-      <div class="regex-actions">
-        <Button type="button" onclick={() => applyRegex('show')}>Show selected</Button>
-        <Button type="button" onclick={() => applyRegex('hide')}>Hide selected</Button>
-      </div>
-      {#if regexError}<p id="column-regex-error" class="regex-error" role="alert">{regexError}</p>{/if}
+      <label for="column-menu-search" class="sr-only">{columnMenuRegex ? 'Search columns by regular expression' : 'Search columns'}</label>
+      <TextInput
+        id="column-menu-search" type="search" glyph="⌕" mono={columnMenuRegex} value={columnMenuSearch}
+        oninput={(event: Event) => updateSearch((event.currentTarget as HTMLInputElement).value)}
+        placeholder={columnMenuRegex ? 'Match columns with regex' : 'Search columns'}
+        aria-invalid={columnMenuRegex && !!columnMenuRegexError}
+        aria-describedby={columnMenuRegexError ? 'column-regex-error' : undefined}
+      >
+        {#snippet trailing()}
+          {#if columnMenuRegex}
+            <IconButton
+              type="button" icon={matchesVisible ? 'eye' : 'eye-off'}
+              label={`${matchesVisible ? 'Hide' : 'Show'} matching columns`}
+              data-tip-align="end"
+              onclick={applyRegex} disabled={!columnMenuSearch.trim() || !!columnMenuRegexError}
+            />
+          {/if}
+          <IconButton
+            type="button" glyph=".*" active={columnMenuRegex}
+            label={columnMenuRegex ? 'Use plain text search' : 'Use regular expression'}
+            data-tip-align="end"
+            aria-pressed={columnMenuRegex} onclick={toggleSearchMode}
+          />
+        {/snippet}
+      </TextInput>
+      {#if columnMenuRegexError}<p id="column-regex-error" class="regex-error" role="alert">{columnMenuRegexError}</p>{/if}
     </div>
     <div class="type-row" role="group" aria-label="Show by type">
       {#each columnTypes as type (type)}
-        <button type="button" class="type-chip" class:on={isTypeShown(type)} disabled={typeToggleDisabled(type)} aria-pressed={isTypeShown(type)} aria-label={`${type}: ${columnTypeCounts[type] ?? 0} columns`} onclick={() => toggleShownType(type, !isTypeShown(type))}>
-          {#if isTypeShown(type)}<span class="check">✓</span>{:else}<span class="check empty"></span>{/if}
-          {type} <b>{columnTypeCounts[type] ?? 0}</b>
-        </button>
+        <ToggleChip
+          on={isTypeShown(type)} label={type} badge={columnTypeCounts[type] ?? 0}
+          disabled={typeToggleDisabled(type)} aria-label={`${type}: ${columnTypeCounts[type] ?? 0} columns`}
+          onclick={() => toggleShownType(type, !isTypeShown(type))}
+        />
       {/each}
     </div>
-    <div class="threshold-row">
-      <Button onclick={onHideFullyEmpty}>Hide 100% null</Button>
-      <label class="threshold">Hide ≥
-        <input type="number" min="0" max="100" step="1" value={nullThreshold} oninput={(event) => setNullThreshold(Number((event.currentTarget as HTMLInputElement).value))} aria-label="Null percentage" />
-        % null
-      </label>
-      <Button onclick={onApplyThreshold}>Apply</Button>
-      <button type="button" class="link" onclick={onShowAll} disabled={hiddenCount === 0}>Show all</button>
+    <div class="threshold-row" role="group" aria-label="Hide columns by null percentage">
+      <div class="null-control" data-tip="Drag the label right or up to increase; click the value to type" data-tip-position="top" data-tip-align="start">
+        <label
+          for="null-threshold" class="scrub-label"
+          onpointerdown={startNullScrub} onpointermove={scrubNullThreshold}
+          onpointerup={stopNullScrub} onpointercancel={stopNullScrub}
+        >Nulls</label>
+        <label class="threshold">≥
+          <input id="null-threshold" type="number" min="0" max="100" step="1" value={nullThreshold} oninput={(event) => setNullThreshold(Number((event.currentTarget as HTMLInputElement).value))} aria-label="Null percentage threshold" />
+          %
+        </label>
+      </div>
+      <IconButton type="button" glyph="×" label={`Hide columns at least ${nullThreshold}% null`} data-tip-position="top" onclick={onApplyThreshold} />
+      <div class="visibility-actions" role="group" aria-label="All column visibility">
+        <IconButton type="button" icon="eye-off" label="Hide all columns" data-tip-position="top" onclick={onHideAll} disabled={visibleCount === 0} />
+        <IconButton type="button" icon="eye" label="Show all columns" data-tip-position="top" data-tip-align="end" onclick={onShowAll} disabled={hiddenCount === 0} />
+      </div>
     </div>
     <div bind:this={listElement} class="list" role="list" ondragover={listDragOver} ondrop={dropRow}>
       {#each columnMenuItems as column (column.name)}
@@ -262,71 +319,25 @@
         <p class="muted">No matching columns.</p>
       {/each}
     </div>
-    <footer><span>Dedupe keys stay visible</span><span class="esc">esc</span></footer>
-  </div>
-</details>
+  {#snippet footer()}
+    <span class="hint">Dedupe keys stay visible</span><span class="esc">esc</span>
+  {/snippet}
+</MenuPopover>
 
 <style>
-  .popover-host { position: relative; }
-  summary { list-style: none; cursor: pointer; }
-  summary::-webkit-details-marker { display: none; }
-  .trigger {
-    display: inline-flex; align-items: center; gap: 6px;
-    height: 30px; padding: 0 12px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--control-border);
-    background: var(--surface);
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ink-2);
-  }
-  .trigger:hover { border-color: var(--faint); }
-  .trigger.active { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
-  .trigger small { font-family: var(--font-mono); color: var(--faint); }
-  .trigger.active small { color: var(--action-dark); }
-  .popover {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    z-index: 10;
-    width: 400px;
-    border-radius: var(--radius-xl);
-    background: var(--surface);
-    border: 1px solid var(--line-strong);
-    box-shadow: var(--shadow-popover-wide);
-    overflow: hidden;
-  }
-  header { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }
-  header strong { font-size: 11.5px; }
-  header span { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
   .search { padding: 9px 11px 0; }
-  .regex-panel { display: grid; gap: 6px; padding: 9px 11px 0; }
-  .regex-panel > label { font-size: 10.5px; color: var(--muted); }
-  .regex-input, .regex-actions { display: flex; align-items: center; gap: 7px; }
-  .regex-input :global(.field) { flex: 1; }
-  .invert { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; color: var(--ink-2); }
+  .search :global(.field) { display: flex; width: 100%; }
   .regex-error { margin: 0; font-size: 11px; color: var(--error); }
   .type-row { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 11px 0; }
-  .type-chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    height: 24px; padding: 0 8px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--control-border);
-    background: var(--surface);
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--muted);
-  }
-  .type-chip.on { border-color: var(--action-tint-border); background: var(--action-tint); color: var(--action-dark); }
-  .type-chip .check { width: 11px; height: 11px; display: inline-flex; align-items: center; justify-content: center; border-radius: 2px; font-size: 7.5px; }
-  .type-chip.on .check { background: var(--action); color: #fff; }
-  .type-chip .check.empty { border: 1px solid var(--control-border); }
-  .type-chip:disabled { opacity: 0.5; }
   .threshold-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 9px 11px 11px; border-bottom: 1px solid var(--line-soft); }
-  .threshold { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-2); }
-  .threshold input { width: 34px; height: 22px; text-align: center; border-radius: var(--radius-sm); border: 1px solid var(--control-border); }
-  .link { font-size: 11px; color: var(--action); background: none; border: none; }
-  .link:disabled { color: var(--placeholder); }
+  .null-control { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border: 1px solid var(--control-border); border-radius: var(--radius-md); color: var(--muted); font-size: 11px; }
+  .scrub-label { cursor: ew-resize; user-select: none; touch-action: none; }
+  .threshold { display: inline-flex; align-items: center; gap: 3px; color: var(--ink-2); }
+  .threshold input { width: 30px; height: 20px; padding: 0; text-align: center; border: 0; border-radius: var(--radius-sm); background: var(--surface-2); color: var(--ink); font-family: var(--font-mono); font-size: 10.5px; }
+  .threshold input:focus-visible { outline: none; box-shadow: inset 0 -1px var(--ink); }
+  .threshold input { appearance: textfield; }
+  .threshold input::-webkit-inner-spin-button, .threshold input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+  .visibility-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
   .list { max-height: 260px; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; }
   .row { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 4px; border-radius: var(--radius-md); }
   .row:hover { background: var(--surface-hover); }
@@ -341,7 +352,7 @@
   .visibility input { position: absolute; width: 1px; height: 1px; opacity: 0; }
   .box {
     display: inline-flex; align-items: center; justify-content: center; flex: none;
-    width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--placeholder);
+    width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph);
     color: #fff; font-size: 8px;
   }
   .visibility input:checked + .box { background: var(--action); border-color: var(--action); }
@@ -353,6 +364,6 @@
   .move-actions button:hover:not(:disabled) { border-color: var(--faint); color: var(--ink); }
   .move-actions button:disabled { opacity: 0.3; }
   .muted { padding: 12px; font-size: 12px; color: var(--muted); }
-  footer { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 11px; border-top: 1px solid var(--line-soft); background: var(--surface-2); font-size: 11px; color: var(--muted-2); }
-  .esc { margin-left: auto; font-family: var(--font-mono); color: var(--placeholder); }
+  .hint { font-size: 11px; color: var(--faint); }
+  .esc { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--faint); }
 </style>

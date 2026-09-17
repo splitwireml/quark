@@ -98,14 +98,14 @@
   form input { height: 28px; padding: 0 9px; border-radius: var(--radius-md); border: 1px solid var(--control-border); font-size: 12px; color: var(--ink); }
   .actions { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--muted); }
   .actions button { color: var(--action); background: none; border: none; }
-  .actions button:disabled { color: var(--placeholder); }
+  .actions button:disabled { color: var(--disabled); }
   .state { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
   .state.error { color: var(--error); }
   .list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 4px; }
   .row { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 6px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; }
   .row:hover { background: var(--surface-hover); }
   .row input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--placeholder); color: #fff; font-size: 8px; }
+  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph); color: #fff; font-size: 8px; }
   input:checked + .box { background: var(--action); border-color: var(--action); }
   .row span:not(.box) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row small { color: var(--faint); font-family: var(--font-mono); }

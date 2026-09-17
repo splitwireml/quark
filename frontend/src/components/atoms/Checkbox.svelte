@@ -32,7 +32,7 @@
     width: 12px; height: 12px;
     flex: none;
     border-radius: 2px;
-    border: 1px solid var(--placeholder);
+    border: 1px solid var(--glyph);
     background: var(--surface);
     color: #FFFFFF;
     font-size: 8px;

@@ -1,4 +1,4 @@
-# DuckScope UI and UX Evaluation
+# Quark UI and UX Evaluation
 
 **Reviewed:** 2026-07-13  
 **Surfaces:** live application, desktop 1440 x 900, tablet 900 x 900, mobile 390 x 844  
@@ -6,7 +6,7 @@
 
 ## Executive verdict
 
-DuckScope has a sound functional skeleton: the table is fast, dense, server-paged, and backed by explicit loading, empty, and error states. The problem is not capability. The interface compresses capable behavior into text and controls that are too small, repeats navigation and connection concepts, and reveals advanced filtering in a way that nearly removes the table from view.
+Quark has a sound functional skeleton: the table is fast, dense, server-paged, and backed by explicit loading, empty, and error states. The problem is not capability. The interface compresses capable behavior into text and controls that are too small, repeats navigation and connection concepts, and reveals advanced filtering in a way that nearly removes the table from view.
 
 **Design health:** **24/40, Acceptable**  
 **Technical UI audit:** **9/20, Poor**  

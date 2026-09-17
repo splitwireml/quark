@@ -93,7 +93,7 @@
   .state.error { flex-direction: column; align-items: flex-start; color: var(--error); }
   .summary { margin: 0 0 14px; display: flex; flex-direction: column; gap: 6px; }
   .summary div { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
-  dt { color: var(--muted-2); }
+  dt { color: var(--faint); }
   dd { margin: 0; color: var(--ink-2); font-family: var(--font-mono); font-size: 11.5px; text-align: right; }
   .histogram, .values { margin-top: 4px; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }

@@ -8,15 +8,18 @@
     onAttach: (event: SubmitEvent) => void;
     setAttachPath: (value: string) => void;
     idPrefix?: string;
+    showUpload?: boolean;
   };
-  let { mutating, attachPath, onUpload, onAttach, setAttachPath, idPrefix = 'database-path' }: Props = $props();
+  let { mutating, attachPath, onUpload, onAttach, setAttachPath, idPrefix = 'database-path', showUpload = true }: Props = $props();
 </script>
 
 <div class="disclosure">
-  <label class="upload" class:disabled={mutating}>
-    Upload file
-    <input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={onUpload} disabled={mutating} />
-  </label>
+  {#if showUpload}
+    <label class="upload" class:disabled={mutating}>
+      Upload file
+      <input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={onUpload} disabled={mutating} />
+    </label>
+  {/if}
   <form onsubmit={onAttach}>
     <label for={idPrefix}>Attach database path</label>
     <div class="row">

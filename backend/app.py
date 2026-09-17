@@ -11,14 +11,16 @@ import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
 from xml.etree import ElementTree
 
 import duckdb
-from fastapi import FastAPI, File, HTTPException, Query as QueryParam, UploadFile
+import pyarrow as pa
+from fastapi import FastAPI, File, HTTPException, Query as QueryParam, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
@@ -28,6 +30,14 @@ from starlette.background import BackgroundTask
 
 SUPPORTED = {".csv", ".tsv", ".parquet", ".json", ".ndjson", ".jsonl", ".xlsx", ".duckdb", ".db"}
 NUMERIC = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "REAL", "DOUBLE", "DECIMAL")
+ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
+ARROW_NATIVE = {
+    "BOOLEAN": pa.bool_(), "TINYINT": pa.int8(), "SMALLINT": pa.int16(),
+    "INTEGER": pa.int32(), "BIGINT": pa.int64(), "UTINYINT": pa.uint8(),
+    "USMALLINT": pa.uint16(), "UINTEGER": pa.uint32(), "UBIGINT": pa.uint64(),
+    "FLOAT": pa.float32(), "REAL": pa.float32(), "DOUBLE": pa.float64(),
+    "VARCHAR": pa.string(), "BLOB": pa.binary(),
+}
 INTEGER = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT")
 TEXT = ("VARCHAR", "CHAR", "TEXT")
 DATE = ("DATE", "TIME", "TIMESTAMP")
@@ -85,6 +95,14 @@ class SQLQuery(SQLRequest, Query):
     pass
 
 
+class CellSearch(SQLRequest):
+    term: str = Field(min_length=1, max_length=1000)
+    columns: list[str] = Field(min_length=1)
+    after_row: int = Field(-1, ge=-1)
+    after_column: int = Field(-1, ge=-1)
+    direction: Literal["next", "previous"] = "next"
+
+
 class ExportSheet(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str
@@ -94,7 +112,8 @@ class ExportSheet(BaseModel):
 
 class ExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    format: Literal["csv", "xlsx"]
+    format: Literal["csv", "xlsx", "parquet", "json"]
+    json_layout: Literal["rows", "columns"] = "rows"
     filename: str | None = None
     sheets: list[ExportSheet] = Field(min_length=1, max_length=100)
 
@@ -259,6 +278,45 @@ def export_filename(name: str | None, extension: str) -> str:
     return stem + extension
 
 
+EXPORT_TYPES = {
+    "csv": (".csv", "text/csv"),
+    "xlsx": (".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "parquet": (".parquet", "application/vnd.apache.parquet"),
+    "json": (".json", "application/json"),
+}
+
+
+def export_relation(con: Any, sql: str, path: Path, format_: str, layout: str) -> None:
+    """Copy the result into a throwaway connection and let DuckDB write the file.
+
+    The source connection has no file access at all, so it can never write the
+    export itself; the writer connection never runs user SQL and can only reach
+    the export directory.
+    """
+    relation = con.sql(sql)
+    columns, types = relation.columns, relation.types
+    if len(set(columns)) != len(columns):
+        raise HTTPException(422, f"{format_.upper()} export requires unique column names")
+    target = "'" + str(path).replace("'", "''") + "'"
+    writer = duckdb.connect()
+    try:
+        writer.execute("SET allowed_directories = ?", [[str(path.parent)]])
+        writer.execute(f"CREATE TABLE export_data({', '.join(f'{quote(name)} {type_}' for name, type_ in zip(columns, types))})")
+        placeholders = ", ".join("?" * len(columns))
+        result = con.execute(sql)
+        while rows := result.fetchmany(1000):
+            writer.executemany(f"INSERT INTO export_data VALUES ({placeholders})", rows)
+        if format_ == "parquet":
+            writer.execute(f"COPY export_data TO {target} (FORMAT PARQUET)")
+        elif layout == "columns":
+            projection = ", ".join(f"COALESCE(list({quote(name)}), CAST([] AS {type_}[])) AS {quote(name)}" for name, type_ in zip(columns, types))
+            writer.execute(f"COPY (SELECT {projection} FROM export_data) TO {target} (FORMAT JSON)")
+        else:
+            writer.execute(f"COPY export_data TO {target} (FORMAT JSON, ARRAY true)")
+    finally:
+        writer.close()
+
+
 def profile_kind(type_: str) -> str | None:
     type_upper = type_.upper()
     if type_upper.startswith(NUMERIC):
@@ -346,10 +404,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         temporary.write_text(json.dumps(registered_nodes, indent=2))
         temporary.replace(registry_path)
 
-    def _xlsx_typed_view(
+    def _xlsx_table(
         con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str, schema: str | None = None,
     ) -> None:
-        """Keep Excel's styled date cells typed while safely coercing consistent text columns."""
+        """Import a worksheet once so paging never reparses Excel; preserve styled dates and text coercion."""
         typed_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}')"
         raw_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}', all_varchar = true)"
         declared = {item[0]: str(item[1]).upper() for item in con.execute(f"SELECT * FROM {typed_expr} LIMIT 0").description}
@@ -384,7 +442,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             else:
                 selects.append(cq)
         target = f"{quote(schema)}.{quote(name)}" if schema else quote(name)
-        con.execute(f"CREATE VIEW {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
+        # ponytail: one import per connection; share imports if workbook memory becomes limiting.
+        con.execute(f"CREATE TABLE {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
 
     def scan_expression(source: Path) -> str:
         source_sql = str(source).replace("'", "''")
@@ -409,7 +468,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             con.execute("INSTALL excel; LOAD excel")
             for sheet in node["sheets"] if "sheets" in node else workbook_sheets(source):
                 sheet_sql = sheet.replace("'", "''")
-                _xlsx_typed_view(con, source_sql, sheet_sql, sheet)
+                _xlsx_table(con, source_sql, sheet_sql, sheet)
         else:
             con.execute(
                 f"CREATE VIEW {quote(node.get('dataset_name', 'data'))} AS SELECT * FROM {scan_expression(source)}"
@@ -484,7 +543,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             )
         elif source.suffix.lower() == ".xlsx":
             con.execute("INSTALL excel; LOAD excel")
-            _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+            _xlsx_table(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
         else:
             con.execute(f"CREATE VIEW {target} AS SELECT * FROM {scan_expression(source)}")
         return target
@@ -542,7 +601,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     )
                 elif source.suffix.lower() == ".xlsx":
                     con.execute(f"CREATE SCHEMA {quote(schema)}")
-                    _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+                    _xlsx_table(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
                 else:
                     target = mount_dataset(con, schema, node, item)
                 columns = [row[0] for row in source_con.execute(
@@ -656,7 +715,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         page_size: int,
         started: float,
         response_sql: str,
-    ) -> dict[str, Any]:
+        arrow: bool = False,
+    ) -> dict[str, Any] | Response:
         source = f"({sql}) AS result"
         total_rows = con.execute(f"SELECT count(*) FROM {source}", values).fetchone()[0]
         result = con.execute(
@@ -664,12 +724,28 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             values + [page_size, (page - 1) * page_size],
         )
         columns = [(item[0], str(item[1])) for item in result.description]
-        rows = [{name: safe(value) for (name, _), value in zip(columns, row)} for row in result.fetchall()]
+        if arrow:
+            if all(type_ in ARROW_NATIVE for _, type_ in columns):
+                table = result.to_arrow_table()
+                json_columns = []
+            else:
+                # Preserve the existing display/edit semantics for dates, decimals and nested values.
+                # ponytail: mixed exotic types use Python tuples; specialize if these pages become a bottleneck.
+                values_rows = result.fetchall()
+                json_columns = [name for name, type_ in columns if type_ not in ARROW_NATIVE]
+                table = pa.table({name: pa.array(
+                    [row[i] for row in values_rows] if type_ in ARROW_NATIVE else [
+                        json.dumps(jsonable_encoder(safe(row[i])), separators=(",", ":"))
+                        for row in values_rows
+                    ], type=ARROW_NATIVE.get(type_, pa.string())
+                ) for i, (name, type_) in enumerate(columns)})
+        else:
+            rows = [{name: safe(value) for (name, _), value in zip(columns, row)} for row in result.fetchall()]
         null_select = ", ".join(
             f"avg(CASE WHEN {quote(name)} IS NULL THEN 1.0 ELSE 0.0 END)" for name, _ in columns
         )
         fractions = con.execute(f"SELECT {null_select} FROM {source}", values).fetchone() if columns else []
-        return {
+        metadata = {
             "columns": [{
                 "name": name,
                 "type": type_,
@@ -677,7 +753,6 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 "profile_kind": profile_kind(type_),
                 "null_fraction": safe(fraction) or 0.0,
             } for (name, type_), fraction in zip(columns, fractions)],
-            "rows": rows,
             "page": page,
             "page_size": page_size,
             "total_rows": safe(total_rows),
@@ -685,6 +760,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             "sql": response_sql,
         }
+        if not arrow:
+            return {**metadata, "rows": rows}
+        metadata["json_columns"] = json_columns
+        table = table.replace_schema_metadata({b"quark": json.dumps(metadata, separators=(",", ":")).encode()})
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        return Response(sink.getvalue().to_pybytes(), media_type=ARROW_MEDIA_TYPE, headers={"Vary": "Accept"})
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -728,6 +811,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if candidate.is_file() and candidate.resolve() not in persisted_sources:
                 candidate.unlink()
         yield
+        cached_profile.cache_clear()
         if join_workspace:
             join_workspace["connection"].close()
         for workspace in project_workspaces.values():
@@ -788,10 +872,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @api.post("/api/exports")
     @serialized
     def export(request: ExportRequest):
-        if request.format == "csv" and len(request.sheets) != 1:
-            raise HTTPException(422, "CSV export requires exactly one sheet")
-        extension = ".csv" if request.format == "csv" else ".xlsx"
-        media_type = "text/csv" if request.format == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if request.format != "xlsx" and len(request.sheets) != 1:
+            raise HTTPException(422, f"{request.format.upper()} export requires exactly one sheet")
+        extension, media_type = EXPORT_TYPES[request.format]
         sheets = []
         for sheet in request.sheets:
             con = get_connection(sheet.node_id)
@@ -799,7 +882,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         with tempfile.NamedTemporaryFile(dir=root, prefix=".export-", suffix=extension, delete=False) as temporary:
             path = Path(temporary.name)
         try:
-            if request.format == "csv":
+            if request.format in ("parquet", "json"):
+                _, con, sql = sheets[0]
+                export_relation(con, sql, path, request.format, request.json_layout)
+            elif request.format == "csv":
                 _, con, sql = sheets[0]
                 with path.open("w", encoding="utf-8", newline="") as output:
                     writer = csv.writer(output)
@@ -1071,7 +1157,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @api.post("/api/nodes/{node_id}/sql")
     @serialized
-    def sql_query(node_id: str, request: SQLQuery):
+    def sql_query(node_id: str, request: SQLQuery, http_request: Request):
         started = time.perf_counter()
         con = get_connection(node_id)
         sql, columns = sql_metadata(con, request)
@@ -1080,19 +1166,49 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             return query_response(
                 con, query_sql, [sql, *values], request.page, request.page_size, started,
                 display_sql if request.filters or request.sorts or request.dedupe_columns else sql,
+                ARROW_MEDIA_TYPE in http_request.headers.get("accept", ""),
             )
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
 
+    @api.post("/api/nodes/{node_id}/sql/find")
+    @serialized
+    def find_cell(node_id: str, request: CellSearch):
+        con = get_connection(node_id)
+        sql, columns = sql_metadata(con, request)
+        names = {name for name, _ in columns}
+        if len(set(request.columns)) != len(request.columns) or any(name not in names for name in request.columns):
+            raise HTTPException(422, "Invalid search column")
+        row_key = "__quark_row_" + uuid.uuid4().hex
+        matches = " UNION ALL ".join(
+            f"SELECT {quote(row_key)} AS r, {index} AS c, CAST({quote(name)} AS VARCHAR) AS value "
+            f"FROM numbered WHERE contains(lower(CAST({quote(name)} AS VARCHAR)), lower(?))"
+            for index, name in enumerate(request.columns)
+        )
+        forward = request.direction == "next"
+        comparison, order = (">", "ASC") if forward else ("<", "DESC")
+        # ponytail: scans the current View per search; add a search index only if measured latency needs it.
+        query = (
+            f"WITH numbered AS MATERIALIZED (SELECT row_number() OVER () - 1 AS {quote(row_key)}, * FROM query(?)), "
+            f"matches AS ({matches}) SELECT r, c, value FROM matches "
+            f"ORDER BY CASE WHEN (r, c) {comparison} (?, ?) THEN 0 ELSE 1 END, r {order}, c {order} LIMIT 1"
+        )
+        try:
+            match = con.execute(query, [sql, *[request.term] * len(request.columns), request.after_row, request.after_column]).fetchone()
+        except duckdb.Error as exc:
+            raise HTTPException(422, f"Cannot search this View: {exc}") from exc
+        return {"match": {"row": match[0], "column": request.columns[match[1]], "column_index": match[1], "value": match[2]} if match else None}
+
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/query")
     @serialized
-    def query(node_id: str, dataset: str, request: Query):
+    def query(node_id: str, dataset: str, request: Query, http_request: Request):
         started = time.perf_counter()
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
         query_sql, values, display_sql = controlled_query(table, columns, request)
         try:
-            return query_response(con, query_sql, values, request.page, request.page_size, started, display_sql)
+            return query_response(con, query_sql, values, request.page, request.page_size, started, display_sql,
+                                  ARROW_MEDIA_TYPE in http_request.headers.get("accept", ""))
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid filter value: {exc}") from exc
 
@@ -1270,6 +1386,47 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "p25": safe(p25), "median": safe(median), "p75": safe(p75), "histogram": histogram,
         }
 
+    @lru_cache(maxsize=128)
+    def cached_profile(con, source, values_json, columns, column, revision):
+        return profile_response(con, source, json.loads(values_json), columns, column)
+
+    def profile(con, source, values, columns, column):
+        values_json = json.dumps(values, sort_keys=True)
+        words = set(re.findall(r"\b[a-z_]\w*\b", (source + " " + values_json).lower()))
+        # Be conservative about SQL whose result can change without a source-file change.
+        unsafe = {"current_timestamp", "current_time", "localtimestamp", "localtime", "tablesample", "sample"}
+        unsafe.update(row[0] for row in con.execute("""
+            SELECT DISTINCT function_name FROM duckdb_functions()
+            WHERE stability != 'CONSISTENT'
+               OR (function_type IN ('table', 'macro', 'table_macro') AND function_name != 'query')
+        """).fetchall())
+        # Stored database views can hide volatile SQL or dependencies outside our source registry.
+        external_views = con.execute("""
+            SELECT count(*) FROM duckdb_views() v JOIN duckdb_databases() d USING (database_name)
+            WHERE NOT v.internal AND d.path IS NOT NULL
+        """).fetchone()[0]
+        # Nested query() and file replacement scans can reach dependencies outside the registry.
+        indirect_source = re.search(r"\bquery\b|\.(?:csv|tsv|parquet|jsonl?|ndjson|xlsx|duckdb|db)\b", values_json, re.IGNORECASE)
+        if words & unsafe or external_views or indirect_source:
+            return profile_response(con, source, values, columns, column)
+        revision = []
+        try:
+            # ponytail: fingerprint every registered source; scope to dependencies if many sources make this costly.
+            for node in tuple(nodes.values()):
+                path = Path(node["source"])
+                for candidate in (path, Path(f"{path}.wal")):
+                    try:
+                        stat = candidate.stat()
+                    except FileNotFoundError:
+                        if candidate == path:
+                            return profile_response(con, source, values, columns, column)
+                        revision.append((str(candidate), None))
+                    else:
+                        revision.append((str(candidate), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        except OSError:
+            return profile_response(con, source, values, columns, column)
+        return cached_profile(con, source, values_json, tuple(columns), column, tuple(revision))
+
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
     @serialized
@@ -1277,7 +1434,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
         source, values, _ = filtered_relation(table, columns, request or Query(page=1, page_size=100))
-        return profile_response(con, source, values, columns, column)
+        return profile(con, source, values, columns, column)
 
     @api.post("/api/nodes/{node_id}/sql/columns/{column}/stats")
     @serialized
@@ -1285,7 +1442,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         con = get_connection(node_id)
         sql, columns = sql_metadata(con, request)
         source, values, _ = filtered_relation("query(?)", columns, request)
-        return profile_response(con, source, [sql, *values], columns, column)
+        return profile(con, source, [sql, *values], columns, column)
 
     frontend = Path(__file__).parent.parent / "frontend" / "dist"
     if frontend.is_dir():

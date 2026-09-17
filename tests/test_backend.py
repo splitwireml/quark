@@ -11,6 +11,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -301,11 +302,57 @@ def test_export_rejects_non_read_only_unknown_and_external_sql(client, tmp_path)
     assert list(tmp_path.glob("*.xlsx")) == []
 
 
+def test_export_parquet_writes_typed_columns(client, tmp_path):
+    node = upload(client, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
+
+    response = client.post("/api/exports", json={
+        "format": "parquet",
+        "filename": "../people",
+        "sheets": [export_sheet(node, "People", "SELECT * FROM people ORDER BY id")],
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/vnd.apache.parquet"
+    assert 'filename="people.parquet"' in response.headers["content-disposition"]
+    written = tmp_path / "written.parquet"
+    written.write_bytes(response.content)
+    with duckdb.connect() as con:
+        assert con.execute(f"SELECT id, name FROM read_parquet('{written}') ORDER BY id").fetchall() == [(1, "Ada"), (2, "Bob")]
+    assert list(tmp_path.glob(".export-*")) == []
+
+
+def test_export_json_row_objects_and_column_lists(client, tmp_path):
+    node = upload(client, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
+    sheet = export_sheet(node, "People", "SELECT * FROM people ORDER BY id")
+
+    rows = client.post("/api/exports", json={"format": "json", "filename": "people", "sheets": [sheet]})
+    assert rows.status_code == 200, rows.text
+    assert rows.headers["content-type"] == "application/json"
+    assert 'filename="people.json"' in rows.headers["content-disposition"]
+    assert json.loads(rows.text) == [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Bob"}]
+
+    columns = client.post("/api/exports", json={
+        "format": "json", "json_layout": "columns", "sheets": [sheet],
+    })
+    assert columns.status_code == 200, columns.text
+    assert json.loads(columns.text) == {"id": [1, 2], "name": ["Ada", "Bob"]}
+
+    duplicated = client.post("/api/exports", json={
+        "format": "json",
+        "json_layout": "columns",
+        "sheets": [export_sheet(node, "People", "SELECT id, id FROM people")],
+    })
+    assert duplicated.status_code == 422
+    assert "unique column names" in duplicated.json()["detail"]
+    assert list(tmp_path.glob(".export-*")) == []
+
+
 def test_export_csv_requires_exactly_one_sheet_and_payload_bounds(client):
     node = upload(client, "items.csv", b"value\n1\n")
     sheet = export_sheet(node, "Items", "SELECT * FROM items")
-    for sheets in ([], [sheet, sheet]):
-        assert client.post("/api/exports", json={"format": "csv", "sheets": sheets}).status_code == 422
+    for single in ("csv", "parquet", "json"):
+        for sheets in ([], [sheet, sheet]):
+            assert client.post("/api/exports", json={"format": single, "sheets": sheets}).status_code == 422
     assert client.post("/api/exports", json={
         "format": "xlsx", "sheets": [sheet] * 101,
     }).status_code == 422
@@ -491,6 +538,29 @@ def test_workbook_dates_are_typed_summarized_by_year_and_identifiers_stay_text(c
     assert stats.status_code == 200, stats.text
     assert (stats.json()["min"], stats.json()["max"]) == ("2024-01-02", "2025-01-01")
     assert stats.json()["year_counts"] == [{"year": "2024", "count": 1}, {"year": "2025", "count": 1}]
+
+
+def test_workbook_scroll_pages_do_not_reopen_upload(client, tmp_path):
+    workbook = tmp_path / "scroll.xlsx"
+    with duckdb.connect() as con:
+        con.execute("LOAD excel")
+        con.execute("COPY (SELECT i AS id FROM range(1000) t(i)) TO ? (FORMAT xlsx, HEADER true, SHEET 'Rows')", [str(workbook)])
+    preview = upload(client, "scroll.xlsx", workbook.read_bytes())
+    node = client.post(f"/api/nodes/upload/{preview['id']}/confirm", json={"sheets": ["Rows"]}).json()
+    view = next(view for view in client.get('/api/projects/default/views').json() if view['source_id'] == node['id'])
+    # Removing this test upload makes any accidental Excel rescan fail deterministically.
+    Path(node['source']).unlink()
+    for node_id, sql in [(node['id'], 'SELECT * FROM "Rows"'), (view['node_id'], view['sql'])]:
+        response = client.post(f"/api/nodes/{node_id}/sql", json={
+            "sql": sql, "page": 3, "page_size": 100,
+            "sorts": [{"column": "id", "direction": "asc"}],
+        })
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body['total_rows'] == 1000
+        assert body['rows'][0] == {'id': 200}
+        assert body['rows'][-1] == {'id': 299}
+        assert body['columns'][0]['null_fraction'] == 0
 
 
 def test_workbook_confirmation_validates_selection_and_cancel(client, tmp_path):
@@ -680,6 +750,43 @@ def test_sql_query_pages_with_metadata_and_safe_values(client):
     assert columns["value"]["null_fraction"] == 0.5
     assert columns["day"]["profile_kind"] == "date"
     assert body["elapsed_ms"] >= 0
+
+
+@pytest.mark.parametrize("exotic", [False, True])
+def test_arrow_query_matches_json_pages_and_metadata(client, exotic):
+    import pyarrow as pa
+
+    node = upload(client, "arrow.csv", b"id,name\n1,alpha\n2,beta\n3,\n")
+    fields = "id, name, 9007199254740993::BIGINT AS big, 18446744073709551615::UBIGINT AS unsigned, 'NaN'::DOUBLE AS nan, from_hex('00ff') AS blob"
+    if exotic:
+        fields += ", DATE '2025-01-02' AS day, TIMESTAMP '2025-01-02 03:04:05.123456' AS stamp, 12.345::DECIMAL(9,3) AS decimal, 170141183460469231731687303715884105727::HUGEINT AS huge, [1, NULL] AS nested, {'x': 1} AS object, INTERVAL '2 days' AS duration"
+    sql = f"SELECT {fields} FROM arrow"
+    endpoint = f"/api/nodes/{node['id']}/sql"
+    for page in [1, 2, 4]:
+        body = {"sql": sql, "page": page, "page_size": 1, "sorts": [{"column": "id", "direction": "desc"}]}
+        expected = client.post(endpoint, json=body).json()
+        response = client.post(endpoint, json=body, headers={"Accept": backend_app.ARROW_MEDIA_TYPE})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == backend_app.ARROW_MEDIA_TYPE
+        assert response.headers["vary"] == "Accept"
+        table = pa.ipc.open_stream(response.content).read_all()
+        metadata = json.loads(table.schema.metadata[b"quark"])
+        encoded_columns = metadata.pop("json_columns")
+        actual = [{name: json.loads(value) if name in encoded_columns else safe(value) for name, value in row.items()} for row in table.to_pylist()]
+        assert actual == expected.pop("rows")
+        assert pa.types.is_int64(table.schema.field("id").type)
+        metadata.pop("elapsed_ms")
+        expected.pop("elapsed_ms")
+        assert metadata == expected
+
+    dataset_id = dataset(client, node, "arrow")["id"]
+    response = client.post(f"/api/nodes/{node['id']}/datasets/{dataset_id}/query", json={
+        "filters": [{"column": "id", "operator": ">", "value": 1}],
+    }, headers={"Accept": backend_app.ARROW_MEDIA_TYPE})
+    assert pa.ipc.open_stream(response.content).read_all().num_rows == 2
+    rejected = client.post(endpoint, json={"sql": "DROP TABLE arrow"}, headers={"Accept": backend_app.ARROW_MEDIA_TYPE})
+    assert rejected.status_code == 422
+    assert "detail" in rejected.json()
 
 
 def test_sql_result_controls_filter_sort_categories_and_profile(client):
@@ -1144,6 +1251,131 @@ def test_stats_invalid_filter_value_returns_422(tmp_path):
             "filters": [{"column": "value", "operator": ">", "value": "not-a-number"}],
         })
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("sql_mode", [False, True])
+def test_stats_cache_reuses_profiles_and_keys_row_selection(client, sql_mode):
+    node = upload(client, "cached.csv", b"group,value,other\na,1,10\na,2,20\nb,3,30\n")
+    base = f"/api/nodes/{node['id']}"
+    base += "/sql" if sql_mode else f"/datasets/{dataset(client, node, 'cached')['id']}"
+    body = {"sql": "SELECT * FROM cached"} if sql_mode else {}
+    url = base + "/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        first = client.post(url, json=body)
+        assert first.status_code == 200, first.text
+        repeat = client.post(url, json={**body, "page": 2, "page_size": 1, "sorts": [{"column": "value", "direction": "desc"}]})
+        assert repeat.json() == first.json()
+        if not sql_mode:
+            assert client.get(url).json() == first.json()
+        assert compute.call_count == 1
+        filtered = {**body, "filters": [{"column": "value", "operator": ">", "value": 1}]}
+        assert client.post(url, json=filtered).json()["row_count"] == 2
+        assert client.post(url, json=filtered).json()["row_count"] == 2
+        assert compute.call_count == 2
+        filtered["filters"][0]["value"] = 2
+        assert client.post(url, json=filtered).json()["row_count"] == 1
+        assert client.post(url, json={**body, "dedupe_columns": ["group"]}).json()["row_count"] == 2
+        assert client.post(base + "/columns/other/stats", json=body).json()["min"] == 10
+        assert compute.call_count == 5
+        if sql_mode:
+            changed = {"sql": "SELECT value * 10 AS value FROM cached"}
+            assert client.post(url, json=changed).json()["min"] == 10
+            assert compute.call_count == 6
+        assert client.post(url, json=body).json() == first.json()
+        assert client.post(base + "/columns/missing/stats", json=body).status_code == 404
+
+
+def test_stats_cache_refreshes_changed_files_and_separates_nodes(client, tmp_path):
+    node = upload(client, "cached.csv", b"value\n1\n2\n")
+    other = upload(client, "cached.csv", b"value\n9\n")
+    body = {"sql": "SELECT * FROM cached"}
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        assert client.post(url, json=body).json()["max"] == 2
+        assert client.post(url, json=body).json()["max"] == 2
+        assert client.post(f"/api/nodes/{other['id']}/sql/columns/value/stats", json=body).json()["max"] == 9
+        assert compute.call_count == 2
+        # Same length and schema: freshness must not depend on file size alone.
+        (tmp_path / "uploads" / f"{node['id']}.csv").write_bytes(b"value\n3\n4\n")
+        assert client.post(url, json=body).json()["max"] == 4
+        assert client.post(url, json=body).json()["max"] == 4
+        assert compute.call_count == 3
+        assert client.delete(f"/api/nodes/{node['id']}").status_code == 204
+        assert client.post(url, json=body).status_code == 404
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT random() AS value",
+    "SELECT current_timestamp AS value",
+    "SELECT * FROM cached USING SAMPLE 1 ROWS",
+    "SELECT * FROM query('SELECT ran' || 'dom() AS value')",
+])
+def test_stats_cache_bypasses_volatile_and_dynamic_sql(client, sql):
+    node = upload(client, "cached.csv", b"value\n1\n2\n")
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for _ in range(2):
+            response = client.post(url, json={"sql": sql})
+            assert response.status_code == 200, response.text
+        assert compute.call_count == 2
+
+
+@pytest.mark.parametrize("definition, sql", [
+    ("CREATE VIEW readings AS SELECT random() AS value", "SELECT * FROM readings"),
+    ("CREATE MACRO reading() AS random()", "SELECT reading() AS value"),
+])
+def test_stats_cache_bypasses_stored_views_and_macros(client, tmp_path, definition, sql):
+    db = tmp_path / "volatile.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute(definition)
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for _ in range(2):
+            response = client.post(url, json={"sql": sql})
+            assert response.status_code == 200, response.text
+        assert compute.call_count == 2
+
+
+def test_stats_cache_refreshes_rebuilt_project_workspace(client):
+    project = create_project(client, "Profiles")
+    project_upload(client, project, "cached.csv", b"value\n1\n2\n")
+    views_url = f"/api/projects/{project['id']}/views"
+    view = client.get(views_url).json()[0]
+    url = f"/api/nodes/{project['node_id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for _ in range(2):
+            assert client.post(url, json={"sql": view["sql"]}).json()["max"] == 2
+        assert compute.call_count == 1
+        project_upload(client, project, "another.csv", b"value\n9\n")
+        assert client.get(views_url).status_code == 200
+        assert client.post(url, json={"sql": view["sql"]}).json()["max"] == 2
+        assert compute.call_count == 2
+
+
+def test_stats_cache_bypasses_direct_file_scans(client, tmp_path):
+    node = upload(client, "cached.csv", b"value\n1\n")
+    external = tmp_path / "uploads" / "external.csv"
+    external.write_bytes(b"value\n2\n")
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    body = {"sql": f"SELECT * FROM '{external}'"}
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        assert client.post(url, json=body).json()["max"] == 2
+        external.write_bytes(b"value\n3\n")
+        assert client.post(url, json=body).json()["max"] == 3
+        assert compute.call_count == 2
+
+
+def test_stats_cache_evicts_least_recent_profile(client):
+    node = upload(client, "cached.csv", b"value\n1\n")
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for value in range(128):
+            assert client.post(url, json={"sql": f"SELECT {value} AS value"}).json()["min"] == value
+        assert compute.call_count == 128
+        for value in (0, 128, 0, 1):
+            assert client.post(url, json={"sql": f"SELECT {value} AS value"}).json()["min"] == value
+        assert compute.call_count == 130
 
 
 def test_join_workspace_same_node_composite_cardinality(client, tmp_path):
@@ -1675,3 +1907,29 @@ def test_project_workspace_invalidation_keeps_inflight_query_and_refreshes_membe
     views = client.get(f"/api/projects/{project['id']}/views").json()
     assert [view["source_id"] for view in views] == [second["id"]]
     assert client.post(url, json={"sql": views[0]["sql"]}).json()["rows"] == [{"value": 2}]
+
+
+def test_find_cell_searches_whole_view_literal_values_and_wraps(client):
+    node = upload(client, "search.csv", b"id,note,extra\n" + b"".join(f"{i},{'100% O' + chr(39) + 'Brien' if i in (2, 1100) else 'plain'},other\n".encode() for i in range(1205)))
+    endpoint = f"/api/nodes/{node['id']}/sql/find"
+    body = {"sql": "SELECT * FROM search ORDER BY id", "term": "o'BRIEN", "columns": ["note", "id"], "after_row": -1, "after_column": -1}
+    first = client.post(endpoint, json=body)
+    assert first.status_code == 200, first.text
+    assert first.json()["match"]["row"] == 2
+    body.update(after_row=2, after_column=0)
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 1100
+    body.update(after_row=1100)
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 2
+    body.update(direction="previous", after_row=2)
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 1100
+    body.update(term="%", after_row=-1, direction="next")
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 2
+    body.update(term="not present")
+    assert client.post(endpoint, json=body).json()["match"] is None
+    body.update(term="1100", columns=["id"])
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 1100
+    body.update(sql="SELECT * FROM search WHERE id > 1000 ORDER BY id DESC", term="o'brien", columns=["note"])
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 104
+    assert client.post(endpoint, json={**body, "columns": ["missing"]}).status_code == 422
+    assert client.post(endpoint, json={**body, "sql": "DELETE FROM search"}).status_code == 422
+    assert client.post(endpoint, json={**body, "term": ""}).status_code == 422

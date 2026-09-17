@@ -53,7 +53,7 @@
   .row { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 6px; border-radius: var(--radius-sm); font-size: 12.5px; cursor: pointer; }
   .row:hover { background: var(--surface-hover); }
   .row input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--placeholder); color: #fff; font-size: 8px; }
+  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph); color: #fff; font-size: 8px; }
   input:checked + .box { background: var(--action); border-color: var(--action); }
   .count { font-size: 11px; color: var(--faint); }
   footer { display: flex; justify-content: flex-end; gap: 8px; }

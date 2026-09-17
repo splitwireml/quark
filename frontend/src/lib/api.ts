@@ -1,6 +1,7 @@
+import { ARROW_MEDIA_TYPE, decodeQueryResponse } from './table-rows';
 import type { BaseViewInfo, CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, ProjectSourceInfo, QueryRequest, QueryResponse, SourceSummary, SqlQueryRequest, WorkbookPreview } from './types';
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function responseFor(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
@@ -10,6 +11,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     } catch { /* use HTTP status */ }
     throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
   }
+  return response;
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await responseFor(url, init);
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 
@@ -61,12 +67,19 @@ export function listDatasets(nodeId: string): Promise<DatasetInfo[]> {
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets`);
 }
 
-export function queryDataset(nodeId: string, dataset: string, body: QueryRequest): Promise<QueryResponse> {
-  return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/query`, json(body));
+async function queryRequest(url: string, body: QueryRequest | SqlQueryRequest, signal?: AbortSignal): Promise<QueryResponse> {
+  const init = json(body);
+  return decodeQueryResponse(await responseFor(url, {
+    ...init, headers: { ...init.headers, Accept: ARROW_MEDIA_TYPE }, signal,
+  }));
 }
 
-export function querySql(nodeId: string, body: SqlQueryRequest): Promise<QueryResponse> {
-  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, json(body));
+export function queryDataset(nodeId: string, dataset: string, body: QueryRequest): Promise<QueryResponse> {
+  return queryRequest(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/query`, body);
+}
+
+export function querySql(nodeId: string, body: SqlQueryRequest, signal?: AbortSignal): Promise<QueryResponse> {
+  return queryRequest(`/api/nodes/${encodeURIComponent(nodeId)}/sql`, body, signal);
 }
 
 export function previewJoinWorkspace(body: JoinWorkspaceRequest): Promise<JoinWorkspaceResponse> {
@@ -124,4 +137,9 @@ export function getCategoryValues(
   if (params.limit !== undefined) query.set('limit', String(params.limit));
   const suffix = query.size ? `?${query}` : '';
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/values${suffix}`);
+}
+
+export type CellMatch = { row: number; column: string; column_index: number; value: string };
+export function findCell(nodeId: string, body: { sql: string; term: string; columns: string[]; after_row: number; after_column: number; direction: 'next' | 'previous' }, signal?: AbortSignal): Promise<{ match: CellMatch | null }> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql/find`, { ...json(body), signal });
 }

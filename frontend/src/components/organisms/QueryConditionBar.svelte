@@ -1,12 +1,18 @@
 <script lang="ts">
+  import type { ToolbarVisibility } from '../../lib/commands';
   import type { Snippet } from 'svelte';
   import Button from '../atoms/Button.svelte';
   import Chip from '../atoms/Chip.svelte';
+  import IconButton from '../atoms/IconButton.svelte';
   import TextInput from '../atoms/TextInput.svelte';
-  import type { FilterCondition, SortCondition } from '../../lib/types';
+  import { dismissable } from '../../lib/dismiss';
+  import type { FilterCondition, RowDensity, SortCondition } from '../../lib/types';
 
   type Props = {
     inert?: boolean;
+    visibility: ToolbarVisibility;
+    menuOpen: boolean;
+    densityOpen?: boolean;
     showBuilder: boolean;
     filters: FilterCondition[];
     sorts: SortCondition[];
@@ -29,20 +35,35 @@
     onColumnSearchKeydown: (event: KeyboardEvent) => void;
     columnMatchCount: number;
     storageError: string;
-    columnsMenu: Snippet;
-    joinMenu: Snippet;
-    aggregateMenu: Snippet;
-    dedupeMenu: Snippet;
+    rowDensity: RowDensity;
+    setRowDensity: (density: RowDensity) => void;
+    fitColumnsToContent: boolean;
+    onToggleFitColumns: () => void;
+    menus: Snippet;
   };
 
   let {
-    inert = false, showBuilder, filters, sorts, dedupeColumns, activeSql, filterSummary,
+    inert = false, visibility, menuOpen, densityOpen = $bindable(false), showBuilder, filters, sorts, dedupeColumns, activeSql, filterSummary,
     onToggleFilterConnector, onRemoveFilter, onRemoveSort, onClearDedupe, onSaveView, canSaveView, onClearConditions,
     isSqlMode, onBackToFullTable, onBackToBuilder,
     columnSearch, setColumnSearch, onFindColumn, onColumnSearchKeydown, columnMatchCount,
     storageError,
-    columnsMenu, joinMenu, aggregateMenu, dedupeMenu
+    rowDensity, setRowDensity, fitColumnsToContent, onToggleFitColumns,
+    menus
   }: Props = $props();
+
+  const densities: { value: RowDensity; icon: 'density-compact' | 'density-default' | 'density-comfortable'; label: string }[] = [
+    { value: 'compact', icon: 'density-compact', label: 'Compact rows' },
+    { value: 'default', icon: 'density-default', label: 'Default rows' },
+    { value: 'comfortable', icon: 'density-comfortable', label: 'Comfortable rows' }
+  ];
+
+  const hasConditions = $derived(filters.length > 0 || sorts.length > 0 || dedupeColumns.length > 0);
+
+  function chooseDensity(density: RowDensity) {
+    setRowDensity(density);
+    densityOpen = false;
+  }
 
   function scrollModifierRail(event: WheelEvent) {
     if (event.deltaX !== 0 || event.deltaY === 0) return;
@@ -51,70 +72,145 @@
   }
 </script>
 
-<section class="bar" aria-label="View controls" {inert}>
-  {@render columnsMenu()}
-  {@render joinMenu()}
-  {#if showBuilder}
-    {@render aggregateMenu()}
-    <div class="dedupe-controls">
-      {@render dedupeMenu()}
-      {#if dedupeColumns.length}
-        <Chip tone="muted" onRemove={onClearDedupe} removeLabel="Clear dedupe keys"><b>Dedupe</b> <span title={dedupeColumns.join(', ')}>{dedupeColumns.join(', ')}</span></Chip>
-      {/if}
-    </div>
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable rail is intentionally keyboard-focusable) -->
-    <div class="modifier-rail" role="region" aria-label="Active filters and sorts" tabindex="0" onwheel={scrollModifierRail}>
-      {#each filters as filter, index (filter.column + index)}
-        {#if index > 0}
-          <button type="button" class="connector" aria-label={`Toggle connector before ${filter.column}; currently ${filter.connector === 'or' ? 'OR' : 'AND'}`} onclick={() => onToggleFilterConnector(index)}>{filter.connector === 'or' ? 'OR' : 'AND'}</button>
-        {/if}
-        <Chip tone="filter" onRemove={() => onRemoveFilter(index)} removeLabel={`Remove filter ${filter.column}`} title={filterSummary(filter)}><b>{filter.column}</b></Chip>
-      {/each}
-      {#each sorts as sort, index (sort.column)}
-        <Chip tone="sort" onRemove={() => onRemoveSort(sort.column)} removeLabel={`Remove sort ${sort.column}`}><b>{index + 1}. {sort.column}</b> {sort.direction === 'asc' ? '↑' : '↓'}</Chip>
-      {/each}
-      {#if filters.length === 0 && sorts.length === 0}
-        <span class="muted">No filters or sorts applied</span>
-      {/if}
-    </div>
-    {#if filters.length || sorts.length || dedupeColumns.length}
-      <Button onclick={onSaveView} disabled={!canSaveView}>Save View</Button>
-      <button type="button" class="link" onclick={onClearConditions}>Clear conditions</button>
+{#snippet densityChoices()}
+          <div class="density-menu" use:dismissable={() => densityOpen = false} role="group" aria-label="Row spacing">
+            {#each densities as density (density.value)}
+              <IconButton
+                type="button" size="md" icon={density.icon} label={density.label}
+                active={rowDensity === density.value}
+                onclick={() => chooseDensity(density.value)}
+              />
+            {/each}
+          </div>
+{/snippet}
+
+<section class="bar-stack" aria-label="View controls" {inert}>
+  {#if visibility !== 'hide'}
+  <div class="toolbar-zone" class:hover-reveal={visibility === 'hover'} class:held={menuOpen || densityOpen}>
+    {#if visibility === 'hover'}<button type="button" class="reveal-edge" aria-label="Reveal toolbar"></button>{/if}
+  <div class="toolbar-reveal"><div class="toolbar-clip">
+  <div class="bar">
+    {@render menus()}
+    {#if showBuilder}
+      {#if isSqlMode}<Button onclick={onBackToFullTable}>Back to active Version</Button>{/if}
+    {:else}
+      <div class="tokens"><Chip title={activeSql}>SQL View</Chip></div>
+      <Button onclick={onSaveView} disabled={!activeSql}>Save View</Button>
+      <Button onclick={onBackToBuilder}>Back to builder</Button>
     {/if}
-    {#if isSqlMode}<Button onclick={onBackToFullTable}>Back to active Version</Button>{/if}
-  {:else}
-    <div class="tokens"><Chip title={activeSql}>SQL View</Chip></div>
-    <Button onclick={onSaveView} disabled={!activeSql}>Save View</Button>
-    <Button onclick={onBackToBuilder}>Back to builder</Button>
-  {/if}
-  {#if storageError}<span class="error" role="alert">{storageError}</span>{/if}
-  <div class="column-search">
-    <TextInput type="search" glyph="⌕" value={columnSearch} oninput={(event: Event) => { setColumnSearch((event.currentTarget as HTMLInputElement).value); onFindColumn(); }} onkeydown={onColumnSearchKeydown} placeholder="Find column" aria-label="Find column" />
-    <span class="match-count" aria-live="polite" aria-label={`${columnMatchCount} matching columns`}>{columnMatchCount}</span>
+    {#if storageError}<span class="error" role="alert">{storageError}</span>{/if}
+    <div class="view-controls">
+      <div class="density-anchor">
+        <IconButton
+          type="button" size="md" icon="spacing" active={densityOpen}
+          label="Row spacing" data-menu-trigger
+          aria-expanded={densityOpen} aria-haspopup="true"
+          onclick={() => densityOpen = !densityOpen}
+        />
+        {#if densityOpen}
+          {@render densityChoices()}
+        {/if}
+      </div>
+      <IconButton
+        type="button" size="md" icon="fit-columns" active={fitColumnsToContent}
+        label={fitColumnsToContent ? 'Use standard column widths' : 'Fit columns to content'}
+        aria-pressed={fitColumnsToContent}
+        onclick={onToggleFitColumns}
+      />
+    </div>
+    <div class="column-search">
+      <TextInput type="search" size="md" glyph="⌕" value={columnSearch} oninput={(event: Event) => { setColumnSearch((event.currentTarget as HTMLInputElement).value); onFindColumn(); }} onkeydown={onColumnSearchKeydown} placeholder="Find column" aria-label="Find column" />
+      <span class="match-count" aria-live="polite" aria-label={`${columnMatchCount} matching columns`}>{columnMatchCount}</span>
+    </div>
   </div>
+  </div></div>
+  </div>
+  {:else}
+    <div class="detached-menus">{@render menus()}{#if densityOpen}{@render densityChoices()}{/if}</div>
+  {/if}
+  {#if showBuilder}
+    <div class="conditions" class:open={hasConditions}>
+      <div class="conditions-clip">
+        <div class="conditions-row" inert={!hasConditions}>
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable rail is intentionally keyboard-focusable) -->
+          <div class="modifier-rail" role="region" aria-label="Active filters and sorts" tabindex="0" onwheel={scrollModifierRail}>
+            {#each filters as filter, index (filter.column + index)}
+              {#if index > 0}
+                <button type="button" class="connector" aria-label={`Toggle connector before ${filter.column}; currently ${filter.connector === 'or' ? 'OR' : 'AND'}`} onclick={() => onToggleFilterConnector(index)}>{filter.connector === 'or' ? 'OR' : 'AND'}</button>
+              {/if}
+              <Chip tone="filter" onRemove={() => onRemoveFilter(index)} removeLabel={`Remove filter ${filter.column}`} title={filterSummary(filter)}><b>{filter.column}</b></Chip>
+            {/each}
+            {#each sorts as sort, index (sort.column)}
+              <Chip tone="sort" onRemove={() => onRemoveSort(sort.column)} removeLabel={`Remove sort ${sort.column}`}><b>{index + 1}. {sort.column}</b> {sort.direction === 'asc' ? '↑' : '↓'}</Chip>
+            {/each}
+            {#if dedupeColumns.length}
+              <Chip tone="muted" onRemove={onClearDedupe} removeLabel="Clear dedupe keys"><b>Dedupe</b> <span title={dedupeColumns.join(', ')}>{dedupeColumns.join(', ')}</span></Chip>
+            {/if}
+          </div>
+          <button type="button" class="link" onclick={onClearConditions}>Clear conditions</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </section>
 
 <style>
+  .detached-menus { position: absolute; top: 6px; left: 20px; z-index: 20; }
+  .detached-menus .density-menu { position: relative; top: 0; left: 0; translate: none; }
+  .toolbar-zone { position: relative; }
+  .reveal-edge { width: 100%; display: grid; place-items: center; height: 8px; padding: 0; border: 0; background: var(--surface-2); cursor: pointer; }
+  .reveal-edge::after { content: ''; width: 28px; height: 2px; border-radius: 2px; background: var(--line-strong); }
+  .reveal-edge:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; }
+  .toolbar-reveal { display: grid; grid-template-rows: 1fr; }
+  .toolbar-clip { min-height: 0; }
+  .hover-reveal .toolbar-reveal { grid-template-rows: 0fr; transition: grid-template-rows 220ms cubic-bezier(.32,.72,0,1); }
+  .hover-reveal .toolbar-clip { overflow: hidden; visibility: hidden; transition: visibility 0s linear 220ms; }
+  .hover-reveal .bar { opacity: 0; transition: opacity 160ms ease; }
+  .hover-reveal:is(:hover, :focus-within, .held) .toolbar-reveal { grid-template-rows: 1fr; }
+  .hover-reveal:is(:hover, :focus-within, .held) .toolbar-clip { visibility: visible; transition-delay: 0s; }
+  .hover-reveal:is(:hover, :focus-within, .held) .bar { opacity: 1; }
+  .hover-reveal.held .toolbar-clip { overflow: visible; }
+
+  .bar-stack { position: relative; z-index: 16; flex: none; border-bottom: 1px solid var(--line); background: var(--surface-2); }
   .bar {
     position: relative;
-    flex: none;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
     min-height: 40px;
     padding: 8px 20px;
-    border-bottom: 1px solid var(--line);
-    background: var(--surface-2);
   }
-  .tokens, .dedupe-controls, .column-search { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+  .tokens, .column-search { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+
+  /* Conditions row: zero-height until a filter, sort, or dedupe key exists,
+     then it grows out of the bar it was created from. */
+  .conditions {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  .conditions.open { grid-template-rows: 1fr; }
+  .conditions-clip { overflow: hidden; min-height: 0; }
+  .conditions-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 20px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-3);
+    opacity: 0;
+    translate: 0 -4px;
+    transition: opacity 180ms ease 40ms, translate 220ms cubic-bezier(0.32, 0.72, 0, 1) 40ms;
+  }
+  .conditions.open .conditions-row { opacity: 1; translate: 0 0; }
+
   .modifier-rail {
     display: flex;
     align-items: center;
     gap: 6px;
-    flex: 1 1 12rem;
+    flex: 1 1 auto;
     min-width: 0;
-    max-width: min(48rem, 45vw);
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
@@ -122,6 +218,7 @@
   }
   .modifier-rail::-webkit-scrollbar { display: none; }
   .modifier-rail:focus-visible { outline: 2px solid var(--action); outline-offset: 2px; }
+
   .connector {
     flex: none;
     height: 20px;
@@ -133,9 +230,36 @@
     font: 600 9px var(--font-mono);
   }
   .connector:hover { border-color: var(--action-tint-border); color: var(--action-dark); }
-  .muted { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
-  .link { font-size: 11.5px; color: var(--action); background: none; border: none; white-space: nowrap; }
-  .column-search { margin-left: auto; flex: none; }
+  .link { flex: none; font-size: 11.5px; color: var(--action); background: none; border: none; white-space: nowrap; }
+  .view-controls { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
+  .density-anchor { position: relative; display: flex; }
+  .density-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    z-index: 12;
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-xl);
+    background: var(--surface);
+    box-shadow: var(--shadow-popover);
+    transform-origin: top center;
+    animation: density-in 200ms cubic-bezier(0.32, 0.72, 0, 1);
+    translate: -50% 0;
+  }
+  @keyframes density-in {
+    from { opacity: 0; transform: translateY(-6px) scale(0.94); }
+    to { opacity: 1; transform: none; }
+  }
+  .column-search { flex: none; }
   .match-count { font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); flex: none; }
   .error { font-size: 11px; color: var(--error); flex: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .conditions, .conditions-row { transition: none; }
+    .hover-reveal .toolbar-reveal, .hover-reveal .toolbar-clip, .hover-reveal .bar { transition: none; }
+    .density-menu { animation: none; }
+  }
 </style>
