@@ -21,6 +21,7 @@
     sourceOpen: boolean;
     highlightToken?: number;
     inert?: boolean;
+    numbered?: boolean;
     joinPicking?: boolean;
     joinSourceSide?: 'left' | 'right';
     joinLeftViewId?: string;
@@ -38,7 +39,7 @@
 
   let {
     nodes, views, selectedViewId, selectedSourceId, loadedSourceIds, loadingSourceId, loadingNodes,
-    railOpen, collapsed, sourceOpen, highlightToken = 0, inert = false,
+    railOpen, collapsed, sourceOpen, highlightToken = 0, inert = false, numbered = false,
     joinPicking = false, joinSourceSide = 'right', joinLeftViewId = '', joinRightViewId = '',
     joinLeftSourceId = '', joinRightSourceId = '',
     onSelectSource, onSelectView, onPickJoinSource = onSelectSource, onPickJoinView = onSelectView,
@@ -71,7 +72,7 @@
   function selectView(id: string) { joinPicking ? onPickJoinView(id) : onSelectView(id); }
 </script>
 
-<aside class:open={railOpen} class:collapsed class:join-picking={joinPicking} class="rail" aria-label="Sources and Views" {inert}>
+<aside class:open={railOpen} class:collapsed class:join-picking={joinPicking} class="rail" aria-label="Sources and Views" inert={inert || (collapsed && !railOpen)}>
   <div class="rail-head">
     <Button variant="primary" aria-expanded={sourceOpen} onclick={onToggleSource}>+ Add source</Button>
     {#if sourceOpen}<div class="disclosure">{@render disclosure()}</div>{/if}
@@ -90,6 +91,7 @@
           class:join-choice={joinPicking}
           style="--stagger: {index * 54.6}ms; --cycle: {Math.max(nodes.length, 1) * 54.6 + 286}ms"
         >
+          {#if numbered}<kbd class="source-number">{index + 1}</kbd>{/if}
           <SourceTreeItem
             {node}
             active={joinPicking ? node.id === (joinSourceSide === 'left' ? joinLeftSourceId : joinRightSourceId) : node.id === selectedSourceId}
@@ -138,6 +140,7 @@
   .section-title span { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
   .section-title .picker-hint { color: var(--action-dark); }
   .derived-title { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .source-number { float: right; margin: 5px; padding: 3px 7px; border-radius: 4px; background: var(--action); color: white; font: 12px var(--font-mono); }
   .source-group { min-width: 0; margin-bottom: 8px; padding-left: 8px; border-left: 1px solid var(--line); border-radius: 0 var(--radius-md) var(--radius-md) 0; }
   .source-group.highlight { animation: source-sweep 900ms ease-out var(--stagger, 0ms) both; }
   .source-group.join-choice:not(.highlight) { animation: join-choice-sweep var(--cycle, 520ms) ease-in-out var(--stagger, 0ms) infinite; }

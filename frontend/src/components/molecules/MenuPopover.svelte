@@ -5,6 +5,7 @@
 
   type Props = {
     open: boolean;
+    embedded?: boolean;
     ontoggle: (event: Event) => void;
     icon: IconName;
     label: string;
@@ -20,7 +21,7 @@
     children: Snippet;
   };
 
-  let { open, ontoggle, icon, label, hint, width = 300, flush = false, header, footer, children }: Props = $props();
+  let { open, embedded = false, ontoggle, icon, label, hint, width = 300, flush = false, header, footer, children }: Props = $props();
 
   let panel = $state<HTMLElement>();
   let viewportWidth = $state(0);
@@ -29,7 +30,7 @@
   // leave the window, so the panel keeps the button's left edge when it can.
   $effect(() => {
     void viewportWidth;
-    if (!open || !panel) return;
+    if (!open || !panel || embedded) return;
     // offsetWidth/offsetLeft ignore the open animation's transform, so the
     // measurement is stable while the panel is still growing in.
     const host = panel.parentElement as HTMLElement;
@@ -41,19 +42,29 @@
 
 <svelte:window bind:innerWidth={viewportWidth} />
 
-<details class="popover-host" {open} {ontoggle}>
-  <summary class="trigger menu-trigger" class:active={open}>
-    <Icon name={icon} size={14} />
-    <span class="menu-label"><span>{label}{#if hint}<small>{hint}</small>{/if}</span></span>
-  </summary>
+{#snippet body()}
   <div bind:this={panel} class="popover" style="--menu-width: {width}px">
     {#if header}<div class="menu-header">{@render header()}</div>{/if}
     <div class="menu-body" class:flush>{@render children()}</div>
     {#if footer}<div class="menu-footer">{@render footer()}</div>{/if}
   </div>
+{/snippet}
+
+{#if embedded}
+  <div class="embedded">{@render body()}</div>
+{:else}
+<details class="popover-host" {open} {ontoggle}>
+  <summary class="trigger menu-trigger" class:active={open}>
+    <Icon name={icon} size={14} />
+    <span class="menu-label"><span>{label}{#if hint}<small>{hint}</small>{/if}</span></span>
+  </summary>
+  {@render body()}
 </details>
 
+{/if}
+
 <style>
+  .embedded .popover { position: relative; top: 0; }
   .popover-host { position: relative; }
   summary { list-style: none; cursor: pointer; }
   summary::-webkit-details-marker { display: none; }

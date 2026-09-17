@@ -10,6 +10,7 @@
 
   type Props = {
     open: boolean;
+    embedded?: boolean;
     ontoggle: (event: Event) => void;
     visibleCount: number;
     totalCount: number;
@@ -44,7 +45,7 @@
   };
 
   let {
-    open, ontoggle, visibleCount, totalCount, columnMenuSearch, setColumnMenuSearch,
+    open, embedded = false, ontoggle, visibleCount, totalCount, columnMenuSearch, setColumnMenuSearch,
     columnMenuRegex, setColumnMenuRegex, columnMenuRegexError,
     columnTypes, columnTypeCounts, isTypeShown, toggleShownType, typeToggleDisabled,
     nullThreshold, setNullThreshold, onApplyThreshold, onHideAll, onShowAll, hiddenCount,
@@ -226,7 +227,7 @@
 
 <svelte:window onkeydown={menuKeydown} />
 
-<MenuPopover {open} {ontoggle} icon="columns" label="Columns" hint={`${visibleCount}/${totalCount}`} width={400} flush>
+<MenuPopover {embedded} {open} {ontoggle} icon="columns" label="Columns" hint={`${visibleCount}/${totalCount}`} width={400} flush>
   {#snippet header()}
     <strong>Columns</strong><span>{visibleCount} of {totalCount} visible</span>
   {/snippet}

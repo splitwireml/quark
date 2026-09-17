@@ -8,6 +8,8 @@
 
   type Props = {
     column: ColumnInfo;
+    selected: boolean;
+    onselect: () => void;
     fitColumnsToContent: boolean;
     labelParts: LabelPart[];
     sort: SortCondition | undefined;
@@ -41,7 +43,7 @@
   };
 
   let {
-    column, fitColumnsToContent, labelParts, sort, sortRank, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, pinned, pinnedLeft, pinRefused, dropPlacement,
+    column, selected, onselect, fitColumnsToContent, labelParts, sort, sortRank, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, pinned, pinnedLeft, pinRefused, dropPlacement,
     renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onpin, onstartrename, onrenamevalue,
     oncommitrename, oncancelrename, oncontextmenu, ondragstart, ondragover, ondragend
   }: Props = $props();
@@ -68,6 +70,7 @@
     pressed = true;
   }
   function onHeaderClick(event: MouseEvent) {
+    if (!renaming) onselect();
     if (!event.shiftKey || renaming || (event.target as HTMLElement).closest('button, input')) return;
     event.preventDefault();
     onpin();
@@ -96,6 +99,7 @@
   onpointercancel={() => (pressed = false)}
   onclick={onHeaderClick}
   ondblclick={onHeaderDoubleClick}
+  class:selected
   class:dragging
   class:pinned
   class:refused={pinRefused}
@@ -150,6 +154,7 @@
 </th>
 
 <style>
+  th.selected { background: var(--action-tint); box-shadow: inset 0 -2px var(--action); }
   th {
     position: sticky;
     top: 0;

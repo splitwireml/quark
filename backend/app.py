@@ -95,6 +95,14 @@ class SQLQuery(SQLRequest, Query):
     pass
 
 
+class CellSearch(SQLRequest):
+    term: str = Field(min_length=1, max_length=1000)
+    columns: list[str] = Field(min_length=1)
+    after_row: int = Field(-1, ge=-1)
+    after_column: int = Field(-1, ge=-1)
+    direction: Literal["next", "previous"] = "next"
+
+
 class ExportSheet(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str
@@ -1162,6 +1170,34 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             )
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
+
+    @api.post("/api/nodes/{node_id}/sql/find")
+    @serialized
+    def find_cell(node_id: str, request: CellSearch):
+        con = get_connection(node_id)
+        sql, columns = sql_metadata(con, request)
+        names = {name for name, _ in columns}
+        if len(set(request.columns)) != len(request.columns) or any(name not in names for name in request.columns):
+            raise HTTPException(422, "Invalid search column")
+        row_key = "__quark_row_" + uuid.uuid4().hex
+        matches = " UNION ALL ".join(
+            f"SELECT {quote(row_key)} AS r, {index} AS c, CAST({quote(name)} AS VARCHAR) AS value "
+            f"FROM numbered WHERE contains(lower(CAST({quote(name)} AS VARCHAR)), lower(?))"
+            for index, name in enumerate(request.columns)
+        )
+        forward = request.direction == "next"
+        comparison, order = (">", "ASC") if forward else ("<", "DESC")
+        # ponytail: scans the current View per search; add a search index only if measured latency needs it.
+        query = (
+            f"WITH numbered AS MATERIALIZED (SELECT row_number() OVER () - 1 AS {quote(row_key)}, * FROM query(?)), "
+            f"matches AS ({matches}) SELECT r, c, value FROM matches "
+            f"ORDER BY CASE WHEN (r, c) {comparison} (?, ?) THEN 0 ELSE 1 END, r {order}, c {order} LIMIT 1"
+        )
+        try:
+            match = con.execute(query, [sql, *[request.term] * len(request.columns), request.after_row, request.after_column]).fetchone()
+        except duckdb.Error as exc:
+            raise HTTPException(422, f"Cannot search this View: {exc}") from exc
+        return {"match": {"row": match[0], "column": request.columns[match[1]], "column_index": match[1], "value": match[2]} if match else None}
 
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/query")
     @serialized

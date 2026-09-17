@@ -138,3 +138,8 @@ export function getCategoryValues(
   const suffix = query.size ? `?${query}` : '';
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/values${suffix}`);
 }
+
+export type CellMatch = { row: number; column: string; column_index: number; value: string };
+export function findCell(nodeId: string, body: { sql: string; term: string; columns: string[]; after_row: number; after_column: number; direction: 'next' | 'previous' }, signal?: AbortSignal): Promise<{ match: CellMatch | null }> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql/find`, { ...json(body), signal });
+}

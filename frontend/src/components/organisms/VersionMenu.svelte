@@ -17,6 +17,15 @@
 
   let versions = $derived(history ? [...history.versions].reverse() : []);
 
+  function focusVersions(node: HTMLElement) { queueMicrotask(() => (node.querySelector<HTMLElement>('[aria-current="true"]') ?? node.querySelector<HTMLElement>('.entry'))?.focus()); }
+  function navigate(event: KeyboardEvent) {
+    const delta = event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 0;
+    if (!delta) return;
+    event.preventDefault(); event.stopPropagation();
+    const entries = [...(event.currentTarget as HTMLElement).closest('.panel')!.querySelectorAll<HTMLButtonElement>('.entry')];
+    const index = entries.indexOf(document.activeElement as HTMLButtonElement);
+    entries[(index + delta + entries.length) % entries.length]?.focus();
+  }
   function choose(version: Version) {
     if (version.id !== history?.activeVersionId) onRestore(version);
     onClose();
@@ -24,13 +33,13 @@
 </script>
 
 {#if open}
-  <div class="panel" use:dismissable={onClose} role="group" aria-label="Versions">
+  <div class="panel" use:focusVersions use:dismissable={onClose} role="group" aria-label="Versions">
     {#if storageError}<p class="error" role="alert">{storageError}</p>{/if}
     <ul class="list">
       {#each versions as version (version.id)}
         {@const active = version.id === history?.activeVersionId}
         <li class:active>
-          <button type="button" class="entry" onclick={() => choose(version)} aria-current={active ? 'true' : undefined}>
+          <button type="button" class="entry" onkeydown={navigate} onclick={() => choose(version)} aria-current={active ? 'true' : undefined}>
             <span class="line">
               <span class="label">{versionLabel(version)}</span>
               <time datetime={version.timestamp}>{new Date(version.timestamp).toLocaleString()}</time>
@@ -71,6 +80,8 @@
 
   .list { max-height: 320px; overflow-y: auto; margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 1px; }
   li { display: flex; align-items: center; gap: 4px; padding-right: 4px; border-radius: var(--radius-lg); }
+  li:focus-within { outline: 2px solid var(--action); outline-offset: -2px; }
+  @media (prefers-reduced-motion: reduce) { .panel { animation: none; } }
   li:hover { background: var(--surface-hover); }
   li.active { background: var(--action-tint); }
 

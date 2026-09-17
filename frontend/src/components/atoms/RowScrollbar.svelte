@@ -9,6 +9,7 @@
     firstVisibleRow: number;
     visibleRows: number;
     trackHeight: number;
+    topOffset: number;
     // Id of the scrolled region, for the scrollbar role's required aria-controls.
     controls: string;
     disabled: boolean;
@@ -23,7 +24,7 @@
     onDragHeld: (held: boolean) => void;
   };
 
-  let { totalRows, totalLabel, firstVisibleRow, visibleRows, trackHeight, controls, disabled, onSeek, onDragLive, onDragRest, onDragHeld }: Props = $props();
+  let { totalRows, totalLabel, firstVisibleRow, visibleRows, trackHeight, topOffset, controls, disabled, onSeek, onDragLive, onDragRest, onDragHeld }: Props = $props();
 
   // Direct manipulation only: the thumb tracks the pointer 1:1 with no animation,
   // so there is no motion to gate behind prefers-reduced-motion.
@@ -140,6 +141,8 @@
   <div
     bind:this={track}
     class="row-scrollbar"
+    style:top={`${topOffset}px`}
+    style:height={`${trackHeight}px`}
     onpointerdown={(event) => { if (event.target === track) jumpTrack(event); }}
   >
     <div
@@ -175,9 +178,7 @@
 <style>
   .row-scrollbar {
     position: absolute;
-    top: 0;
     right: 0;
-    bottom: 0;
     width: 12px;
     z-index: 8;
     border-radius: 8px;

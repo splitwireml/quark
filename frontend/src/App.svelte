@@ -14,6 +14,11 @@
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
 
+  import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, type ActionMenuMode, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
+  import CommandHint from './components/molecules/CommandHint.svelte';
+  import CommandDialog from './components/organisms/CommandDialog.svelte';
+  import SettingsPage from './components/organisms/SettingsPage.svelte';
+  import CellFinder from './components/organisms/CellFinder.svelte';
   import Button from './components/atoms/Button.svelte';
   import TitleBar from './components/organisms/TitleBar.svelte';
   import SourceRail from './components/organisms/SourceRail.svelte';
@@ -118,7 +123,7 @@
   let columnMutationError = $state('');
   let renamingColumn = $state<{ original: string; value: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
-  let gridApi = $state<{ scrollToAbsoluteRow: (absolute: number, onlyIfOutside?: boolean) => void } | null>(null);
+  let gridApi = $state<{ scrollToAbsoluteRow: (absolute: number, onlyIfOutside?: boolean) => void; requestPin: (column: ColumnInfo) => void } | null>(null);
   type CachedPage = { page: number; rows: TableRows };
   // One previous page, at most two incoming pages, and one viewport preview.
   let neighborCache = $state.raw<CachedPage | null>(null);
@@ -243,6 +248,211 @@
   let editorView: EditorView | null = null;
   let queryMenuOpen = $state<'columns' | 'joins' | 'aggregate' | 'dedupe' | null>(null);
 
+  let toolbarVisibility = $state<ToolbarVisibility>('show');
+  let actionMenuMode = $state<ActionMenuMode>('simple');
+  let settingsOpen = $state(false);
+  let densityMenuOpen = $state(false);
+  let settingsError = $state('');
+  let commandPrefix = $state<CommandPrefix>(null);
+  let combinationTimer: ReturnType<typeof setTimeout> | undefined;
+  let combinationId = $state(0);
+  let commandMode = $state<'wheel' | 'find-column' | 'help' | 'operation' | 'sort' | null>(null);
+  let commandQuery = $state('');
+  let columnTarget = $state('');
+  let pendingColumnAction = '';
+  let commandReturnFocus: HTMLElement | null = null;
+  let sourcePicking = $state(false);
+  let sourceDigits = $state('');
+  let sourceNumberTimer: ReturnType<typeof setTimeout> | undefined;
+  let cellFinderOpen = $state(false);
+  let cellSearchTerm = $state('');
+  let cellSearchNotice = $state('');
+  let cellSearching = $state(false);
+  let cellMatch: api.CellMatch | null = null;
+  let cellSearchKey = '';
+  let cellSearchRequest: AbortController | null = null;
+  let redoStack = $state.raw<{ point: UndoPoint; history: ViewHistory }[]>([]);
+  let versionRedo = $state.raw<{ historyId: string; versionId: string }[]>([]);
+  let historyBusy = $state(false);
+
+
+  function setToolbarVisibility(value: ToolbarVisibility) {
+    toolbarVisibility = value;
+    try { localStorage.setItem(toolbarStorageKey, value); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function setActionMenuMode(value: ActionMenuMode) {
+    actionMenuMode = value;
+    try { localStorage.setItem(actionMenuStorageKey, value); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function clearCommandSequence() {
+    commandPrefix = null; sourcePicking = false; sourceDigits = '';
+    clearTimeout(sourceNumberTimer);
+    clearTimeout(combinationTimer);
+  }
+  function startCombinationTimer() {
+    clearTimeout(combinationTimer);
+    combinationId++;
+    combinationTimer = setTimeout(clearCommandSequence, combinationTimeoutMs);
+  }
+  function closeCommands(restoreFocus = true) {
+    commandMode = null; queryMenuOpen = null; densityMenuOpen = false; pendingColumnAction = '';
+    if (restoreFocus) void tick().then(() => commandReturnFocus?.isConnected && commandReturnFocus.focus());
+  }
+  function showCommands(mode: typeof commandMode) {
+    if (!commandMode) commandReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    clearCommandSequence();
+    queryMenuOpen = null; densityMenuOpen = false; versionsOpen = false;
+    commandQuery = ''; commandMode = mode;
+  }
+  function openQueryMenu(menu: NonNullable<typeof queryMenuOpen>) {
+    queryMenuOpen = menu;
+    if (menu === 'joins') {
+      joinStep = 0; joinStepDirection = 1;
+      joinSourceSide = joinLeftViewId || joinLeftSourceId ? 'right' : 'left';
+      railCollapsed = false; prepareJoinPicker();
+    }
+  }
+  async function selectCommandColumn(name: string) {
+    const followup = pendingColumnAction;
+    closeCommands(false);
+    columnTarget = name; selectedCell = null;
+    await scrollToColumn(name);
+    const header = [...(tableScroll?.querySelectorAll<HTMLElement>('th[data-column]') ?? [])].find((item) => item.dataset.column === name);
+    header?.focus({ preventScroll: true });
+    if (followup) await executeCommand(followup);
+  }
+  async function chooseCommand(id: string) {
+    if (commandMode === 'find-column') { await selectCommandColumn(id); return; }
+    if (commandMode === 'sort') {
+      const column = commandColumn;
+      closeCommands();
+      if (column) await setColumnSort(column, id as 'asc' | 'desc' | 'none');
+      return;
+    }
+    await executeCommand(id);
+  }
+  async function executeCommand(id: string) {
+    if (id === 'wheel') { commandMode === 'wheel' ? closeCommands() : showCommands('wheel'); return; }
+    if (id === 'settings') { closeCommands(false); clearCommandSequence(); settingsOpen = !settingsOpen; return; }
+    if (id === 'sidebar') { closeCommands(false); clearCommandSequence(); railCollapsed = !railCollapsed; return; }
+    if (id === 'sources') { closeCommands(false); clearCommandSequence(); railCollapsed = false; sourcePicking = true; startCombinationTimer(); highlightToken++; return; }
+    if (id === 'help') { showCommands('help'); return; }
+    if (!result || loadingData || cellEditSaving || historyBusy) return;
+    if (['columns', 'joins', 'aggregate', 'dedupe'].includes(id)) {
+      showCommands('operation'); openQueryMenu(id as NonNullable<typeof queryMenuOpen>);
+      await tick();
+      document.querySelector<HTMLElement>('.popover-host[open] .popover input, .popover-host[open] .popover button, .detached-menus .popover input, .detached-menus .popover button')?.focus();
+      return;
+    }
+    if (id === 'find-column') { showCommands('find-column'); return; }
+    if (id === 'find-values') { closeCommands(false); cellFinderOpen = true; await tick(); document.querySelector<HTMLInputElement>('.finder input')?.focus(); return; }
+    if (id === 'density') {
+      closeCommands(false); densityMenuOpen = true;
+      await tick(); document.querySelector<HTMLElement>('.density-menu button')?.focus(); return;
+    }
+    if (id === 'filter' || id === 'sort' || id === 'hide' || id === 'pin') {
+      const column = commandColumn;
+      if (!column) { showCommands('find-column'); pendingColumnAction = id; return; }
+      if (id === 'sort') { showCommands('sort'); return; }
+      closeCommands(false);
+      if (id === 'filter') await openFilter(column);
+      if (id === 'hide') { hideColumn(column.name); columnTarget = ''; selectedCell = null; tableScroll?.focus(); }
+      if (id === 'pin') gridApi?.requestPin(column);
+      return;
+    }
+    closeCommands(false);
+    if (id === 'fit') fitColumnsToContent = !fitColumnsToContent;
+    if (id === 'sql') await openSql();
+    if (id === 'versions') toggleVersions();
+    if (id === 'refresh') await loadActiveData();
+    if (id === 'save') await stopRecording();
+    if (id === 'undo') await undoCommand();
+    if (id === 'redo') await redoCommand();
+  }
+  function captureCommands(event: KeyboardEvent) {
+    if (!activeProject || event.defaultPrevented || event.isComposing) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const editable = isEditableElement(target);
+    if (target?.closest('dialog') || inspectorMode || settingsOpen) {
+      if (settingsOpen && event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); settingsOpen = false; void tick().then(() => tableScroll?.focus()); }
+      // Dialogs and editors own their keys. The wheel still has its toggle.
+      if (commandMode && !editable && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); event.stopImmediatePropagation(); closeCommands(); }
+      return;
+    }
+    if (event.key === 'Escape' && queryMenuOpen) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (commandMode === 'operation') showCommands('wheel'); else { queryMenuOpen = null; tableScroll?.focus(); }
+      return;
+    }
+    if (sourcePicking && !editable && !event.altKey && ((!event.metaKey && !event.ctrlKey) || /^[0-9]$/.test(event.key))) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (/^[0-9]$/.test(event.key)) {
+        startCombinationTimer();
+        sourceDigits += event.key;
+        clearTimeout(sourceNumberTimer);
+        const index = Number(sourceDigits) - 1;
+        const commit = () => { const node = nodes[index]; clearCommandSequence(); if (node) void loadProjectSource(node.id); };
+        if (nodes.some((_, i) => String(i + 1).startsWith(sourceDigits) && String(i + 1) !== sourceDigits)) sourceNumberTimer = setTimeout(commit, 900);
+        else commit();
+      } else if (event.key === 'Enter' && sourceDigits) { const node = nodes[Number(sourceDigits) - 1]; clearCommandSequence(); if (node) void loadProjectSource(node.id); }
+      else if (event.key === 'Escape') clearCommandSequence();
+      return;
+    }
+    const action = commandFor(event, commandPrefix, editable);
+    if (!action) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.repeat) return;
+    clearCommandSequence();
+    if (action === 'prefix-find') commandPrefix = 'find';
+    else if (action === 'prefix-column') commandPrefix = 'column';
+    else if (action === 'prefix-sidebar') commandPrefix = 'sidebar';
+    else if (action !== 'cancel') void executeCommand(action);
+    if (commandPrefix) startCombinationTimer();
+  }
+  function clearSequenceOnEdit(event: FocusEvent) { if (isEditableElement(event.target as Element)) clearCommandSequence(); }
+  onMount(() => {
+    try {
+      const value = localStorage.getItem(toolbarStorageKey); if (value === 'show' || value === 'hover' || value === 'hide') toolbarVisibility = value;
+      const menu = localStorage.getItem(actionMenuStorageKey); if (menu === 'simple' || menu === 'comprehensive') actionMenuMode = menu;
+    }
+    catch { settingsError = 'Preferences are unavailable in this browser.'; }
+    window.addEventListener('keydown', captureCommands, true);
+    window.addEventListener('blur', clearCommandSequence);
+    window.addEventListener('focusin', clearSequenceOnEdit);
+    window.addEventListener('pointerdown', clearCommandSequence);
+    return () => { window.removeEventListener('keydown', captureCommands, true); window.removeEventListener('blur', clearCommandSequence); window.removeEventListener('focusin', clearSequenceOnEdit); window.removeEventListener('pointerdown', clearCommandSequence); clearCommandSequence(); cellSearchRequest?.abort(); };
+  });
+  function resetCellSearch() { cellSearchRequest?.abort(); cellSearching = false; cellMatch = null; cellSearchNotice = ''; }
+  async function findCellValue(direction: 'next' | 'previous') {
+    if (!result || !cellSearchTerm || cellSearching || !visibleColumns.length) return;
+    cellSearchRequest?.abort();
+    const controller = new AbortController(); cellSearchRequest = controller;
+    const key = JSON.stringify([currentQueryKey(), visibleColumns.map((column) => column.name), cellSearchTerm]);
+    if (key !== cellSearchKey) cellMatch = null;
+    cellSearchKey = key;
+    cellSearching = true; cellSearchNotice = '';
+    try {
+      const { match } = await api.findCell(activeSqlNodeId || selectedNodeId, {
+        sql: result.sql, term: cellSearchTerm, columns: visibleColumns.map((column) => column.name),
+        after_row: cellMatch?.row ?? -1, after_column: cellMatch?.column_index ?? -1, direction,
+      }, controller.signal);
+      if (controller.signal.aborted || key !== JSON.stringify([currentQueryKey(), visibleColumns.map((column) => column.name), cellSearchTerm])) return;
+      cellMatch = match;
+      if (!match) { cellSearchNotice = 'No matching values in this View.'; return; }
+      const desiredPage = Math.floor(match.row / pageSize) + 1;
+      if (page !== desiredPage) { page = desiredPage; if (!await loadData()) throw new Error(sqlError || 'Could not load the matching row.'); }
+      if (controller.signal.aborted) return;
+      selectedCell = { row: match.row % pageSize, column: match.column };
+      columnTarget = match.column;
+      await scrollToColumn(match.column);
+      gridApi?.scrollToAbsoluteRow(match.row);
+      cellSearchNotice = `Row ${match.row + 1} · ${match.column}`;
+    } catch (reason) { if (!controller.signal.aborted) cellSearchNotice = message(reason); }
+    finally { if (cellSearchRequest === controller) cellSearching = false; }
+  }
+
   let currentHistory = $derived(versionHistories.find((history) => history.id === selectedDataset));
   let selectedNode = $derived(nodes.find((node) => node.id === currentHistory?.sourceId));
   let selectedSourceId = $derived(currentHistory?.sourceId ?? '');
@@ -277,6 +487,11 @@
     return names.filter((name, index) => byName.has(name) && names.indexOf(name) === index).map((name) => byName.get(name)!);
   });
   let visibleColumns = $derived(orderedColumns.filter((column) => !hiddenColumns.includes(column.name)));
+  let commandColumn = $derived(visibleColumns.find((column) => column.name === (selectedCell?.column || columnTarget)));
+  let commandItems = $derived(commandMode === 'wheel' ? operationsFor(actionMenuMode).map((item) => ({ ...item, shortcut: item.key.toUpperCase(), disabled: !result || loadingData || historyBusy }))
+    : commandMode === 'find-column' ? visibleColumns.filter((column) => commandQuery.trim() && column.name.toLowerCase().includes(commandQuery.trim().toLowerCase())).map((column) => ({ id: column.name, label: column.name, detail: column.type }))
+    : commandMode === 'sort' ? [{ id: 'asc', label: 'Ascending' }, { id: 'desc', label: 'Descending' }, { id: 'none', label: 'Remove sort' }]
+    : shortcuts.filter(([, label]) => label.toLowerCase().includes(commandQuery.toLowerCase())).map(([shortcut, label, id]) => ({ id, label, shortcut })));
   // A pin only survives while its column is still on screen.
   let livePins = $derived(pinnedColumns.filter((name) => visibleColumns.some((column) => column.name === name)));
   let rowColumns = $derived.by(() => {
@@ -332,14 +547,9 @@
   function syncQueryMenu(menu: 'columns' | 'joins' | 'aggregate' | 'dedupe', event: Event) {
     const open = (event.currentTarget as HTMLDetailsElement).open;
     queryMenuOpen = open ? menu : queryMenuOpen === menu ? null : queryMenuOpen;
-    if (menu === 'joins' && open) {
-      joinStep = 0;
-      joinStepDirection = 1;
-      joinSourceSide = joinLeftViewId || joinLeftSourceId ? 'right' : 'left';
-      railCollapsed = false;
-      prepareJoinPicker();
-    }
+    if (open) openQueryMenu(menu);
   }
+
   function clearAggregateDraft() { aggregateColumnSearch = ''; aggregateRecipe = []; focusedAggregateItemId = null; aggregateSourceSql = ''; aggregateSourceColumns = []; if (queryMenuOpen === 'aggregate') queryMenuOpen = null; }
   function clearJoinPreview() { joinPreviewRequestId++; joinPreview = null; joinPreviewLoading = false; joinPreviewError = ''; }
   function clearJoinDraft() {
@@ -920,56 +1130,76 @@
 
   function stageChange(change: VersionChange, before?: UndoPoint) {
     if (!currentHistory) return;
+    redoStack = []; versionRedo = [];
     recordingNotice = '';
     undoStack = [...undoStack, before ?? undoPoint()];
     replaceHistory(stageVersionChange(currentHistory, change), true);
   }
 
   function clearPending(history: ViewHistory) {
-    undoStack = [];
+    undoStack = []; redoStack = []; versionRedo = [];
     replaceHistory({ ...history, pendingParentId: null, pendingChanges: [] });
   }
 
-  // Conditions returning to none means nothing was changed after all: drop the
-  // staged filter/sort work so the recording highlight and checkpoint go away.
-  const conditionChangeKinds = new Set(['filter', 'filter-connector', 'filter-remove', 'filter-clear']);
-  function dropConditionPending() {
-    const history = currentHistory;
-    if (!history?.pendingChanges.length || filters.length || sorts.length || dedupeColumns.length) return;
-    const keep = history.pendingChanges.map((change) => !conditionChangeKinds.has(change.kind));
-    if (keep.every(Boolean)) return;
-    const pendingChanges = history.pendingChanges.filter((_, index) => keep[index]);
-    undoStack = undoStack.filter((_, index) => keep[index] ?? true);
-    replaceHistory({ ...history, pendingParentId: pendingChanges.length ? history.pendingParentId : null, pendingChanges }, true);
+  async function restoreUndoPoint(point: UndoPoint, history: ViewHistory): Promise<boolean> {
+    if (point.historyId !== currentHistory?.id) return false;
+    historyBusy = true;
+    try {
+      // Fetch before changing history so a failed replay leaves both stacks intact.
+      const next = await api.querySql(point.activeSqlNodeId || activeProject?.node_id || history.nodeId, {
+        sql: point.sqlBase || point.activeSql, page: point.page, page_size: pageSize,
+        filters: point.filters, sorts: point.sorts, dedupe_columns: point.dedupeColumns,
+      });
+      if (point.historyId !== currentHistory?.id) return false;
+      if (!replaceHistory(history)) return false;
+      closeSql(false); clearAggregateDraft(); resetBackground();
+      filters = point.filters; sorts = point.sorts;
+      dedupeColumns = [...point.dedupeColumns]; dedupeDraft = [...point.dedupeColumns];
+      columnOrder = [...point.columnOrder]; hiddenColumns = [...point.hiddenColumns];
+      activeJoin = point.join; sqlText = point.sqlText; sqlBase = point.sqlBase;
+      activeSql = next.sql; activeSqlNodeId = point.activeSqlNodeId;
+      result = next; page = next.page; pageInput = String(next.page);
+      reorderOrigin = null; selectedCell = null; editingCell = null; recordingNotice = '';
+      await tick(); gridApi?.scrollToAbsoluteRow((page - 1) * pageSize);
+      return true;
+    } catch (reason) { recordingNotice = `Could not restore change: ${message(reason)}`; return false; }
+    finally { historyBusy = false; }
   }
-
   async function undoLastChange() {
     const history = currentHistory;
     const point = undoStack[undoStack.length - 1];
-    if (!history?.pendingChanges.length || !point || point.historyId !== history.id || loadingData) return;
-    undoStack = undoStack.slice(0, -1);
+    if (!history?.pendingChanges.length || !point || loadingData || historyBusy) return;
+    const redo = { point: undoPoint(), history };
     const pendingChanges = history.pendingChanges.slice(0, -1);
-    replaceHistory({ ...history, pendingParentId: pendingChanges.length ? history.pendingParentId : null, pendingChanges }, true);
-    closeSql(false);
-    clearAggregateDraft();
-    filters = point.filters;
-    sorts = point.sorts;
-    dedupeColumns = [...point.dedupeColumns];
-    dedupeDraft = [...point.dedupeColumns];
-    columnOrder = [...point.columnOrder];
-    hiddenColumns = [...point.hiddenColumns];
-    activeJoin = point.join;
-    sqlText = point.sqlText;
-    sqlBase = point.sqlBase;
-    activeSql = point.activeSql;
-    activeSqlNodeId = point.activeSqlNodeId;
-    page = point.page;
-    pageInput = String(point.page);
-    reorderOrigin = null;
-    selectedCell = null;
-    editingCell = null;
-    recordingNotice = '';
-    await runSql(point.sqlBase || point.activeSql, true, true, point.activeSqlNodeId || activeProject?.node_id || history.nodeId);
+    if (!await restoreUndoPoint(point, { ...history, pendingChanges, pendingParentId: pendingChanges.length ? history.pendingParentId : null })) return;
+    undoStack = undoStack.slice(0, -1);
+    redoStack = [...redoStack, redo];
+  }
+  async function undoCommand() {
+    if (currentHistory?.pendingChanges.length) { await undoLastChange(); return; }
+    const history = currentHistory;
+    const version = history?.versions.find((item) => item.id === activeVersion?.parentId);
+    if (!history || !version || !activeVersion) return;
+    const previous = { historyId: history.id, versionId: activeVersion.id };
+    await restoreVersion(version, true);
+    if (currentHistory?.activeVersionId === version.id) versionRedo = [...versionRedo, previous];
+  }
+  async function redoCommand() {
+    if (versionRedo.length) {
+      const target = versionRedo[versionRedo.length - 1];
+      const version = target?.historyId === currentHistory?.id ? currentHistory?.versions.find((item) => item.id === target.versionId) : undefined;
+      if (!version || currentHistory?.pendingChanges.length) return;
+      await restoreVersion(version, true);
+      if (currentHistory?.activeVersionId === version.id) versionRedo = versionRedo.slice(0, -1);
+      return;
+    }
+    const entry = redoStack[redoStack.length - 1];
+    if (entry && entry.point.historyId === currentHistory?.id) {
+      const before = undoPoint();
+      if (!await restoreUndoPoint(entry.point, entry.history)) return;
+      undoStack = [...undoStack, before]; redoStack = redoStack.slice(0, -1);
+      return;
+    }
   }
 
   function blockViewExecutionWhileRecording(): boolean {
@@ -1120,9 +1350,16 @@
     return replayStored(version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns);
   }
 
-  async function restoreVersion(version: Version) {
+  async function restoreVersion(version: Version, preserveRedo = false) {
     if (!discardPending()) return;
-    if (!await replayVersionSnapshot(version)) return;
+    const before = undoPoint();
+    if (!await replayVersionSnapshot(version)) {
+      filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns;
+      dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page);
+      recordingNotice = sqlError || 'Could not open this Version.';
+      return;
+    }
+    if (!preserveRedo) { redoStack = []; versionRedo = []; }
     if (currentHistory) replaceHistory(activateVersion(currentHistory, version.id));
   }
 
@@ -1157,6 +1394,7 @@
     });
     if (!replaceHistory(next)) return;
     undoStack = [];
+    redoStack = []; versionRedo = [];
     const version = next.versions.find((item) => item.id === next.activeVersionId);
     if (version) await showDiff(next, version, tableScroll);
   }
@@ -1240,6 +1478,7 @@
   function isEditableElement(element: Element | null): boolean { return element instanceof HTMLInputElement && !['checkbox', 'radio'].includes(element.type) || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement || element instanceof HTMLElement && element.isContentEditable; }
 
   function clearWorkspaceState() {
+    closeCommands(false); clearCommandSequence(); resetCellSearch(); cellFinderOpen = false; settingsOpen = false; columnTarget = ""; redoStack = []; versionRedo = [];
     replayRequestId++;
     requestId++;
     resetBackground();
@@ -1438,6 +1677,7 @@
     resetSql(datasets.find((view) => view.id === id));
     selectedNodeId = activeProject?.node_id ?? history.nodeId;
     selectedDataset = id;
+    columnTarget = ""; resetCellSearch(); redoStack = []; versionRedo = [];
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -1468,7 +1708,7 @@
     const sql = sqlBase || activeSql || activeVersion?.sql;
     if (!sql) return false;
     const loaded = await runSql(sql, true, true, activeProject?.node_id ?? currentHistory?.nodeId);
-    if (loaded) dropConditionPending();
+
     return loaded;
   }
 
@@ -1681,13 +1921,12 @@
   function toggleCategory(value: string, checked: boolean) { selectedCategories = checked ? [...selectedCategories, value] : selectedCategories.filter((item) => item !== value); }
   function selectVisibleCategories() { selectedCategories = [...new Set([...selectedCategories, ...categoryValues.map((item) => item.value)])]; }
 
-  async function applyFilterChange(next: FilterCondition[], change: VersionChange) {
-    const before = undoPoint();
+  async function applyFilterChange(next: FilterCondition[], change: VersionChange, before = undoPoint()) {
     filters = next;
     page = 1;
     pageInput = '1';
-    if (!await loadData()) return;
-    if (filters.length || sorts.length || dedupeColumns.length) stageChange(change, before);
+    if (await loadData()) stageChange(change, before);
+    else { filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; page = before.page; pageInput = String(page); }
   }
 
   async function addCategoryFilter() {
@@ -1726,19 +1965,28 @@
     const value = Array.isArray(filter.value) ? [...filter.value] : filter.value;
     await applyFilterChange(filters.filter((_, itemIndex) => itemIndex !== index), { kind: 'filter-remove', summary: `Remove filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
   }
+  async function setColumnSort(column: ColumnInfo, direction: 'asc' | 'desc' | 'none') {
+    const before = undoPoint();
+    const exists = sorts.some((sort) => sort.column === column.name);
+    sorts = direction === 'none' ? sorts.filter((sort) => sort.column !== column.name) : exists
+      ? sorts.map((sort) => sort.column === column.name ? { ...sort, direction } : sort)
+      : [...sorts, { column: column.name, direction }];
+    page = 1; pageInput = '1';
+    if (await loadData()) stageChange({ kind: 'sort', summary: direction === 'none' ? `Remove sort ${column.name}` : `Sort ${column.name} ${direction}`, details: { column: column.name, direction } }, before);
+    else { sorts = before.sorts; page = before.page; pageInput = String(page); }
+  }
   async function cycleSort(column: ColumnInfo) {
     const existing = sorts.find((sort) => sort.column === column.name);
-    sorts = existing?.direction === 'asc' ? sorts.map((sort) => sort.column === column.name ? { ...sort, direction: 'desc' } : sort) : existing ? sorts.filter((sort) => sort.column !== column.name) : [...sorts, { column: column.name, direction: 'asc' }];
-    page = 1;
-    await loadData();
+    await setColumnSort(column, existing?.direction === 'asc' ? 'desc' : existing ? 'none' : 'asc');
   }
-  async function removeSort(column: string) { sorts = sorts.filter((sort) => sort.column !== column); page = 1; pageInput = '1'; await loadData(); }
+  async function removeSort(column: string) { const item = result?.columns.find((item) => item.name === column); if (item) await setColumnSort(item, 'none'); }
   async function clearQuery() {
+    const before = undoPoint();
     const count = filters.length;
     sorts = [];
     dedupeColumns = [];
     dedupeDraft = [];
-    await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } });
+    await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } }, before);
   }
   async function backToBuilder() {
     if (!discardPending()) return;
@@ -1749,8 +1997,14 @@
     await replayVersionSnapshot(version);
   }
   function toggleDedupe(column: string, checked: boolean) { dedupeDraft = checked ? [...dedupeDraft, column] : dedupeDraft.filter((item) => item !== column); }
-  async function applyDedupe() { dedupeColumns = [...dedupeDraft]; page = 1; await loadData(); }
-  async function clearDedupe() { dedupeColumns = []; dedupeDraft = []; page = 1; await loadData(); }
+  async function setDedupe(columns: string[]) {
+    const before = undoPoint();
+    dedupeColumns = [...columns]; dedupeDraft = [...columns]; page = 1; pageInput = '1';
+    if (await loadData()) stageChange({ kind: 'dedupe', summary: columns.length ? `Dedupe by ${columns.join(', ')}` : 'Clear dedupe', details: { columns } }, before);
+    else { dedupeColumns = before.dedupeColumns; dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page); }
+  }
+  async function applyDedupe() { await setDedupe(dedupeDraft); }
+  async function clearDedupe() { await setDedupe([]); }
   function isColumnProtected(column: string): boolean { return [...dedupeColumns, ...dedupeDraft].includes(column); }
   function setHidden(next: string[], change: VersionChange): boolean {
     const columns = new Set((result?.columns ?? []).map((column) => column.name));
@@ -2020,7 +2274,7 @@
     await tick();
     const header = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('th[data-column]') ?? [])].find((element) => element.dataset.column === name);
     if (!header || !tableScroll) return;
-    tableScroll.scrollTo({ left: Math.max(0, header.offsetLeft - (tableScroll.clientWidth - header.offsetWidth) / 2), behavior: 'smooth' });
+    tableScroll.scrollTo({ left: Math.max(0, header.offsetLeft - (tableScroll.clientWidth - header.offsetWidth) / 2), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
   function findColumn() { activeColumnMatch = 0; if (columnMatches.length) scrollToColumn(columnMatches[0].name); }
   function cycleColumnMatch(event: KeyboardEvent) { if (event.key === 'Enter' && columnMatches.length) { event.preventDefault(); activeColumnMatch = (activeColumnMatch + 1) % columnMatches.length; scrollToColumn(columnMatches[activeColumnMatch].name); } }
@@ -2195,6 +2449,66 @@
   function setCategorySearchLive(value: string) { categorySearch = value; loadCategoryValues(true); }
 </script>
 
+{#snippet operationMenus()}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'columns'}
+                  <ColumnsMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}
+                    visibleCount={visibleColumns.length} totalCount={result?.columns.length ?? 0}
+                    {columnMenuSearch} setColumnMenuSearch={(value) => columnMenuSearch = value}
+                    {columnMenuRegex} setColumnMenuRegex={(value) => columnMenuRegex = value}
+                    columnMenuRegexError={columnMenuRegex ? columnMenuRegexResult.error : ''}
+                    {columnTypes} {columnTypeCounts} {isTypeShown} {toggleShownType} {typeToggleDisabled}
+                    {nullThreshold} setNullThreshold={(value) => nullThreshold = value}
+                    onApplyThreshold={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}
+                    onHideAll={hideAllColumns}
+                    onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
+                    {columnMenuItems} {hiddenColumns} {isColumnProtected}
+                    visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
+                    orderedColumnNames={orderedColumns.map((column) => column.name)}
+                    onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
+                    onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
+                    onMoveColumn={moveColumnOneStep} onRegexVisibility={applyRegexVisibility}
+                  />
+                {/if}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'joins'}
+                  <JoinMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
+                    step={joinStep} direction={joinStepDirection} sourceSide={joinSourceSide}
+                    onSetSourceSide={(side) => joinSourceSide = side} onStep={setJoinStep}
+                    sources={nodes} views={projectViews} {joinLeftViewId} {joinRightViewId} {joinLeftSourceId} {joinRightSourceId}
+                    {joinLeftKeys} {joinRightKeys} onSetKeys={setJoinKeys}
+                    {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
+                    onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? joinLeftVersion?.columns ?? [] : joinRightVersion?.columns ?? [])])}
+                    onSelectNone={(side) => selectJoinColumns(side, [])}
+                    {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
+                    onCheck={checkJoin} {count}
+                    onRun={async () => { await runJoin(); if (commandMode === 'operation' && queryMenuOpen !== 'joins') closeCommands(false); }} canRun={canRunJoin} running={loadingData} preparing={!!loadingSourceId}
+                  />
+                {/if}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'aggregate'}
+                  <AggregateMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
+                    label="Aggregate"
+                    {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
+                    {aggregateColumnMatches} {aggregateRecipe} {focusedAggregateItemId}
+                    onAddColumn={addAggregateColumn} onRemoveColumn={removeAggregateColumn}
+                    onFocusAggregate={focusAggregate} onToggleRole={toggleAggregateRole}
+                    {selectedAggregateColumn} availableMetrics={availableAggregateMetrics}
+                    {aggregateMetrics} onToggleMetric={toggleAggregateMetric}
+                    {canCreateAggregate}
+                    onCreateView={async () => { await createAggregateView(); if (commandMode === 'operation' && queryMenuOpen !== 'aggregate') closeCommands(false); }} creating={loadingData}
+                  />
+                {/if}
+                {#if toolbarVisibility !== 'hide' || queryMenuOpen === 'dedupe'}
+                  <DedupeMenuPopover embedded={toolbarVisibility === 'hide'}
+                    open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}
+                    label={`Dedupe${dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}`}
+                    columns={visibleColumns} {dedupeDraft} onToggle={toggleDedupe}
+                    onApply={applyDedupe} onClear={clearDedupe} dedupeAppliedCount={dedupeColumns.length}
+                  />
+                {/if}
+{/snippet}
+
 <svelte:window onkeydown={handleKeydown} />
 
 {#if !activeProject}
@@ -2208,6 +2522,9 @@
     <TitleBar
       project={activeProject!} currentView={currentHistory} {railCollapsed}
       inert={!!inspectorMode}
+      onSettings={() => executeCommand('settings')}
+      onCommands={() => { settingsOpen = false; showCommands('wheel'); }}
+      canCommand={!!result && !loadingData}
       onProjects={exitProject}
       onToggleRailCollapsed={() => railCollapsed = !railCollapsed}
       onOpenRail={() => railOpen = true}
@@ -2217,6 +2534,7 @@
   {#snippet rail()}
     <SourceRail
       {nodes} views={projectViews} selectedViewId={selectedDataset} {selectedSourceId} {loadedSourceIds} {loadingSourceId} {loadingNodes} {railOpen} collapsed={railCollapsed} {sourceOpen} {highlightToken}
+      numbered={sourcePicking}
       inert={!!inspectorMode}
       joinPicking={queryMenuOpen === 'joins' && joinStep === 0} {joinSourceSide} {joinLeftViewId} {joinRightViewId}
       {joinLeftSourceId} {joinRightSourceId}
@@ -2235,6 +2553,8 @@
 
   {#snippet main()}
     <main>
+      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
+      <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
         <WelcomeScreen
           {error} {mutating} {nodes} {loadedSourceIds} {loadingSourceId}
@@ -2247,7 +2567,7 @@
           {/snippet}
         </WelcomeScreen>
       {:else}
-        <section class="workspace" inert={cellEditSaving}>
+        <section class="workspace" inert={cellEditSaving || historyBusy}>
           <DatasetHead
             title={currentHistory?.name ?? ''}
             {versionLabel} {canPreviousVersion} {canNextVersion}
@@ -2291,6 +2611,7 @@
             {/if}
             {#if selectedDataset}
               <QueryConditionBar
+                visibility={toolbarVisibility} menuOpen={queryMenuOpen !== null} bind:densityOpen={densityMenuOpen}
                 inert={!!inspectorMode || loadingData}
                 showBuilder={canQuery}
                 {filters} {sorts} {dedupeColumns}
@@ -2308,64 +2629,11 @@
                 {rowDensity} setRowDensity={(density) => rowDensity = density}
                 {fitColumnsToContent} onToggleFitColumns={() => fitColumnsToContent = !fitColumnsToContent}
               >
-                {#snippet columnsMenu()}
-                  <ColumnsMenuPopover
-                    open={queryMenuOpen === 'columns'} ontoggle={(event) => syncQueryMenu('columns', event)}
-                    visibleCount={visibleColumns.length} totalCount={result?.columns.length ?? 0}
-                    {columnMenuSearch} setColumnMenuSearch={(value) => columnMenuSearch = value}
-                    {columnMenuRegex} setColumnMenuRegex={(value) => columnMenuRegex = value}
-                    columnMenuRegexError={columnMenuRegex ? columnMenuRegexResult.error : ''}
-                    {columnTypes} {columnTypeCounts} {isTypeShown} {toggleShownType} {typeToggleDisabled}
-                    {nullThreshold} setNullThreshold={(value) => nullThreshold = value}
-                    onApplyThreshold={() => hideColumnsAtNullFraction(Math.min(100, Math.max(0, nullThreshold)) / 100)}
-                    onHideAll={hideAllColumns}
-                    onShowAll={showAllColumns} hiddenCount={hiddenColumns.length}
-                    {columnMenuItems} {hiddenColumns} {isColumnProtected}
-                    visibleColumnsLength={visibleColumns.length} onToggleColumn={toggleColumn}
-                    orderedColumnNames={orderedColumns.map((column) => column.name)}
-                    onBeginReorder={beginColumnReorder} onPreviewReorder={previewColumnReorder}
-                    onCommitReorder={commitColumnReorder} onCancelReorder={cancelColumnReorder}
-                    onMoveColumn={moveColumnOneStep} onRegexVisibility={applyRegexVisibility}
-                  />
-                {/snippet}
-                {#snippet joinMenu()}
-                  <JoinMenuPopover
-                    open={queryMenuOpen === 'joins'} ontoggle={(event) => syncQueryMenu('joins', event)}
-                    step={joinStep} direction={joinStepDirection} sourceSide={joinSourceSide}
-                    onSetSourceSide={(side) => joinSourceSide = side} onStep={setJoinStep}
-                    sources={nodes} views={projectViews} {joinLeftViewId} {joinRightViewId} {joinLeftSourceId} {joinRightSourceId}
-                    {joinLeftKeys} {joinRightKeys} onSetKeys={setJoinKeys}
-                    {joinLeftColumns} {joinRightColumns} onToggleColumn={toggleJoinColumn}
-                    onSelectAll={(side) => selectJoinColumns(side, [...(side === 'left' ? joinLeftVersion?.columns ?? [] : joinRightVersion?.columns ?? [])])}
-                    onSelectNone={(side) => selectJoinColumns(side, [])}
-                    {joinPreview} previewLoading={joinPreviewLoading} previewError={joinPreviewError}
-                    onCheck={checkJoin} {count}
-                    onRun={runJoin} canRun={canRunJoin} running={loadingData} preparing={!!loadingSourceId}
-                  />
-                {/snippet}
-                {#snippet aggregateMenu()}
-                  <AggregateMenuPopover
-                    open={queryMenuOpen === 'aggregate'} ontoggle={(event) => syncQueryMenu('aggregate', event)}
-                    label="Aggregate"
-                    {aggregateColumnSearch} setAggregateColumnSearch={(value) => aggregateColumnSearch = value}
-                    {aggregateColumnMatches} {aggregateRecipe} {focusedAggregateItemId}
-                    onAddColumn={addAggregateColumn} onRemoveColumn={removeAggregateColumn}
-                    onFocusAggregate={focusAggregate} onToggleRole={toggleAggregateRole}
-                    {selectedAggregateColumn} availableMetrics={availableAggregateMetrics}
-                    {aggregateMetrics} onToggleMetric={toggleAggregateMetric}
-                    {canCreateAggregate}
-                    onCreateView={createAggregateView} creating={loadingData}
-                  />
-                {/snippet}
-                {#snippet dedupeMenu()}
-                  <DedupeMenuPopover
-                    open={queryMenuOpen === 'dedupe'} ontoggle={(event) => syncQueryMenu('dedupe', event)}
-                    label={`Dedupe${dedupeDraft.length ? ` (${dedupeDraft.length})` : ''}`}
-                    columns={visibleColumns} {dedupeDraft} onToggle={toggleDedupe}
-                    onApply={applyDedupe} onClear={clearDedupe} dedupeAppliedCount={dedupeColumns.length}
-                  />
-                {/snippet}
+                {#snippet menus()}{@render operationMenus()}{/snippet}
               </QueryConditionBar>
+              {#if cellFinderOpen}
+                <CellFinder term={cellSearchTerm} busy={cellSearching} notice={cellSearchNotice} onTerm={(term) => { cellSearchTerm = term; resetCellSearch(); }} onFind={findCellValue} onClose={() => { cellFinderOpen = false; resetCellSearch(); tableScroll?.focus(); }} />
+              {/if}
               {#if sqlOpen}
                 <SqlEditorPanel
                   setEditorHost={(el) => editorHost = el}
@@ -2399,6 +2667,8 @@
                         onFilter={(column, trigger) => openFilter(column, trigger)}
                         onProfile={(column, trigger) => openStats(column, trigger)}
                         onHide={hideColumn} {display} {cellTitle}
+                        selectedColumn={commandColumn?.name ?? ''}
+                        onSelectColumn={(name) => { columnTarget = name; selectedCell = null; }}
                         {selectedCell} {editingCell} editSaving={cellEditSaving}
                         onSelectCell={selectCell} onExpandCell={expandCell} onFilterCategoricalCell={filterCategoricalCell}
                         onCellKeydown={handleCellKeydown} onCollapseCell={collapseCell}
@@ -2478,9 +2748,24 @@
             {/if}
         </section>
       {/if}
+      </div>
     </main>
   {/snippet}
 </AppShell>
+{/if}
+
+{#if commandPrefix || sourcePicking}
+  {#key combinationId}<CommandHint prefix={commandPrefix} {sourcePicking} {sourceDigits} sourceCount={nodes.length} />{/key}
+{/if}
+{#if commandMode && commandMode !== 'operation'}
+  <CommandDialog
+    title={commandMode === 'wheel' ? 'Action wheel' : commandMode === 'find-column' ? 'Find column' : commandMode === 'sort' ? `Sort ${commandColumn?.name ?? 'column'}` : 'Commands'}
+    wheel={commandMode === 'wheel'} searchable={commandMode === 'find-column' || commandMode === 'help'}
+    simple={commandMode === 'wheel' && actionMenuMode === 'simple'} compact={commandMode === 'find-column'}
+    query={commandQuery} items={commandItems} onQuery={(value) => commandQuery = value}
+    onChoose={chooseCommand} onClose={() => closeCommands()}
+    onBack={commandMode !== 'wheel' && commandMode !== 'find-column' ? () => showCommands('wheel') : undefined}
+  />
 {/if}
 
 {#if workbookPreview}
@@ -2514,6 +2799,9 @@
 {/if}
 
 <style>
+  .workspace-content { display: contents; }
+  .workspace-content[hidden] { display: none; }
+
   .workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .data-stage { flex: 1; min-height: 0; display: flex; position: relative; }
   .table-pane { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }

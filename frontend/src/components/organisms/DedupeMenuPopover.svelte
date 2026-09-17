@@ -6,6 +6,7 @@
 
   type Props = {
     open: boolean;
+    embedded?: boolean;
     ontoggle: (event: Event) => void;
     label: string;
     columns: ColumnInfo[];
@@ -15,10 +16,10 @@
     onClear: () => void;
     dedupeAppliedCount: number;
   };
-  let { open, ontoggle, label, columns, dedupeDraft, onToggle, onApply, onClear, dedupeAppliedCount }: Props = $props();
+  let { open, embedded = false, ontoggle, label, columns, dedupeDraft, onToggle, onApply, onClear, dedupeAppliedCount }: Props = $props();
 </script>
 
-<MenuPopover {open} {ontoggle} icon="duplicate" {label} width={260}>
+<MenuPopover {embedded} {open} {ontoggle} icon="duplicate" {label} width={260}>
   {#snippet header()}
     <strong>Dedupe</strong><span>{dedupeDraft.length} keys</span>
   {/snippet}

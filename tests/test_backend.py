@@ -1907,3 +1907,29 @@ def test_project_workspace_invalidation_keeps_inflight_query_and_refreshes_membe
     views = client.get(f"/api/projects/{project['id']}/views").json()
     assert [view["source_id"] for view in views] == [second["id"]]
     assert client.post(url, json={"sql": views[0]["sql"]}).json()["rows"] == [{"value": 2}]
+
+
+def test_find_cell_searches_whole_view_literal_values_and_wraps(client):
+    node = upload(client, "search.csv", b"id,note,extra\n" + b"".join(f"{i},{'100% O' + chr(39) + 'Brien' if i in (2, 1100) else 'plain'},other\n".encode() for i in range(1205)))
+    endpoint = f"/api/nodes/{node['id']}/sql/find"
+    body = {"sql": "SELECT * FROM search ORDER BY id", "term": "o'BRIEN", "columns": ["note", "id"], "after_row": -1, "after_column": -1}
+    first = client.post(endpoint, json=body)
+    assert first.status_code == 200, first.text
+    assert first.json()["match"]["row"] == 2
+    body.update(after_row=2, after_column=0)
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 1100
+    body.update(after_row=1100)
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 2
+    body.update(direction="previous", after_row=2)
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 1100
+    body.update(term="%", after_row=-1, direction="next")
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 2
+    body.update(term="not present")
+    assert client.post(endpoint, json=body).json()["match"] is None
+    body.update(term="1100", columns=["id"])
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 1100
+    body.update(sql="SELECT * FROM search WHERE id > 1000 ORDER BY id DESC", term="o'brien", columns=["note"])
+    assert client.post(endpoint, json=body).json()["match"]["row"] == 104
+    assert client.post(endpoint, json={**body, "columns": ["missing"]}).status_code == 422
+    assert client.post(endpoint, json={**body, "sql": "DELETE FROM search"}).status_code == 422
+    assert client.post(endpoint, json={**body, "term": ""}).status_code == 422

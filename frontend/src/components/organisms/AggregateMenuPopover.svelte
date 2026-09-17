@@ -7,6 +7,7 @@
 
   type Props = {
     open: boolean;
+    embedded?: boolean;
     ontoggle: (event: Event) => void;
     label: string;
     aggregateColumnSearch: string;
@@ -28,7 +29,7 @@
   };
 
   let {
-    open, ontoggle, label, aggregateColumnSearch, setAggregateColumnSearch,
+    open, embedded = false, ontoggle, label, aggregateColumnSearch, setAggregateColumnSearch,
     aggregateColumnMatches, aggregateRecipe, focusedAggregateItemId,
     onAddColumn, onRemoveColumn, onFocusAggregate, onToggleRole,
     selectedAggregateColumn, availableMetrics, aggregateMetrics, onToggleMetric,
@@ -36,7 +37,7 @@
   }: Props = $props();
 </script>
 
-<MenuPopover {open} {ontoggle} icon="sigma" {label} width={360}>
+<MenuPopover {embedded} {open} {ontoggle} icon="sigma" {label} width={360}>
   {#snippet header()}
     <strong>Aggregate</strong><span>{aggregateRecipe.length} {aggregateRecipe.length === 1 ? 'step' : 'steps'}</span>
   {/snippet}

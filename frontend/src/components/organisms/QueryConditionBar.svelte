@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ToolbarVisibility } from '../../lib/commands';
   import type { Snippet } from 'svelte';
   import Button from '../atoms/Button.svelte';
   import Chip from '../atoms/Chip.svelte';
@@ -9,6 +10,9 @@
 
   type Props = {
     inert?: boolean;
+    visibility: ToolbarVisibility;
+    menuOpen: boolean;
+    densityOpen?: boolean;
     showBuilder: boolean;
     filters: FilterCondition[];
     sorts: SortCondition[];
@@ -35,20 +39,17 @@
     setRowDensity: (density: RowDensity) => void;
     fitColumnsToContent: boolean;
     onToggleFitColumns: () => void;
-    columnsMenu: Snippet;
-    joinMenu: Snippet;
-    aggregateMenu: Snippet;
-    dedupeMenu: Snippet;
+    menus: Snippet;
   };
 
   let {
-    inert = false, showBuilder, filters, sorts, dedupeColumns, activeSql, filterSummary,
+    inert = false, visibility, menuOpen, densityOpen = $bindable(false), showBuilder, filters, sorts, dedupeColumns, activeSql, filterSummary,
     onToggleFilterConnector, onRemoveFilter, onRemoveSort, onClearDedupe, onSaveView, canSaveView, onClearConditions,
     isSqlMode, onBackToFullTable, onBackToBuilder,
     columnSearch, setColumnSearch, onFindColumn, onColumnSearchKeydown, columnMatchCount,
     storageError,
     rowDensity, setRowDensity, fitColumnsToContent, onToggleFitColumns,
-    columnsMenu, joinMenu, aggregateMenu, dedupeMenu
+    menus
   }: Props = $props();
 
   const densities: { value: RowDensity; icon: 'density-compact' | 'density-default' | 'density-comfortable'; label: string }[] = [
@@ -57,7 +58,6 @@
     { value: 'comfortable', icon: 'density-comfortable', label: 'Comfortable rows' }
   ];
 
-  let densityOpen = $state(false);
   const hasConditions = $derived(filters.length > 0 || sorts.length > 0 || dedupeColumns.length > 0);
 
   function chooseDensity(density: RowDensity) {
@@ -72,13 +72,26 @@
   }
 </script>
 
+{#snippet densityChoices()}
+          <div class="density-menu" use:dismissable={() => densityOpen = false} role="group" aria-label="Row spacing">
+            {#each densities as density (density.value)}
+              <IconButton
+                type="button" size="md" icon={density.icon} label={density.label}
+                active={rowDensity === density.value}
+                onclick={() => chooseDensity(density.value)}
+              />
+            {/each}
+          </div>
+{/snippet}
+
 <section class="bar-stack" aria-label="View controls" {inert}>
+  {#if visibility !== 'hide'}
+  <div class="toolbar-zone" class:hover-reveal={visibility === 'hover'} class:held={menuOpen || densityOpen}>
+    {#if visibility === 'hover'}<button type="button" class="reveal-edge" aria-label="Reveal toolbar"></button>{/if}
+  <div class="toolbar-reveal"><div class="toolbar-clip">
   <div class="bar">
-    {@render columnsMenu()}
-    {@render joinMenu()}
+    {@render menus()}
     {#if showBuilder}
-      {@render aggregateMenu()}
-      {@render dedupeMenu()}
       {#if isSqlMode}<Button onclick={onBackToFullTable}>Back to active Version</Button>{/if}
     {:else}
       <div class="tokens"><Chip title={activeSql}>SQL View</Chip></div>
@@ -95,15 +108,7 @@
           onclick={() => densityOpen = !densityOpen}
         />
         {#if densityOpen}
-          <div class="density-menu" use:dismissable={() => densityOpen = false} role="group" aria-label="Row spacing">
-            {#each densities as density (density.value)}
-              <IconButton
-                type="button" size="md" icon={density.icon} label={density.label}
-                active={rowDensity === density.value}
-                onclick={() => chooseDensity(density.value)}
-              />
-            {/each}
-          </div>
+          {@render densityChoices()}
         {/if}
       </div>
       <IconButton
@@ -118,7 +123,11 @@
       <span class="match-count" aria-live="polite" aria-label={`${columnMatchCount} matching columns`}>{columnMatchCount}</span>
     </div>
   </div>
-
+  </div></div>
+  </div>
+  {:else}
+    <div class="detached-menus">{@render menus()}{#if densityOpen}{@render densityChoices()}{/if}</div>
+  {/if}
   {#if showBuilder}
     <div class="conditions" class:open={hasConditions}>
       <div class="conditions-clip">
@@ -146,7 +155,23 @@
 </section>
 
 <style>
-  .bar-stack { flex: none; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+  .detached-menus { position: absolute; top: 6px; left: 20px; z-index: 20; }
+  .detached-menus .density-menu { position: relative; top: 0; left: 0; translate: none; }
+  .toolbar-zone { position: relative; }
+  .reveal-edge { width: 100%; display: grid; place-items: center; height: 8px; padding: 0; border: 0; background: var(--surface-2); cursor: pointer; }
+  .reveal-edge::after { content: ''; width: 28px; height: 2px; border-radius: 2px; background: var(--line-strong); }
+  .reveal-edge:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; }
+  .toolbar-reveal { display: grid; grid-template-rows: 1fr; }
+  .toolbar-clip { min-height: 0; }
+  .hover-reveal .toolbar-reveal { grid-template-rows: 0fr; transition: grid-template-rows 220ms cubic-bezier(.32,.72,0,1); }
+  .hover-reveal .toolbar-clip { overflow: hidden; visibility: hidden; transition: visibility 0s linear 220ms; }
+  .hover-reveal .bar { opacity: 0; transition: opacity 160ms ease; }
+  .hover-reveal:is(:hover, :focus-within, .held) .toolbar-reveal { grid-template-rows: 1fr; }
+  .hover-reveal:is(:hover, :focus-within, .held) .toolbar-clip { visibility: visible; transition-delay: 0s; }
+  .hover-reveal:is(:hover, :focus-within, .held) .bar { opacity: 1; }
+  .hover-reveal.held .toolbar-clip { overflow: visible; }
+
+  .bar-stack { position: relative; z-index: 16; flex: none; border-bottom: 1px solid var(--line); background: var(--surface-2); }
   .bar {
     position: relative;
     display: flex;
@@ -234,5 +259,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .conditions, .conditions-row { transition: none; }
+    .hover-reveal .toolbar-reveal, .hover-reveal .toolbar-clip, .hover-reveal .bar { transition: none; }
+    .density-menu { animation: none; }
   }
 </style>

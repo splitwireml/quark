@@ -38,6 +38,8 @@
     onHide: (name: string) => void;
     display: (value: unknown) => string;
     cellTitle: (column: ColumnInfo, value: unknown) => string;
+    selectedColumn: string;
+    onSelectColumn: (name: string) => void;
     selectedCell: SelectedCell | null;
     editingCell: EditingCell | null;
     editSaving: boolean;
@@ -84,7 +86,7 @@
   let {
     columns, bodyColumns, rows, rowOffset, pinnedColumns, onTogglePin, caption, rowDensity, fitColumnsToContent, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
-    selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
+    selectedColumn, onSelectColumn, selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
     renamingColumn, onStartRename, onRenameValue, onCommitRename, onCancelRename,
     onBeginReorder, onPreviewReorder, onCommitReorder, onCancelReorder,
@@ -102,6 +104,8 @@
   // the last page moving until the controller backfills them. Rows are
   // a uniform height per density, so the window is pure arithmetic.
   const OVERSCAN = 8;
+  // Matches the fixed column-header height, including its profile strip.
+  const HEADER_HEIGHT = 48;
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
   // Keep in step with the `--row-height` fallback on td below.
@@ -110,8 +114,9 @@
   const rowHeight = $derived(ROW_HEIGHTS[rowDensity] ?? DEFAULT_ROW_HEIGHT);
   let velocity = $state(0);
 
-  const visibleRowCount = $derived(Math.max(0, viewportHeight - 48) / rowHeight);
-  const pxPerRow = $derived(scrollRowStep(totalRows, rowHeight, Math.max(0, viewportHeight - 48)));
+  const bodyViewportHeight = $derived(Math.max(0, viewportHeight - HEADER_HEIGHT));
+  const visibleRowCount = $derived(bodyViewportHeight / rowHeight);
+  const pxPerRow = $derived(scrollRowStep(totalRows, rowHeight, bodyViewportHeight));
   const firstVisibleRow = $derived(Math.min(Math.max(0, totalRows - visibleRowCount), scrollTop / pxPerRow));
   const lastVisibleRow = $derived(Math.min(totalRows - 1, firstVisibleRow + visibleRowCount));
 
@@ -474,7 +479,7 @@
     pinLefts = lefts;
   });
 
-  function requestPin(column: ColumnInfo) {
+  export function requestPin(column: ColumnInfo) {
     if (pinnedColumns.includes(column.name)) { onTogglePin(column); return; }
     const header = headerFor(column.name);
     const room = (scrollElement?.clientWidth ?? 0) * PIN_LIMIT - GUTTER_WIDTH;
@@ -524,6 +529,8 @@
         {#each columns as column, columnIndex (column.name)}
           <ColumnHeaderCell
             {column}
+            selected={column.name === selectedColumn}
+            onselect={() => onSelectColumn(column.name)}
             {fitColumnsToContent}
             labelParts={columnLabelParts(column.name)}
             sort={sortFor(column.name)}
@@ -645,7 +652,7 @@
   </div>
 </div>
   <RowScrollbar
-    {totalRows} {totalLabel} {firstVisibleRow} visibleRows={visibleRowCount} trackHeight={viewportHeight}
+    {totalRows} {totalLabel} {firstVisibleRow} visibleRows={visibleRowCount} trackHeight={bodyViewportHeight} topOffset={HEADER_HEIGHT}
     controls="data-grid-scroll" disabled={seekDisabled} onSeek={onSeekRow}
     onDragLive={(row) => { onThumbMove(); scrollToAbsoluteRow(row); }} onDragRest={onSnapshotRest} onDragHeld={onThumbHeld}
   />

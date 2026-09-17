@@ -13,6 +13,7 @@
   type Step = 0 | 1 | 2;
   type Props = {
     open: boolean;
+    embedded?: boolean;
     ontoggle: (event: Event) => void;
     step: Step;
     direction: -1 | 1;
@@ -45,7 +46,7 @@
   };
 
   let {
-    open, ontoggle, step, direction, sourceSide, onSetSourceSide, onStep, sources, views,
+    open, embedded = false, ontoggle, step, direction, sourceSide, onSetSourceSide, onStep, sources, views,
     joinLeftViewId, joinRightViewId, joinLeftSourceId, joinRightSourceId, joinLeftKeys, joinRightKeys, onSetKeys,
     joinLeftColumns, joinRightColumns, onToggleColumn, onSelectAll, onSelectNone,
     joinPreview, previewLoading, previewError, onCheck, count, onRun, canRun, running, preparing
@@ -107,7 +108,7 @@
   }
 </script>
 
-<MenuPopover {open} {ontoggle} icon="join" label="Join" width={468} flush --menu-overflow="visible" --menu-body-overflow="visible">
+<MenuPopover {embedded} {open} {ontoggle} icon="join" label="Join" width={468} flush --menu-overflow="visible" --menu-body-overflow="visible">
   {#snippet header()}
     <strong>Join</strong><span>{step + 1} of 3 · {stepNames[step]}</span>
   {/snippet}
