@@ -11,7 +11,7 @@ import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
@@ -803,6 +803,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if candidate.is_file() and candidate.resolve() not in persisted_sources:
                 candidate.unlink()
         yield
+        cached_profile.cache_clear()
         if join_workspace:
             join_workspace["connection"].close()
         for workspace in project_workspaces.values():
@@ -1349,6 +1350,47 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "p25": safe(p25), "median": safe(median), "p75": safe(p75), "histogram": histogram,
         }
 
+    @lru_cache(maxsize=128)
+    def cached_profile(con, source, values_json, columns, column, revision):
+        return profile_response(con, source, json.loads(values_json), columns, column)
+
+    def profile(con, source, values, columns, column):
+        values_json = json.dumps(values, sort_keys=True)
+        words = set(re.findall(r"\b[a-z_]\w*\b", (source + " " + values_json).lower()))
+        # Be conservative about SQL whose result can change without a source-file change.
+        unsafe = {"current_timestamp", "current_time", "localtimestamp", "localtime", "tablesample", "sample"}
+        unsafe.update(row[0] for row in con.execute("""
+            SELECT DISTINCT function_name FROM duckdb_functions()
+            WHERE stability != 'CONSISTENT'
+               OR (function_type IN ('table', 'macro', 'table_macro') AND function_name != 'query')
+        """).fetchall())
+        # Stored database views can hide volatile SQL or dependencies outside our source registry.
+        external_views = con.execute("""
+            SELECT count(*) FROM duckdb_views() v JOIN duckdb_databases() d USING (database_name)
+            WHERE NOT v.internal AND d.path IS NOT NULL
+        """).fetchone()[0]
+        # Nested query() and file replacement scans can reach dependencies outside the registry.
+        indirect_source = re.search(r"\bquery\b|\.(?:csv|tsv|parquet|jsonl?|ndjson|xlsx|duckdb|db)\b", values_json, re.IGNORECASE)
+        if words & unsafe or external_views or indirect_source:
+            return profile_response(con, source, values, columns, column)
+        revision = []
+        try:
+            # ponytail: fingerprint every registered source; scope to dependencies if many sources make this costly.
+            for node in tuple(nodes.values()):
+                path = Path(node["source"])
+                for candidate in (path, Path(f"{path}.wal")):
+                    try:
+                        stat = candidate.stat()
+                    except FileNotFoundError:
+                        if candidate == path:
+                            return profile_response(con, source, values, columns, column)
+                        revision.append((str(candidate), None))
+                    else:
+                        revision.append((str(candidate), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        except OSError:
+            return profile_response(con, source, values, columns, column)
+        return cached_profile(con, source, values_json, tuple(columns), column, tuple(revision))
+
     @api.get("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/columns/{column}/stats")
     @serialized
@@ -1356,7 +1398,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
         source, values, _ = filtered_relation(table, columns, request or Query(page=1, page_size=100))
-        return profile_response(con, source, values, columns, column)
+        return profile(con, source, values, columns, column)
 
     @api.post("/api/nodes/{node_id}/sql/columns/{column}/stats")
     @serialized
@@ -1364,7 +1406,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         con = get_connection(node_id)
         sql, columns = sql_metadata(con, request)
         source, values, _ = filtered_relation("query(?)", columns, request)
-        return profile_response(con, source, [sql, *values], columns, column)
+        return profile(con, source, [sql, *values], columns, column)
 
     frontend = Path(__file__).parent.parent / "frontend" / "dist"
     if frontend.is_dir():

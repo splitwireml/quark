@@ -11,6 +11,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -1250,6 +1251,131 @@ def test_stats_invalid_filter_value_returns_422(tmp_path):
             "filters": [{"column": "value", "operator": ">", "value": "not-a-number"}],
         })
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("sql_mode", [False, True])
+def test_stats_cache_reuses_profiles_and_keys_row_selection(client, sql_mode):
+    node = upload(client, "cached.csv", b"group,value,other\na,1,10\na,2,20\nb,3,30\n")
+    base = f"/api/nodes/{node['id']}"
+    base += "/sql" if sql_mode else f"/datasets/{dataset(client, node, 'cached')['id']}"
+    body = {"sql": "SELECT * FROM cached"} if sql_mode else {}
+    url = base + "/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        first = client.post(url, json=body)
+        assert first.status_code == 200, first.text
+        repeat = client.post(url, json={**body, "page": 2, "page_size": 1, "sorts": [{"column": "value", "direction": "desc"}]})
+        assert repeat.json() == first.json()
+        if not sql_mode:
+            assert client.get(url).json() == first.json()
+        assert compute.call_count == 1
+        filtered = {**body, "filters": [{"column": "value", "operator": ">", "value": 1}]}
+        assert client.post(url, json=filtered).json()["row_count"] == 2
+        assert client.post(url, json=filtered).json()["row_count"] == 2
+        assert compute.call_count == 2
+        filtered["filters"][0]["value"] = 2
+        assert client.post(url, json=filtered).json()["row_count"] == 1
+        assert client.post(url, json={**body, "dedupe_columns": ["group"]}).json()["row_count"] == 2
+        assert client.post(base + "/columns/other/stats", json=body).json()["min"] == 10
+        assert compute.call_count == 5
+        if sql_mode:
+            changed = {"sql": "SELECT value * 10 AS value FROM cached"}
+            assert client.post(url, json=changed).json()["min"] == 10
+            assert compute.call_count == 6
+        assert client.post(url, json=body).json() == first.json()
+        assert client.post(base + "/columns/missing/stats", json=body).status_code == 404
+
+
+def test_stats_cache_refreshes_changed_files_and_separates_nodes(client, tmp_path):
+    node = upload(client, "cached.csv", b"value\n1\n2\n")
+    other = upload(client, "cached.csv", b"value\n9\n")
+    body = {"sql": "SELECT * FROM cached"}
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        assert client.post(url, json=body).json()["max"] == 2
+        assert client.post(url, json=body).json()["max"] == 2
+        assert client.post(f"/api/nodes/{other['id']}/sql/columns/value/stats", json=body).json()["max"] == 9
+        assert compute.call_count == 2
+        # Same length and schema: freshness must not depend on file size alone.
+        (tmp_path / "uploads" / f"{node['id']}.csv").write_bytes(b"value\n3\n4\n")
+        assert client.post(url, json=body).json()["max"] == 4
+        assert client.post(url, json=body).json()["max"] == 4
+        assert compute.call_count == 3
+        assert client.delete(f"/api/nodes/{node['id']}").status_code == 204
+        assert client.post(url, json=body).status_code == 404
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT random() AS value",
+    "SELECT current_timestamp AS value",
+    "SELECT * FROM cached USING SAMPLE 1 ROWS",
+    "SELECT * FROM query('SELECT ran' || 'dom() AS value')",
+])
+def test_stats_cache_bypasses_volatile_and_dynamic_sql(client, sql):
+    node = upload(client, "cached.csv", b"value\n1\n2\n")
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for _ in range(2):
+            response = client.post(url, json={"sql": sql})
+            assert response.status_code == 200, response.text
+        assert compute.call_count == 2
+
+
+@pytest.mark.parametrize("definition, sql", [
+    ("CREATE VIEW readings AS SELECT random() AS value", "SELECT * FROM readings"),
+    ("CREATE MACRO reading() AS random()", "SELECT reading() AS value"),
+])
+def test_stats_cache_bypasses_stored_views_and_macros(client, tmp_path, definition, sql):
+    db = tmp_path / "volatile.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute(definition)
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for _ in range(2):
+            response = client.post(url, json={"sql": sql})
+            assert response.status_code == 200, response.text
+        assert compute.call_count == 2
+
+
+def test_stats_cache_refreshes_rebuilt_project_workspace(client):
+    project = create_project(client, "Profiles")
+    project_upload(client, project, "cached.csv", b"value\n1\n2\n")
+    views_url = f"/api/projects/{project['id']}/views"
+    view = client.get(views_url).json()[0]
+    url = f"/api/nodes/{project['node_id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for _ in range(2):
+            assert client.post(url, json={"sql": view["sql"]}).json()["max"] == 2
+        assert compute.call_count == 1
+        project_upload(client, project, "another.csv", b"value\n9\n")
+        assert client.get(views_url).status_code == 200
+        assert client.post(url, json={"sql": view["sql"]}).json()["max"] == 2
+        assert compute.call_count == 2
+
+
+def test_stats_cache_bypasses_direct_file_scans(client, tmp_path):
+    node = upload(client, "cached.csv", b"value\n1\n")
+    external = tmp_path / "uploads" / "external.csv"
+    external.write_bytes(b"value\n2\n")
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    body = {"sql": f"SELECT * FROM '{external}'"}
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        assert client.post(url, json=body).json()["max"] == 2
+        external.write_bytes(b"value\n3\n")
+        assert client.post(url, json=body).json()["max"] == 3
+        assert compute.call_count == 2
+
+
+def test_stats_cache_evicts_least_recent_profile(client):
+    node = upload(client, "cached.csv", b"value\n1\n")
+    url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
+    with patch.object(backend_app, "profile_kind", wraps=backend_app.profile_kind) as compute:
+        for value in range(128):
+            assert client.post(url, json={"sql": f"SELECT {value} AS value"}).json()["min"] == value
+        assert compute.call_count == 128
+        for value in (0, 128, 0, 1):
+            assert client.post(url, json={"sql": f"SELECT {value} AS value"}).json()["min"] == value
+        assert compute.call_count == 130
 
 
 def test_join_workspace_same_node_composite_cardinality(client, tmp_path):
