@@ -26,6 +26,7 @@ A project is the top-level local tenant. Its sources share an isolated DuckDB ex
 - Attach path: opens an existing local `.duckdb`/`.db` file read-only.
 - Active nodes are persisted in a small JSON registry and reopened after restart when their source still exists.
 - Existing registries migrate into a default project without rewriting source metadata merely on startup.
+- Confirmed XLSX worksheets are imported into typed DuckDB tables once per backend connection. Paging and profiling read those tables rather than reparsing the workbook. The original upload remains unchanged; connection shutdown releases the imported tables, and restart imports them again.
 - “Running” means registered and connectable by this backend. Cross-process DuckDB connection discovery is not portable; no process scanning or remote SQL protocol is invented.
 
 ### Supported files
@@ -66,6 +67,10 @@ Filter operators:
 Every identifier is validated against DuckDB metadata and quoted. Values are bound parameters. Maximum page size: 1000.
 
 `POST /api/nodes/{node_id}/sql` accepts one read-only `SELECT` plus `page` and `page_size`, and returns the same paged row shape. Multiple statements and mutating/DDL commands are rejected with HTTP 422. Query-builder responses include their executable SQL equivalent so filters, sorts, and dedupe queries can be saved and re-run.
+
+Both query endpoints return an Arrow IPC stream when requested with `Accept: application/vnd.apache.arrow.stream`. JSON remains the default for other clients. Arrow schema metadata under `quark` contains the same response metadata, excluding `rows`, plus `json_columns`: fields whose cells preserve the existing JSON value semantics inside UTF-8 vectors. Ordinary numeric, boolean, text, and binary columns use native Arrow buffers. Dates, decimals, 128-bit integers, and nested values use the compatibility encoding. Errors remain JSON.
+
+The frontend requests Arrow for table pages, prefetches, and held-scroll snapshots. Its bounded page cache retains column buffers; rendering, copying, and editing read individual cells. Combining adjacent preview slices retains their buffers without expanding them into row objects. Scroll timing, cancellation, query-generation checks, and cache limits remain as specified below.
 
 ### Views and Versions
 - Every source table and every derived result is a View with Version 1.
@@ -111,7 +116,7 @@ For numeric columns returns type, row count, non-null count, null count/fraction
 - A 100k+ row CSV opens without sending the whole dataset to the browser.
 - Pagination, page size, repeated filters, and ordered multi-sort are executed server-side.
 - Scrolling virtualizes the whole dataset. Slow scans prefetch within the last 10% of a page; faster motion extends the lead using measured fetch latency, capped at two pages and two concurrent page requests. The cache retains the current page, only one previous page, and up to two forward pages.
-- Thumb dragging keeps retained rows moving without loading full pages. A 350 ms held pause fetches small viewport slices; release loads the landing page without resetting the scroll position. Retained placeholder values cannot be edited or selected. Query changes cancel stale requests, and failed visible pages offer Retry.
+- Thumb dragging keeps retained rows moving without loading full pages. A 60 ms held pause fetches small viewport slices; release loads the landing page without resetting the scroll position. Wheel and trackpad viewport reports are coalesced into the next animation frame, with velocity settling after 40 ms. Retained placeholder values cannot be edited or selected. Query changes cancel stale requests, and failed visible pages offer Retry.
 - Nullity gauges appear for every column.
 - Numeric stats and histogram load on demand.
 - Projects and their uploaded/attached sources survive backend restart; sources remain isolated to their project.

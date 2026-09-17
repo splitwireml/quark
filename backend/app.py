@@ -18,7 +18,9 @@ from typing import Any, Literal
 from xml.etree import ElementTree
 
 import duckdb
-from fastapi import FastAPI, File, HTTPException, Query as QueryParam, UploadFile
+import pyarrow as pa
+from fastapi import FastAPI, File, HTTPException, Query as QueryParam, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
@@ -28,6 +30,14 @@ from starlette.background import BackgroundTask
 
 SUPPORTED = {".csv", ".tsv", ".parquet", ".json", ".ndjson", ".jsonl", ".xlsx", ".duckdb", ".db"}
 NUMERIC = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "REAL", "DOUBLE", "DECIMAL")
+ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
+ARROW_NATIVE = {
+    "BOOLEAN": pa.bool_(), "TINYINT": pa.int8(), "SMALLINT": pa.int16(),
+    "INTEGER": pa.int32(), "BIGINT": pa.int64(), "UTINYINT": pa.uint8(),
+    "USMALLINT": pa.uint16(), "UINTEGER": pa.uint32(), "UBIGINT": pa.uint64(),
+    "FLOAT": pa.float32(), "REAL": pa.float32(), "DOUBLE": pa.float64(),
+    "VARCHAR": pa.string(), "BLOB": pa.binary(),
+}
 INTEGER = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT")
 TEXT = ("VARCHAR", "CHAR", "TEXT")
 DATE = ("DATE", "TIME", "TIMESTAMP")
@@ -386,10 +396,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         temporary.write_text(json.dumps(registered_nodes, indent=2))
         temporary.replace(registry_path)
 
-    def _xlsx_typed_view(
+    def _xlsx_table(
         con: duckdb.DuckDBPyConnection, source_sql: str, sheet_sql: str, name: str, schema: str | None = None,
     ) -> None:
-        """Keep Excel's styled date cells typed while safely coercing consistent text columns."""
+        """Import a worksheet once so paging never reparses Excel; preserve styled dates and text coercion."""
         typed_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}')"
         raw_expr = f"read_xlsx('{source_sql}', sheet = '{sheet_sql}', all_varchar = true)"
         declared = {item[0]: str(item[1]).upper() for item in con.execute(f"SELECT * FROM {typed_expr} LIMIT 0").description}
@@ -424,7 +434,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             else:
                 selects.append(cq)
         target = f"{quote(schema)}.{quote(name)}" if schema else quote(name)
-        con.execute(f"CREATE VIEW {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
+        # ponytail: one import per connection; share imports if workbook memory becomes limiting.
+        con.execute(f"CREATE TABLE {target} AS SELECT {', '.join(selects)} FROM {raw_expr}")
 
     def scan_expression(source: Path) -> str:
         source_sql = str(source).replace("'", "''")
@@ -449,7 +460,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             con.execute("INSTALL excel; LOAD excel")
             for sheet in node["sheets"] if "sheets" in node else workbook_sheets(source):
                 sheet_sql = sheet.replace("'", "''")
-                _xlsx_typed_view(con, source_sql, sheet_sql, sheet)
+                _xlsx_table(con, source_sql, sheet_sql, sheet)
         else:
             con.execute(
                 f"CREATE VIEW {quote(node.get('dataset_name', 'data'))} AS SELECT * FROM {scan_expression(source)}"
@@ -524,7 +535,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             )
         elif source.suffix.lower() == ".xlsx":
             con.execute("INSTALL excel; LOAD excel")
-            _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+            _xlsx_table(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
         else:
             con.execute(f"CREATE VIEW {target} AS SELECT * FROM {scan_expression(source)}")
         return target
@@ -582,7 +593,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     )
                 elif source.suffix.lower() == ".xlsx":
                     con.execute(f"CREATE SCHEMA {quote(schema)}")
-                    _xlsx_typed_view(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
+                    _xlsx_table(con, source_sql, item["name"].replace("'", "''"), item["name"], schema)
                 else:
                     target = mount_dataset(con, schema, node, item)
                 columns = [row[0] for row in source_con.execute(
@@ -696,7 +707,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         page_size: int,
         started: float,
         response_sql: str,
-    ) -> dict[str, Any]:
+        arrow: bool = False,
+    ) -> dict[str, Any] | Response:
         source = f"({sql}) AS result"
         total_rows = con.execute(f"SELECT count(*) FROM {source}", values).fetchone()[0]
         result = con.execute(
@@ -704,12 +716,28 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             values + [page_size, (page - 1) * page_size],
         )
         columns = [(item[0], str(item[1])) for item in result.description]
-        rows = [{name: safe(value) for (name, _), value in zip(columns, row)} for row in result.fetchall()]
+        if arrow:
+            if all(type_ in ARROW_NATIVE for _, type_ in columns):
+                table = result.to_arrow_table()
+                json_columns = []
+            else:
+                # Preserve the existing display/edit semantics for dates, decimals and nested values.
+                # ponytail: mixed exotic types use Python tuples; specialize if these pages become a bottleneck.
+                values_rows = result.fetchall()
+                json_columns = [name for name, type_ in columns if type_ not in ARROW_NATIVE]
+                table = pa.table({name: pa.array(
+                    [row[i] for row in values_rows] if type_ in ARROW_NATIVE else [
+                        json.dumps(jsonable_encoder(safe(row[i])), separators=(",", ":"))
+                        for row in values_rows
+                    ], type=ARROW_NATIVE.get(type_, pa.string())
+                ) for i, (name, type_) in enumerate(columns)})
+        else:
+            rows = [{name: safe(value) for (name, _), value in zip(columns, row)} for row in result.fetchall()]
         null_select = ", ".join(
             f"avg(CASE WHEN {quote(name)} IS NULL THEN 1.0 ELSE 0.0 END)" for name, _ in columns
         )
         fractions = con.execute(f"SELECT {null_select} FROM {source}", values).fetchone() if columns else []
-        return {
+        metadata = {
             "columns": [{
                 "name": name,
                 "type": type_,
@@ -717,7 +745,6 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 "profile_kind": profile_kind(type_),
                 "null_fraction": safe(fraction) or 0.0,
             } for (name, type_), fraction in zip(columns, fractions)],
-            "rows": rows,
             "page": page,
             "page_size": page_size,
             "total_rows": safe(total_rows),
@@ -725,6 +752,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             "sql": response_sql,
         }
+        if not arrow:
+            return {**metadata, "rows": rows}
+        metadata["json_columns"] = json_columns
+        table = table.replace_schema_metadata({b"quark": json.dumps(metadata, separators=(",", ":")).encode()})
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        return Response(sink.getvalue().to_pybytes(), media_type=ARROW_MEDIA_TYPE, headers={"Vary": "Accept"})
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -1113,7 +1148,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @api.post("/api/nodes/{node_id}/sql")
     @serialized
-    def sql_query(node_id: str, request: SQLQuery):
+    def sql_query(node_id: str, request: SQLQuery, http_request: Request):
         started = time.perf_counter()
         con = get_connection(node_id)
         sql, columns = sql_metadata(con, request)
@@ -1122,19 +1157,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             return query_response(
                 con, query_sql, [sql, *values], request.page, request.page_size, started,
                 display_sql if request.filters or request.sorts or request.dedupe_columns else sql,
+                ARROW_MEDIA_TYPE in http_request.headers.get("accept", ""),
             )
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid SQL query: {exc}") from exc
 
     @api.post("/api/nodes/{node_id}/datasets/{dataset}/query")
     @serialized
-    def query(node_id: str, dataset: str, request: Query):
+    def query(node_id: str, dataset: str, request: Query, http_request: Request):
         started = time.perf_counter()
         con = get_connection(node_id)
         table, columns = metadata(con, dataset)
         query_sql, values, display_sql = controlled_query(table, columns, request)
         try:
-            return query_response(con, query_sql, values, request.page, request.page_size, started, display_sql)
+            return query_response(con, query_sql, values, request.page, request.page_size, started, display_sql,
+                                  ARROW_MEDIA_TYPE in http_request.headers.get("accept", ""))
         except duckdb.Error as exc:
             raise HTTPException(422, f"Invalid filter value: {exc}") from exc
 

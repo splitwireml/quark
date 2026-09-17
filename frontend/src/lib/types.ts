@@ -1,3 +1,5 @@
+import type { TableRows } from './table-rows';
+
 export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=';
 export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
@@ -97,7 +99,7 @@ export interface QueryRequest {
 
 export interface QueryResponse {
   columns: ColumnInfo[];
-  rows: Record<string, unknown>[];
+  rows: TableRows;
   page: number;
   page_size: number;
   total_rows: AggregateCount;
