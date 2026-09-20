@@ -215,6 +215,40 @@ export interface ChartSpec {
   density?: boolean;
 }
 
+export interface DashboardChart {
+  id: string;
+  title: string;
+  spec: ChartSpec;
+}
+
+export interface DashboardPlacement {
+  id: string;
+  chartId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DashboardTab {
+  id: string;
+  name: string;
+  scrollTop: number;
+  placements: DashboardPlacement[];
+}
+
+export interface DashboardDataset {
+  datasetId: string;
+  activeTabId: string;
+  charts: DashboardChart[];
+  tabs: DashboardTab[];
+}
+
+export interface DashboardSelection {
+  chartId: string;
+  filters: FilterCondition[];
+}
+
 export interface ChartSuggestion {
   chart: ChartType;
   encodings: ChartEncodings;

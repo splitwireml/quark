@@ -29,8 +29,8 @@
     exportOpen: boolean;
     exportMenu?: Snippet;
     inert?: boolean;
-    canvasMode?: 'rows' | 'chart';
-    onCanvasMode?: (mode: 'rows' | 'chart') => void;
+    canvasMode?: 'rows' | 'chart' | 'dashboard';
+    onCanvasMode?: (mode: 'rows' | 'chart' | 'dashboard') => void;
     canChart?: boolean;
   };
   let {
@@ -65,6 +65,7 @@
       <div class="mode" role="group" aria-label="Canvas">
         <button type="button" class:on={canvasMode === 'rows'} aria-pressed={canvasMode === 'rows'} onclick={() => onCanvasMode('rows')}>Rows</button>
         <button type="button" class:on={canvasMode === 'chart'} aria-pressed={canvasMode === 'chart'} disabled={!canChart} onclick={() => onCanvasMode('chart')}>Chart</button>
+        <button type="button" class:on={canvasMode === 'dashboard'} aria-pressed={canvasMode === 'dashboard'} disabled={!canChart} onclick={() => onCanvasMode('dashboard')}>Dashboard</button>
       </div>
     {/if}
   </div>
