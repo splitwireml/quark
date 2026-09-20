@@ -3000,7 +3000,7 @@
   .table-card.recording::before { left: 0; }
   .table-card.recording::after { right: 0; }
   .table-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; padding: 40px; text-align: center; color: var(--muted); font-family: var(--font-ui); font-size: 13px; }
-  .loading-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255, 255, 255, 0.7); font-size: 12.5px; color: var(--muted); }
+  .loading-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; background: color-mix(in srgb, var(--surface) 72%, transparent); font-size: 12.5px; color: var(--muted); }
   .cell-edit-error { position: absolute; right: 10px; bottom: 10px; z-index: 7; max-width: min(460px, calc(100% - 20px)); padding: 8px 10px; border: 1px solid var(--error); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-popover); color: var(--error); font-size: 12px; }
   .banner { margin: 14px 20px; padding: 12px 14px; border-radius: var(--radius-lg); border: 1px solid var(--line); background: var(--surface-inset); font-size: 12.5px; color: var(--muted); }
   .banner strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 13px; }

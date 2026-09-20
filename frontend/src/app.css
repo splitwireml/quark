@@ -49,6 +49,18 @@
   --success: #12B981;
   --error: #FF5F57;
 
+  /* Frosted panels — the action wheel and its previews. These are a light lifted off the
+     surface behind them, so in a dark scheme they stay light and only lose most of their
+     strength; inverting them to black would sink the panel into the canvas instead. */
+  --glass-fill: rgb(255 255 255 / 52%);
+  --glass-fill-soft: rgb(255 255 255 / 30%);
+  --glass-tile: rgb(255 255 255 / 24%);
+  --glass-active: rgb(255 255 255 / 72%);
+  --glass-line: rgb(255 255 255 / 60%);
+  --glass-line-strong: rgb(255 255 255 / 90%);
+  --glass-fallback: rgb(243 247 253 / 96%);
+  --glass-scrim: rgb(28 42 65 / 10%);
+
   /* SQL syntax, held to the same 4.5:1 floor as the rest of the text */
   --code-keyword: #0B3FBF;
   --code-string: #1E6B45;
@@ -140,6 +152,16 @@
   --warning-fill: #C9832C;
   --success: #34D399;
   --error: #FF7A73;
+
+  /* Frosted panels */
+  --glass-fill: rgb(255 255 255 / 7%);
+  --glass-fill-soft: rgb(255 255 255 / 3%);
+  --glass-tile: rgb(255 255 255 / 6%);
+  --glass-active: rgb(255 255 255 / 16%);
+  --glass-line: rgb(255 255 255 / 14%);
+  --glass-line-strong: rgb(255 255 255 / 22%);
+  --glass-fallback: rgb(26 31 40 / 96%);
+  --glass-scrim: rgb(0 0 0 / 45%);
 
   /* SQL syntax */
   --code-keyword: #8EB5F5;

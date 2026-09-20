@@ -140,7 +140,7 @@
   .section-title span { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
   .section-title .picker-hint { color: var(--action-dark); }
   .derived-title { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
-  .source-number { float: right; margin: 5px; padding: 3px 7px; border-radius: 4px; background: var(--action); color: white; font: 12px var(--font-mono); }
+  .source-number { float: right; margin: 5px; padding: 3px 7px; border-radius: 4px; background: var(--action); color: var(--on-fill); font: 12px var(--font-mono); }
   .source-group { min-width: 0; margin-bottom: 8px; padding-left: 8px; border-left: 1px solid var(--line); border-radius: 0 var(--radius-md) var(--radius-md) 0; }
   .source-group.highlight { animation: source-sweep 900ms ease-out var(--stagger, 0ms) both; }
   .source-group.join-choice:not(.highlight) { animation: join-choice-sweep var(--cycle, 520ms) ease-in-out var(--stagger, 0ms) infinite; }

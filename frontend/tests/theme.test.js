@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { isThemePreference, readThemePreference, resolveScheme, themeStorageKey } from '../src/lib/theme.ts';
 
 test('an unknown or absent stored preference falls back to following the system', () => {
@@ -27,10 +28,20 @@ test('an explicit choice outranks the system, and system follows it', () => {
    tokens out of the stylesheet is what keeps a later colour tweak from quietly failing it. */
 const css = readFileSync(new URL('../src/app.css', import.meta.url), 'utf8');
 
-function tokensOf(selector) {
+function bodyOf(selector) {
   const block = css.slice(css.indexOf(selector) + selector.length);
-  const body = block.slice(0, block.indexOf('}'));
-  return Object.fromEntries([...body.matchAll(/(--[\w-]+):\s*(#[0-9A-Fa-f]{6})/g)].map(([, name, value]) => [name, value]));
+  return block.slice(0, block.indexOf('}'));
+}
+
+function tokensOf(selector) {
+  return Object.fromEntries([...bodyOf(selector).matchAll(/(--[\w-]+):\s*(#[0-9A-Fa-f]{6})/g)].map(([, name, value]) => [name, value]));
+}
+
+/* Every token whose value is a literal colour, hex or rgb() alike. A dark counterpart that
+   is simply missing is the quiet failure: the light value stays in place and nobody notices
+   until it is a white tile in a dark window. */
+function colourTokensOf(selector) {
+  return [...bodyOf(selector).matchAll(/(--[\w-]+):\s*(#[0-9A-Fa-f]{3,8}|rgba?\()/g)].map(([, name]) => name);
 }
 
 function channel(part) {
@@ -75,10 +86,30 @@ for (const [scheme, selector] of [['light', ':root {'], ['dark', ":root[data-the
   });
 }
 
-test('both schemes define the same token names', () => {
-  const light = Object.keys(tokensOf(':root {')).sort();
-  const dark = Object.keys(tokensOf(":root[data-theme='dark'] {")).sort();
-  assert.deepEqual(dark, light.filter((name) => !name.startsWith('--chart-series')));
+test('both schemes define the same colour tokens', () => {
+  /* --chart-* is written onto the root element at runtime from the palette, not from here. */
+  const light = colourTokensOf(':root {').filter((name) => !name.startsWith('--chart-')).sort();
+  const dark = colourTokensOf(":root[data-theme='dark'] {").sort();
+  assert.deepEqual(dark, light);
+});
+
+/* The reason a dark scheme leaks: a component states a colour of its own, and it is right in
+   exactly one scheme. `#fff` on a filled button was invisible to the first sweep here, which
+   only looked for six-digit hex, and it shipped a white label on a white chip. */
+test('no component hardcodes a light or dark colour', () => {
+  const offenders = [];
+  const files = execFileSync('git', ['ls-files', 'src'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' })
+    .split('\n')
+    .filter((name) => name.endsWith('.svelte'));
+  for (const file of files) {
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    source.split('\n').forEach((line, index) => {
+      if (!/(color|background|fill|stroke|border[\w-]*|box-shadow|outline)\s*:/.test(line)) return;
+      const literal = line.match(/#[0-9A-Fa-f]{3,8}\b|\brgba?\(\s*255[\s,]+255[\s,]+255|:\s*(white|black)\b/);
+      if (literal) offenders.push(`${file}:${index + 1}: ${literal[0].trim()}`);
+    });
+  }
+  assert.deepEqual(offenders, [], `hardcoded colours belong in app.css as tokens:\n${offenders.join('\n')}`);
 });
 
 /* The light palettes set their own visibility: some are deliberately soft, and Okabe-Ito is

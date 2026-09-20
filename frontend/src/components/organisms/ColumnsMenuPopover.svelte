@@ -353,7 +353,7 @@
   .box {
     display: inline-flex; align-items: center; justify-content: center; flex: none;
     width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph);
-    color: #fff; font-size: 8px;
+    color: var(--on-fill); font-size: 8px;
   }
   .visibility input:checked + .box { background: var(--action); border-color: var(--action); }
   .name { font-family: var(--font-mono); font-size: 11px; color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

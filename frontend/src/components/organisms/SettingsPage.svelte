@@ -43,7 +43,7 @@
   </fieldset>
   <fieldset class="chart-theme-setting"><legend>Chart colors</legend><p class="description">Choose one hue, a shade scale, or distinct hues for bars, boxes, and scatter marks.</p>
     <div class="options">{#each themes as theme (theme)}
-      <ChartThemeOption value={theme} selected={chartTheme === theme} onSelect={() => onChartTheme(theme)} />
+      <ChartThemeOption value={theme} {colorScheme} selected={chartTheme === theme} onSelect={() => onChartTheme(theme)} />
     {/each}</div>
     <div class="palette-heading"><strong>Palette</strong><span>Choose the colors used by this mode.</span></div>
     <div class="palette-options">{#each palettes as palette (palette.id)}

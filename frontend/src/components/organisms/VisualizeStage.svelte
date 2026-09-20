@@ -228,7 +228,7 @@
     font-size: 11px;
     color: var(--muted);
   }
-  .metric-chip.on { border-color: var(--ink-fill); background: var(--ink-fill); color: #fff; }
+  .metric-chip.on { border-color: var(--ink-fill); background: var(--ink-fill); color: var(--on-fill); }
   .metric-chip:hover:not(.on) { border-color: var(--faint); color: var(--ink); }
   .fields { display: flex; flex-direction: column; gap: 2px; }
   .field {
