@@ -46,6 +46,20 @@ ILLEGAL_XML = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff
 INVALID_SHEET_NAME = re.compile(r"[\\/*?:\[\]]")
 CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 EXCEL_TEXT_LIMIT = 32767
+BAR_LIMIT = 30
+BOX_GROUP_LIMIT = 12
+OUTLIER_LIMIT = 200
+SCATTER_LIMIT = 5000
+METRIC_SQL = {
+    "count": "count({column})",
+    "distinct": "count(DISTINCT {column})",
+    "min": "min({column})",
+    "max": "max({column})",
+    "sum": "sum({column})",
+    "avg": "avg({column})",
+    "median": "median({column})",
+    "stddev": "stddev_samp({column})",
+}
 
 
 class AttachRequest(BaseModel):
@@ -92,6 +106,34 @@ class SQLRequest(BaseModel):
 
 
 class SQLQuery(SQLRequest, Query):
+    pass
+
+
+class ChartEncodings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    x: str | None = None
+    y: str | None = None
+    category: str | None = None
+    value: str | None = None
+    group: str | None = None
+    size: str | None = None
+    color: str | None = None
+    pattern: str | None = None
+
+
+class ChartSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    chart: Literal["bar", "histogram", "box", "scatter", "line"]
+    encodings: ChartEncodings = ChartEncodings()
+    metric: Literal["count", "distinct", "min", "max", "sum", "avg", "median", "stddev"] | None = None
+    density: bool = False
+
+
+class VisualizeRequest(Query):
+    spec: ChartSpec
+
+
+class SqlVisualizeRequest(SQLRequest, VisualizeRequest):
     pass
 
 
@@ -1386,6 +1428,176 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "p25": safe(p25), "median": safe(median), "p75": safe(p75), "histogram": histogram,
         }
 
+    def visualize_response(
+        con: duckdb.DuckDBPyConnection,
+        source: str,
+        values: list[Any],
+        metadata_columns: list[tuple[str, str]],
+        spec: ChartSpec,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        columns = dict(metadata_columns)
+        if spec.chart == "bar":
+            column = spec.encodings.category
+            if not column or column not in columns:
+                raise HTTPException(422, "Bar requires a category encoding")
+            field = quote(column)
+            measure = spec.encodings.value
+            metric = spec.metric or ("avg" if measure else "count")
+            extra_filter = ""
+            if measure:
+                if measure not in columns:
+                    raise HTTPException(422, "Bar measure column was not found")
+                if metric != "count" and profile_kind(columns[measure]) != "numeric":
+                    raise HTTPException(422, "Bar measure requires a numeric column")
+                template = METRIC_SQL.get(metric, METRIC_SQL["avg"])
+                value_sql = template.format(column=quote(measure))
+                extra_filter = f" AND {quote(measure)} IS NOT NULL"
+                if metric != "count" and metric != "distinct":
+                    extra_filter += f" AND isfinite({quote(measure)}::DOUBLE)"
+            else:
+                value_sql = "count(*)"
+            rows = con.execute(f"""
+                SELECT {field} AS label, {value_sql} AS value, count(*) AS n
+                FROM {source} WHERE {field} IS NOT NULL{extra_filter}
+                GROUP BY 1 ORDER BY value DESC NULLS LAST, label
+                LIMIT {BAR_LIMIT}
+            """, values).fetchall()
+            shown = sum(n for _, _, n in rows)
+            non_null = con.execute(
+                f"SELECT count(*) FROM {source} WHERE {field} IS NOT NULL{extra_filter}",
+                values,
+            ).fetchone()[0]
+            return {
+                "chart": "bar",
+                "rows": [{"label": safe(label), "value": safe(value), "n": safe(n)} for label, value, n in rows],
+                "other_count": safe(non_null - shown),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        if spec.chart == "histogram":
+            column = spec.encodings.value
+            if not column or column not in columns:
+                raise HTTPException(422, "Histogram requires a value encoding")
+            if profile_kind(columns[column]) not in {"numeric", "date"}:
+                raise HTTPException(422, "Histogram requires a numeric or date column")
+            profile = profile_response(con, source, values, metadata_columns, column)
+            return {
+                "chart": "histogram",
+                "bins": profile["histogram"],
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        if spec.chart == "box":
+            column = spec.encodings.value
+            if not column or column not in columns:
+                raise HTTPException(422, "Box requires a value encoding")
+            if profile_kind(columns[column]) != "numeric":
+                raise HTTPException(422, "Box requires a numeric column")
+            group = spec.encodings.group
+            if group and group not in columns:
+                raise HTTPException(422, "Box group column was not found")
+            field = quote(column)
+            finite = f"{field} IS NOT NULL AND isfinite({field}::DOUBLE)"
+            if group:
+                grouped = quote(group)
+                ranked = con.execute(f"""
+                    SELECT {grouped} AS label, count(*) AS n
+                    FROM {source} WHERE {grouped} IS NOT NULL AND {finite}
+                    GROUP BY 1 ORDER BY n DESC, label
+                    LIMIT {BOX_GROUP_LIMIT}
+                """, values).fetchall()
+                labels = [row[0] for row in ranked]
+                if not labels:
+                    return {"chart": "box", "groups": [], "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+                placeholders = ", ".join("?" for _ in labels)
+                relation = f"(SELECT {grouped} AS label, {field} AS val FROM {source} WHERE {grouped} IN ({placeholders}) AND {finite})"
+                bound = [*values, *labels]
+            else:
+                relation = f"(SELECT 'all' AS label, {field} AS val FROM {source} WHERE {finite})"
+                bound = values
+            stats = con.execute(f"""
+                WITH base AS {relation},
+                summary AS (
+                    SELECT label,
+                           quantile_cont(val, 0.25) AS p25,
+                           quantile_cont(val, 0.5) AS median,
+                           quantile_cont(val, 0.75) AS p75,
+                           count(*) AS n
+                    FROM base GROUP BY 1
+                )
+                SELECT s.label, s.p25, s.median, s.p75, s.n,
+                       min(b.val) FILTER (WHERE b.val >= s.p25 - 1.5 * (s.p75 - s.p25)),
+                       max(b.val) FILTER (WHERE b.val <= s.p75 + 1.5 * (s.p75 - s.p25))
+                FROM base b JOIN summary s USING (label)
+                GROUP BY s.label, s.p25, s.median, s.p75, s.n
+                ORDER BY s.n DESC, s.label
+            """, bound).fetchall()
+            outliers_rows = con.execute(f"""
+                WITH base AS {relation},
+                summary AS (
+                    SELECT label,
+                           quantile_cont(val, 0.25) AS p25,
+                           quantile_cont(val, 0.75) AS p75
+                    FROM base GROUP BY 1
+                ),
+                whiskers AS (
+                    SELECT s.label,
+                           min(b.val) FILTER (WHERE b.val >= s.p25 - 1.5 * (s.p75 - s.p25)) AS whisker_low,
+                           max(b.val) FILTER (WHERE b.val <= s.p75 + 1.5 * (s.p75 - s.p25)) AS whisker_high
+                    FROM base b JOIN summary s USING (label)
+                    GROUP BY s.label
+                )
+                SELECT b.label, b.val
+                FROM base b JOIN whiskers w USING (label)
+                WHERE b.val < w.whisker_low OR b.val > w.whisker_high
+                QUALIFY row_number() OVER (PARTITION BY b.label ORDER BY b.val) <= {OUTLIER_LIMIT}
+            """, bound).fetchall()
+            outliers: dict[Any, list[Any]] = {}
+            for label, val in outliers_rows:
+                outliers.setdefault(label, []).append(safe(val))
+            groups = []
+            for label, p25, median, p75, n, whisker_low, whisker_high in stats:
+                groups.append({
+                    "label": "all" if not group else safe(label),
+                    "p25": safe(p25),
+                    "median": safe(median),
+                    "p75": safe(p75),
+                    "whisker_low": safe(whisker_low),
+                    "whisker_high": safe(whisker_high),
+                    "outliers": outliers.get(label, []),
+                    "count": safe(n),
+                })
+            return {
+                "chart": "box",
+                "groups": groups,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        if spec.chart == "scatter":
+            x_name, y_name = spec.encodings.x, spec.encodings.y
+            if not x_name or not y_name or x_name not in columns or y_name not in columns:
+                raise HTTPException(422, "Scatter requires x and y encodings")
+            x_field, y_field = quote(x_name), quote(y_name)
+            x_ok = f"{x_field} IS NOT NULL"
+            y_ok = f"{y_field} IS NOT NULL"
+            if profile_kind(columns[x_name]) == "numeric":
+                x_ok += f" AND isfinite({x_field}::DOUBLE)"
+            if profile_kind(columns[y_name]) == "numeric":
+                y_ok += f" AND isfinite({y_field}::DOUBLE)"
+            where = f"WHERE {x_ok} AND {y_ok}"
+            total_points = con.execute(f"SELECT count(*) FROM {source} {where}", values).fetchone()[0]
+            points = con.execute(f"""
+                SELECT {x_field} AS x, {y_field} AS y
+                FROM {source} {where}
+                ORDER BY random()
+                LIMIT {SCATTER_LIMIT}
+            """, values).fetchall()
+            return {
+                "chart": "scatter",
+                "points": [{"x": safe(x), "y": safe(y)} for x, y in points],
+                "total_points": safe(total_points),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        raise HTTPException(422, f"Chart type {spec.chart} is not available yet")
+
     @lru_cache(maxsize=128)
     def cached_profile(con, source, values_json, columns, column, revision):
         return profile_response(con, source, json.loads(values_json), columns, column)
@@ -1443,6 +1655,22 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         sql, columns = sql_metadata(con, request)
         source, values, _ = filtered_relation("query(?)", columns, request)
         return profile(con, source, [sql, *values], columns, column)
+
+    @api.post("/api/nodes/{node_id}/datasets/{dataset}/visualize")
+    @serialized
+    def visualize(node_id: str, dataset: str, request: VisualizeRequest):
+        con = get_connection(node_id)
+        table, columns = metadata(con, dataset)
+        source, values, _ = filtered_relation(table, columns, request)
+        return visualize_response(con, source, values, columns, request.spec)
+
+    @api.post("/api/nodes/{node_id}/sql/visualize")
+    @serialized
+    def sql_visualize(node_id: str, request: SqlVisualizeRequest):
+        con = get_connection(node_id)
+        sql, columns = sql_metadata(con, request)
+        source, values, _ = filtered_relation("query(?)", columns, request)
+        return visualize_response(con, source, [sql, *values], columns, request.spec)
 
     frontend = Path(__file__).parent.parent / "frontend" / "dist"
     if frontend.is_dir():

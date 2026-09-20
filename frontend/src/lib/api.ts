@@ -1,5 +1,5 @@
 import { ARROW_MEDIA_TYPE, decodeQueryResponse } from './table-rows';
-import type { BaseViewInfo, CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, ProjectSourceInfo, QueryRequest, QueryResponse, SourceSummary, SqlQueryRequest, WorkbookPreview } from './types';
+import type { BaseViewInfo, CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, ProjectSourceInfo, QueryRequest, QueryResponse, SourceSummary, SqlQueryRequest, SqlVisualizeRequest, VisualizeRequest, VisualizeResponse, WorkbookPreview } from './types';
 
 async function responseFor(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
@@ -109,6 +109,14 @@ export function getSqlColumnStats(nodeId: string, column: string, body: SqlQuery
 
 export function getColumnStats(nodeId: string, dataset: string, column: string, body: QueryRequest): Promise<ColumnStats> {
   return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/columns/${encodeURIComponent(column)}/stats`, json(body));
+}
+
+export function visualizeDataset(nodeId: string, dataset: string, body: VisualizeRequest): Promise<VisualizeResponse> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/datasets/${encodeURIComponent(dataset)}/visualize`, json(body));
+}
+
+export function visualizeSql(nodeId: string, body: SqlVisualizeRequest): Promise<VisualizeResponse> {
+  return request(`/api/nodes/${encodeURIComponent(nodeId)}/sql/visualize`, json(body));
 }
 
 export function getSqlCategoryValues(

@@ -70,6 +70,44 @@
   /* layout */
   --rail: 212px;
   --inspector: 368px;
+
+  /* charts: primary (workspace accent) */
+  --chart-mark: var(--action-tint-border);
+  --chart-mark-strong: var(--action);
+  --chart-mark-fill: var(--action-tint);
+  --chart-mark-ink: var(--action-dark);
+  --chart-series-1: #1155F5;
+  --chart-series-2: #3D7CFF;
+  --chart-series-3: #0B3FBF;
+  --chart-series-4: #7BA3FF;
+  --chart-series-5: #0A2F8C;
+  --chart-series-6: #C9DBFF;
+}
+
+html[data-chart-theme='monotone'] {
+  --chart-mark: #C5CDD8;
+  --chart-mark-strong: #1F2533;
+  --chart-mark-fill: #EEF1F5;
+  --chart-mark-ink: #1F2533;
+  --chart-series-1: #1F2533;
+  --chart-series-2: #515D6B;
+  --chart-series-3: #7D8C9E;
+  --chart-series-4: #A8B2BE;
+  --chart-series-5: #2B3444;
+  --chart-series-6: #D5DBE4;
+}
+
+html[data-chart-theme='rich'] {
+  --chart-mark: #8FB4FF;
+  --chart-mark-strong: #1B57D6;
+  --chart-mark-fill: #E8F0FF;
+  --chart-mark-ink: #0B3FBF;
+  --chart-series-1: #1155F5;
+  --chart-series-2: #0F9D8A;
+  --chart-series-3: #C45C16;
+  --chart-series-4: #6B4CE6;
+  --chart-series-5: #C43B5C;
+  --chart-series-6: #2A8F3A;
 }
 
 @media (max-width: 960px) {
@@ -189,25 +227,22 @@ button:disabled { cursor: not-allowed; }
 
 .menu-label {
   display: grid;
-  grid-template-columns: 0fr;
+  grid-template-columns: 0px 0fr;
   opacity: 0;
   transition: grid-template-columns 220ms cubic-bezier(0.32, 0.72, 0, 1), opacity 140ms ease;
 }
 .menu-label > span {
+  grid-column: 2;
   display: flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
-  padding-left: 0;
   overflow: hidden;
-  transition: padding-left 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 .menu-trigger:hover .menu-label,
 .menu-trigger:focus-visible .menu-label,
-details[open] > .menu-trigger .menu-label { grid-template-columns: 1fr; opacity: 1; }
-.menu-trigger:hover .menu-label > span,
-.menu-trigger:focus-visible .menu-label > span,
-details[open] > .menu-trigger .menu-label > span { padding-left: 6px; }
+.menu-trigger.active .menu-label,
+details[open] > .menu-trigger .menu-label { grid-template-columns: 6px 1fr; opacity: 1; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner {

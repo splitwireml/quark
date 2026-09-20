@@ -4,8 +4,14 @@
   import Icon from '../atoms/Icon.svelte';
   import ToolbarVisibilityOption from '../molecules/ToolbarVisibilityOption.svelte';
   import ActionMenuOption from '../molecules/ActionMenuOption.svelte';
-  import type { ActionMenuMode, ToolbarVisibility } from '../../lib/commands';
-  let { visibility, actionMenuMode, error, onActionMenuMode, onVisibility, onClose }: { visibility: ToolbarVisibility; actionMenuMode: ActionMenuMode; error: string; onActionMenuMode: (value: ActionMenuMode) => void; onVisibility: (value: ToolbarVisibility) => void; onClose: () => void } = $props();
+  import ChartThemeOption from '../molecules/ChartThemeOption.svelte';
+  import type { ActionMenuMode, ChartTheme, ToolbarVisibility } from '../../lib/commands';
+  let { visibility, actionMenuMode, chartTheme, error, onActionMenuMode, onVisibility, onChartTheme, onClose }: {
+    visibility: ToolbarVisibility; actionMenuMode: ActionMenuMode; chartTheme: ChartTheme; error: string;
+    onActionMenuMode: (value: ActionMenuMode) => void; onVisibility: (value: ToolbarVisibility) => void;
+    onChartTheme: (value: ChartTheme) => void; onClose: () => void;
+  } = $props();
+  const themes: ChartTheme[] = ['primary', 'monotone', 'rich'];
   let heading: HTMLHeadingElement;
   onMount(() => heading.focus());
   const choices: { value: ToolbarVisibility; title: string; detail: string }[] = [
@@ -21,6 +27,11 @@
   <fieldset><legend>Toolbar visibility</legend><p class="description">Choose how your tools fit into the View.</p>
     <div class="options">{#each choices as choice (choice.value)}
       <ToolbarVisibilityOption {...choice} selected={visibility === choice.value} onSelect={() => onVisibility(choice.value)} />
+    {/each}</div>
+  </fieldset>
+  <fieldset class="chart-theme-setting"><legend>Chart theme</legend><p class="description">Color for bars, boxes, and scatter marks. The table and chrome stay as they are.</p>
+    <div class="options">{#each themes as theme (theme)}
+      <ChartThemeOption value={theme} selected={chartTheme === theme} onSelect={() => onChartTheme(theme)} />
     {/each}</div>
   </fieldset>
   <fieldset class="action-menu-setting"><legend>Action menu</legend><p class="description">Choose what appears when you press ⌘A.</p>
@@ -47,7 +58,7 @@
   p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
   .description { margin-bottom: 20px; }
   .options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-  .action-menu-setting { margin-top: 30px; }
+  .chart-theme-setting, .action-menu-setting { margin-top: 30px; }
   .menu-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
   .keyboard-note { display: flex; align-items: center; gap: 18px; margin: 28px 0; padding: 18px 0; border-bottom: 1px solid var(--line); }
   .key { display: flex; gap: 4px; }
