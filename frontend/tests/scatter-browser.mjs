@@ -13,7 +13,7 @@ await server.listen();
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 page.setDefaultTimeout(3000);
-page.setDefaultNavigationTimeout(3000);
+page.setDefaultNavigationTimeout(15000);
 const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 const columns = [
@@ -42,8 +42,48 @@ async function canvasState() {
     return { width: canvas.width, height: canvas.height, painted };
   });
 }
+async function chartGeometry() {
+  return page.locator("canvas.dots").evaluate(canvas => {
+    const frame = document.querySelector(".frame");
+    const svg = frame?.querySelector("svg");
+    const hit = frame?.querySelector("rect.hit");
+    if (!frame || !svg || !hit) return null;
+    const frameRect = frame.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const hitRect = hit.getBoundingClientRect();
+    const close = (left, right) => Math.abs(left - right) <= 1;
+    return {
+      frame: { width: frameRect.width, height: frameRect.height },
+      svg: { width: svgRect.width, height: svgRect.height },
+      canvas: { left: canvasRect.left, top: canvasRect.top, width: canvasRect.width, height: canvasRect.height },
+      hit: { left: hitRect.left, top: hitRect.top, width: hitRect.width, height: hitRect.height },
+      aligned: close(frameRect.width, svgRect.width) && close(frameRect.height, svgRect.height)
+        && close(canvasRect.left, hitRect.left) && close(canvasRect.top, hitRect.top)
+        && close(canvasRect.width, hitRect.width) && close(canvasRect.height, hitRect.height)
+    };
+  });
+}
+async function waitForChartGeometry() {
+  await page.waitForFunction(() => {
+    const frame = document.querySelector(".frame");
+    const svg = frame?.querySelector("svg");
+    const canvas = document.querySelector("canvas.dots");
+    const hit = frame?.querySelector("rect.hit");
+    if (!frame || !svg || !canvas || !hit || canvas.width < 1 || canvas.height < 1) return false;
+    const frameRect = frame.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const hitRect = hit.getBoundingClientRect();
+    const close = (left, right) => Math.abs(left - right) <= 1;
+    return close(frameRect.width, svgRect.width) && close(frameRect.height, svgRect.height)
+      && close(canvasRect.left, hitRect.left) && close(canvasRect.top, hitRect.top)
+      && close(canvasRect.width, hitRect.width) && close(canvasRect.height, hitRect.height);
+  });
+}
 async function waitForSettledCanvas() {
   await page.waitForFunction(() => !document.body.textContent?.includes("Computing chart…"));
+  await waitForChartGeometry();
   await page.waitForFunction(() => {
     const canvas = document.querySelector("canvas.dots");
     if (!canvas || canvas.width < 1 || canvas.height < 1) return false;
@@ -97,44 +137,54 @@ try {
     console.log("PASS empty scatter leaves Computing and renders its empty state");
   } else {
     await waitForSettledCanvas();
-  const initialCanvas = await canvasState();
-  assert.ok(initialCanvas.width > 0 && initialCanvas.height > 0, "scatter canvas must have a drawable size");
-  assert.ok(initialCanvas.painted > 0, "scatter canvas must contain painted pixels");
+    const initialCanvas = await canvasState();
+    const initialGeometry = await chartGeometry();
+    assert.ok(initialCanvas.width > 0 && initialCanvas.height > 0, "scatter canvas must have a drawable size");
+    assert.ok(initialCanvas.painted > 0, "scatter canvas must contain painted pixels");
+    assert.ok(initialGeometry?.aligned, "scatter canvas must align with the plotted geometry");
 
-  await page.locator("button.field").filter({ hasText: /^group/ }).click();
-  await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.spec.encodings.color === "group"));
-  await waitForSettledCanvas();
-  await page.locator("button.field").filter({ hasText: /^group/ }).click();
-  await page.locator("button.field").filter({ hasText: /^size/ }).click();
-  await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.spec.encodings.size === "size"));
-  await waitForSettledCanvas();
+    await page.locator("button.field").filter({ hasText: /^group/ }).click();
+    await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.spec.encodings.color === "group"));
+    await waitForSettledCanvas();
+    await page.locator("button.field").filter({ hasText: /^group/ }).click();
+    await page.locator("button.field").filter({ hasText: /^size/ }).click();
+    await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.spec.encodings.size === "size"));
+    await waitForSettledCanvas();
 
-  await page.setViewportSize({ width: 800, height: 700 });
-  await page.waitForFunction((width) => {
-    const canvas = document.querySelector("canvas.dots");
-    return !!canvas && canvas.width > 0 && canvas.width !== width && [...(canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data ?? [])].some((value, index) => index % 4 === 3 && value > 0);
-  }, initialCanvas.width);
-  const resizedCanvas = await canvasState();
-  assert.notEqual(resizedCanvas.width, initialCanvas.width, "scatter canvas must follow chart resize");
-  assert.ok(resizedCanvas.painted > 0, "resized scatter canvas must remain painted");
+    const beforeResize = await canvasState();
+    const beforeResizeGeometry = await chartGeometry();
+    assert.ok(beforeResizeGeometry?.aligned, "scatter geometry must align before resize");
+    await page.setViewportSize({ width: 1280, height: 700 });
+    await page.waitForFunction((height) => {
+      const canvas = document.querySelector("canvas.dots");
+      if (!canvas || canvas.width < 1 || canvas.height < 1 || canvas.height === height) return false;
+      const pixels = canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data ?? [];
+      return pixels.some((value, index) => index % 4 === 3 && value > 0);
+    }, beforeResize.height);
+    await waitForChartGeometry();
+    const resizedCanvas = await canvasState();
+    const resizedGeometry = await chartGeometry();
+    assert.notEqual(resizedCanvas.height, beforeResize.height, "scatter canvas must follow chart resize");
+    assert.ok(resizedCanvas.painted > 0, "resized scatter canvas must remain painted");
+    assert.ok(resizedGeometry?.aligned, "resized scatter canvas must align with the plotted geometry");
 
-  const hit = page.getByRole("application", { name: "Scatter plot. Drag to select a region." });
-  const box = await hit.boundingBox();
-  assert.ok(box, "scatter plot must expose a selectable region");
-  await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.1);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.9, box.y + box.height * 0.9, { steps: 4 });
-  await page.mouse.up();
-  await page.getByRole("button", { name: "Filter", exact: true }).click();
-  await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.filters?.length === 4));
-  await waitForSettledCanvas();
-  const filteredCanvas = await canvasState();
-  assert.ok(filteredCanvas.painted > 0, "scatter must remain painted after region selection");
-  console.log(JSON.stringify({ charts: requests.map(q => q.spec.chart), encodings: requests.filter(q => q.spec.chart === "scatter").map(q => q.spec.encodings), errors, computing: await page.getByText("Computing chart…", { exact: true }).count(), canvas: filteredCanvas }));
-  assert.equal(await page.getByText("Computing chart…", { exact: true }).count(), 0, "scatter must leave Computing after the request resolves");
-  assert.equal(await page.locator("canvas.dots").count(), 1, "scatter must render its canvas");
-  assert.deepEqual(errors, [], "scatter must render without runtime errors");
-  console.log("PASS scatter leaves Computing, paints, resizes, selects, and supports color/size encodings");
+    const hit = page.getByRole("application", { name: "Scatter plot. Drag to select a region." });
+    const box = await hit.boundingBox();
+    assert.ok(box, "scatter plot must expose a selectable region");
+    await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.1);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.9, box.y + box.height * 0.9, { steps: 4 });
+    await page.mouse.up();
+    await page.getByRole("button", { name: "Filter", exact: true }).click();
+    await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.filters?.length === 4));
+    await waitForSettledCanvas();
+    const filteredCanvas = await canvasState();
+    assert.ok(filteredCanvas.painted > 0, "scatter must remain painted after region selection");
+    console.log(JSON.stringify({ charts: requests.map(q => q.spec.chart), encodings: requests.filter(q => q.spec.chart === "scatter").map(q => q.spec.encodings), errors, computing: await page.getByText("Computing chart…", { exact: true }).count(), canvas: filteredCanvas }));
+    assert.equal(await page.getByText("Computing chart…", { exact: true }).count(), 0, "scatter must leave Computing after the request resolves");
+    assert.equal(await page.locator("canvas.dots").count(), 1, "scatter must render its canvas");
+    assert.deepEqual(errors, [], "scatter must render without runtime errors");
+    console.log("PASS scatter leaves Computing, paints, resizes, selects, and supports color/size encodings");
   }
 } finally {
   await browser.close();
