@@ -16,6 +16,8 @@
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
   import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartSpec, ChartType, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
+  import { editorHighlight, editorTheme } from './lib/editorTheme';
+  import { readThemePreference, resolveScheme, themeStorageKey, type ColorScheme, type ThemePreference } from './lib/theme';
   import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, chartThemeStorageKey, type ActionMenuMode, type ChartTheme, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
   import CommandHint from './components/molecules/CommandHint.svelte';
   import CommandDialog from './components/organisms/CommandDialog.svelte';
@@ -262,6 +264,9 @@
   let editorView: EditorView | null = null;
   let queryMenuOpen = $state<'columns' | 'joins' | 'aggregate' | 'dedupe' | null>(null);
 
+  let themePreference = $state<ThemePreference>('system');
+  let colorScheme = $state<ColorScheme>('light');
+  let darkQuery: MediaQueryList | undefined;
   let toolbarVisibility = $state<ToolbarVisibility>('show');
   let actionMenuMode = $state<ActionMenuMode>('simple');
   let chartTheme = $state(defaultChartThemePreferences.mode);
@@ -294,6 +299,24 @@
   let historyBusy = $state(false);
 
 
+  /* The scheme is applied by the resolved preference rather than by a bare media query, so
+     an explicit Light or Dark keeps winning when the operating system changes under it. */
+  function applyColorScheme() {
+    colorScheme = resolveScheme(themePreference, darkQuery?.matches ?? false);
+    document.documentElement.dataset.theme = colorScheme;
+    applyChartThemeColors();
+  }
+  function setThemePreference(value: ThemePreference) {
+    themePreference = value;
+    /* One authored moment: the workspace already on screen crossfades into the other
+       scheme instead of blinking. Browsers without view transitions, and anyone who asked
+       for less motion, get the switch immediately. */
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!reduced && typeof document.startViewTransition === 'function') document.startViewTransition(() => applyColorScheme());
+    else applyColorScheme();
+    try { localStorage.setItem(themeStorageKey, value); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
   function setToolbarVisibility(value: ToolbarVisibility) {
     toolbarVisibility = value;
     try { localStorage.setItem(toolbarStorageKey, value); settingsError = ''; }
@@ -311,7 +334,7 @@
     root.dataset.chartTheme = legacyTheme;
     root.dataset.chartMode = chartTheme;
     root.dataset.chartPalette = chartPalettes[chartTheme];
-    for (const [name, value] of Object.entries(chartThemeCssVariables(preferences))) root.style.setProperty(name, value);
+    for (const [name, value] of Object.entries(chartThemeCssVariables(preferences, colorScheme))) root.style.setProperty(name, value);
   }
   function persistChartThemePreferences() {
     const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
@@ -457,6 +480,7 @@
   function clearSequenceOnEdit(event: FocusEvent) { if (isEditableElement(event.target as Element)) clearCommandSequence(); }
   onMount(() => {
     try {
+      themePreference = readThemePreference(localStorage.getItem(themeStorageKey));
       const value = localStorage.getItem(toolbarStorageKey); if (value === 'show' || value === 'hover' || value === 'hide') toolbarVisibility = value;
       const menu = localStorage.getItem(actionMenuStorageKey); if (menu === 'simple' || menu === 'comprehensive') actionMenuMode = menu;
       const chartPreferences = readChartThemePreferences(localStorage.getItem(chartThemeStorageKey));
@@ -464,12 +488,14 @@
       chartPalettes = { ...chartPreferences.palettes };
     }
     catch { settingsError = 'Preferences are unavailable in this browser.'; }
-    applyChartThemeColors();
+    darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    darkQuery.addEventListener('change', applyColorScheme);
+    applyColorScheme();
     window.addEventListener('keydown', captureCommands, true);
     window.addEventListener('blur', clearCommandSequence);
     window.addEventListener('focusin', clearSequenceOnEdit);
     window.addEventListener('pointerdown', clearCommandSequence);
-    return () => { window.removeEventListener('keydown', captureCommands, true); window.removeEventListener('blur', clearCommandSequence); window.removeEventListener('focusin', clearSequenceOnEdit); window.removeEventListener('pointerdown', clearCommandSequence); clearCommandSequence(); cellSearchRequest?.abort(); };
+    return () => { darkQuery?.removeEventListener('change', applyColorScheme); window.removeEventListener('keydown', captureCommands, true); window.removeEventListener('blur', clearCommandSequence); window.removeEventListener('focusin', clearSequenceOnEdit); window.removeEventListener('pointerdown', clearCommandSequence); clearCommandSequence(); cellSearchRequest?.abort(); };
   });
   function resetCellSearch() { cellSearchRequest?.abort(); cellSearching = false; cellMatch = null; cellSearchNotice = ''; }
   async function findCellValue(direction: 'next' | 'previous') {
@@ -1416,6 +1442,8 @@
           return true;
         } }]),
         basicSetup,
+        editorTheme,
+        editorHighlight,
         sql(sqlConfig),
         autocompletion({ override: [guardCompletion(schemaCompletionSource(sqlConfig)), guardCompletion(keywordCompletionSource(StandardSQL, true))] }),
         EditorView.lineWrapping,
@@ -2693,7 +2721,7 @@
 
   {#snippet main()}
     <main>
-      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} {chartTheme} chartPalette={chartPalette} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onChartTheme={setChartTheme} onChartPalette={setChartPalette} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
+      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} {chartTheme} {themePreference} {colorScheme} onThemePreference={setThemePreference} chartPalette={chartPalette} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onChartTheme={setChartTheme} onChartPalette={setChartPalette} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
       <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
         <WelcomeScreen

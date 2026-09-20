@@ -48,7 +48,17 @@
   --warning-fill: #E8A13A;
   --success: #12B981;
   --error: #FF5F57;
+
+  /* SQL syntax, held to the same 4.5:1 floor as the rest of the text */
+  --code-keyword: #0B3FBF;
+  --code-string: #1E6B45;
+  --code-number: #A64716;
+  --code-name: #1F2533;
+  --code-comment: #616E80;
+
   --ink-fill: #1F2533;
+  --ink-fill-hover: #2B3444;
+  --on-fill: #FFFFFF;
 
   /* type */
   --font-ui: 'IBM Plex Sans', system-ui, sans-serif;
@@ -88,6 +98,65 @@
   --chart-series-4-fill: #C9DBFF;
   --chart-series-5-fill: #C9DBFF;
   --chart-series-6-fill: #C9DBFF;
+}
+
+/* Dark scheme. Same token names, same contract: three text levels that each clear 4.5:1 on
+   every surface below, glyphs at 3:1, and no fourth grey — recession comes from size and
+   weight here exactly as it does in the light scheme. Applied by the resolved preference
+   (system / light / dark), never by a bare media query, so the explicit choice always wins. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* surfaces */
+  --canvas: #101319;
+  --surface: #191E27;
+  --surface-2: #161A22;
+  --surface-3: #13171E;
+  --surface-inset: #151920;
+  --surface-hover: #222834;
+
+  /* lines */
+  --line: #272E3A;
+  --line-soft: #232935;
+  --line-soft-2: #1E2430;
+  --line-strong: #343D4B;
+  --control-border: #3A4451;
+
+  /* text */
+  --ink: #E9EDF3;
+  --ink-2: #D5DCE6;
+  --muted: #A6B2C1;
+  --faint: #93A0B1;
+  /* non-text */
+  --glyph: #78879A;
+  --disabled: #5C6776;
+
+  /* accent + status */
+  --action: #5C8DFF;
+  --action-dark: #A6C2FF;
+  --action-tint: #17233C;
+  --action-tint-border: #2F4A80;
+  --warning: #E3A24B;
+  --warning-fill: #C9832C;
+  --success: #34D399;
+  --error: #FF7A73;
+
+  /* SQL syntax */
+  --code-keyword: #8EB5F5;
+  --code-string: #7CC096;
+  --code-number: #E09763;
+  --code-name: #E9EDF3;
+  --code-comment: #93A0B1;
+
+  --ink-fill: #E9EDF3;
+  --ink-fill-hover: #FFFFFF;
+  --on-fill: #101319;
+
+  /* shadows: a dark surface cannot be lifted by a darker shadow alone, so the panel
+     shadows deepen and the popovers carry a hairline of their own. */
+  --shadow-popover: 0 18px 40px -12px rgba(0, 0, 0, 0.66), 0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-popover-wide: 0 20px 44px -14px rgba(0, 0, 0, 0.7), 0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-panel: 0 24px 52px -16px rgba(0, 0, 0, 0.74), 0 2px 6px rgba(0, 0, 0, 0.44);
 }
 
 html[data-chart-theme='monotone'] {
@@ -272,6 +341,17 @@ details[open] > .menu-trigger .menu-label { grid-template-columns: 6px 1fr; opac
   animation: spin 0.7s linear infinite;
 }
 
+/* Switching scheme crossfades the workspace already on screen rather than blanking it.
+   One short moment, and nothing waits on it. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 180ms;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  /* the view-transition pseudo-elements are not descendants of the page, so the rule
+     above never reaches them */
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
 }

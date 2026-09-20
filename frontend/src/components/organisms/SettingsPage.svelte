@@ -5,12 +5,16 @@
   import ToolbarVisibilityOption from '../molecules/ToolbarVisibilityOption.svelte';
   import ActionMenuOption from '../molecules/ActionMenuOption.svelte';
   import ChartThemeOption from '../molecules/ChartThemeOption.svelte';
+  import ThemeOption from '../molecules/ThemeOption.svelte';
   import ChartPaletteOption from '../molecules/ChartPaletteOption.svelte';
   import { paletteOptions, type ChartPalette, type ChartTheme } from '../../lib/chartThemes';
+  import { themePreferences, type ColorScheme, type ThemePreference } from '../../lib/theme';
   import type { ActionMenuMode, ToolbarVisibility } from '../../lib/commands';
-  let { visibility, actionMenuMode, chartTheme, chartPalette, error, onActionMenuMode, onVisibility, onChartTheme, onChartPalette, onClose }: {
-    visibility: ToolbarVisibility; actionMenuMode: ActionMenuMode; chartTheme: ChartTheme; chartPalette: ChartPalette; error: string;
+  let { visibility, actionMenuMode, chartTheme, chartPalette, themePreference, colorScheme, error, onActionMenuMode, onVisibility, onThemePreference, onChartTheme, onChartPalette, onClose }: {
+    visibility: ToolbarVisibility; actionMenuMode: ActionMenuMode; chartTheme: ChartTheme; chartPalette: ChartPalette;
+    themePreference: ThemePreference; colorScheme: ColorScheme; error: string;
     onActionMenuMode: (value: ActionMenuMode) => void; onVisibility: (value: ToolbarVisibility) => void;
+    onThemePreference: (value: ThemePreference) => void;
     onChartTheme: (value: ChartTheme) => void; onChartPalette: (value: ChartPalette) => void; onClose: () => void;
   } = $props();
   const themes: ChartTheme[] = ['single', 'monotone', 'multicolor'];
@@ -27,7 +31,12 @@
   <header><Button variant="ghost" onclick={onClose}>← Back to View</Button><span>Workspace preferences</span></header>
   <div class="heading"><h1 bind:this={heading} tabindex="-1">Settings</h1><p>Choose how your workspace looks and behaves.</p></div>
   <h2><Icon name="grid" size={15} />Appearance</h2>
-  <fieldset><legend>Toolbar visibility</legend><p class="description">Choose how your tools fit into the View.</p>
+  <fieldset class="theme-setting"><legend>Color scheme</legend><p class="description">Match this computer, or hold one scheme whatever the system does.</p>
+    <div class="options">{#each themePreferences as preference (preference)}
+      <ThemeOption value={preference} selected={themePreference === preference} onSelect={() => onThemePreference(preference)} />
+    {/each}</div>
+  </fieldset>
+  <fieldset class="toolbar-setting"><legend>Toolbar visibility</legend><p class="description">Choose how your tools fit into the View.</p>
     <div class="options">{#each choices as choice (choice.value)}
       <ToolbarVisibilityOption {...choice} selected={visibility === choice.value} onSelect={() => onVisibility(choice.value)} />
     {/each}</div>
@@ -38,7 +47,7 @@
     {/each}</div>
     <div class="palette-heading"><strong>Palette</strong><span>Choose the colors used by this mode.</span></div>
     <div class="palette-options">{#each palettes as palette (palette.id)}
-      <ChartPaletteOption {palette} selected={chartPalette === palette.id} onSelect={() => onChartPalette(palette.id)} />
+      <ChartPaletteOption {palette} {colorScheme} selected={chartPalette === palette.id} onSelect={() => onChartPalette(palette.id)} />
     {/each}</div>
   </fieldset>
   <fieldset class="action-menu-setting"><legend>Action menu</legend><p class="description">Choose what appears when you press ⌘A.</p>
@@ -65,7 +74,7 @@
   p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
   .description { margin-bottom: 20px; }
   .options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-  .chart-theme-setting, .action-menu-setting { margin-top: 30px; }
+  .toolbar-setting, .chart-theme-setting, .action-menu-setting { margin-top: 30px; }
   .palette-heading { display: flex; align-items: baseline; gap: 10px; margin: 24px 0 12px; }
   .palette-heading strong { font-size: 13px; font-weight: 500; color: var(--ink); }
   .palette-heading span { font-size: 12px; color: var(--muted); }

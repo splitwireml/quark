@@ -12,7 +12,7 @@
 </script>
 
 <PreferenceOption name="chart-theme" {value} title={copy[value].title} detail={copy[value].detail} {selected} {onSelect} previewHeight={112}>
-  <div class="preview" data-theme={value} aria-hidden="true">
+  <div class="preview" data-chart-theme={value} aria-hidden="true">
     <svg viewBox="0 0 160 72">
       {#if value === 'multicolor'}
         <circle class="s1" cx="28" cy="28" r="4.5" />
@@ -41,14 +41,28 @@
 <style>
   .preview { height: 100%; display: grid; place-items: center; padding: 12px 16px 0; }
   svg { width: 100%; max-width: 168px; height: 72px; }
-  .preview[data-theme='single'] .bar, .preview[data-theme='single'] .dot { fill: #C9DBFF; }
-  .preview[data-theme='single'] .strong { fill: #1155F5; }
-  .preview[data-theme='monotone'] .bar, .preview[data-theme='monotone'] .dot { fill: #C5CDD8; }
-  .preview[data-theme='monotone'] .strong { fill: #1F2533; }
+  .preview[data-chart-theme='single'] .bar, .preview[data-chart-theme='single'] .dot { fill: #C9DBFF; }
+  .preview[data-chart-theme='single'] .strong { fill: #1155F5; }
+  .preview[data-chart-theme='monotone'] .bar, .preview[data-chart-theme='monotone'] .dot { fill: #C5CDD8; }
+  .preview[data-chart-theme='monotone'] .strong { fill: #1F2533; }
   .s1 { fill: #1155F5; }
   .s2 { fill: #0F9D8A; }
   .s3 { fill: #C45C16; }
   .s4 { fill: #6B4CE6; }
   .s5 { fill: #C43B5C; }
   .s6 { fill: #2A8F3A; }
+  /* The preview illustrates the mode, so it carries the default palette of whichever
+     scheme is on screen rather than the tokens of the surface it sits on. */
+  :global(html[data-theme='dark']) .preview[data-chart-theme='single'] .bar,
+  :global(html[data-theme='dark']) .preview[data-chart-theme='single'] .dot { fill: #37538F; }
+  :global(html[data-theme='dark']) .preview[data-chart-theme='single'] .strong { fill: #5C8DFF; }
+  :global(html[data-theme='dark']) .preview[data-chart-theme='monotone'] .bar,
+  :global(html[data-theme='dark']) .preview[data-chart-theme='monotone'] .dot { fill: #4A5462; }
+  :global(html[data-theme='dark']) .preview[data-chart-theme='monotone'] .strong { fill: #E9EDF3; }
+  :global(html[data-theme='dark']) .s1 { fill: #6E9BFF; }
+  :global(html[data-theme='dark']) .s2 { fill: #33C4AC; }
+  :global(html[data-theme='dark']) .s3 { fill: #F0913F; }
+  :global(html[data-theme='dark']) .s4 { fill: #A98BFF; }
+  :global(html[data-theme='dark']) .s5 { fill: #F0718F; }
+  :global(html[data-theme='dark']) .s6 { fill: #4FC461; }
 </style>

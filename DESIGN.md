@@ -17,9 +17,10 @@ A data analyst works in daylight on a laptop, scanning thousands of values for a
 - Default UI text: 12.5–14 px. Dense metadata: 9–11px. Page title: 22px.
 - Use weight and spacing before adding more colors.
 - Text has exactly three levels — ink, muted, faint — and each clears 4.5:1 on
-  every surface listed above. A light UI has room for about three AA-passing
-  greys; anything meant to recede further does so through size, weight, or the
-  mono face, never a fourth lighter grey.
+  every surface listed above, in both schemes. A UI has room for about three
+  AA-passing greys; anything meant to recede further does so through size,
+  weight, or the mono face, never a fourth grey. `tests/theme.test.js` parses
+  the tokens out of `app.css` and holds both schemes to this.
 
 ## Color tokens
 
@@ -39,6 +40,19 @@ A data analyst works in daylight on a laptop, scanning thousands of values for a
 - Success (connection, timing): `#12B981`
 - Error: `#FF5F57`
 - Dark fill (primary buttons): `#1F2533`
+
+## Dark scheme
+
+- The product ships both schemes. The preference is **Match system / Light / Dark**, stored under `quark.color-scheme` and resolved in `index.html` before first paint so a chosen dark never opens as a white window. `Match system` follows `prefers-color-scheme` live; an explicit choice outranks the system for good.
+- Dark redefines the same token names under `:root[data-theme='dark']` — no scheme-specific component CSS, and no second set of names to keep in step.
+- Canvas: `#101319`; Surface: `#191E27`; toolbar/titlebar: `#161A22`; rail: `#13171E`; inset panels: `#151920`; hover: `#222834`.
+- Ink: `#E9EDF3`; secondary: `#D5DCE6`; muted: `#A6B2C1`; faint: `#93A0B1`; glyph: `#78879A`; disabled: `#5C6776`.
+- Rule: `#272E3A`; strong rule: `#343D4B`; control border: `#3A4451`.
+- Action: `#5C8DFF`; action light (text on tint): `#A6C2FF`; action tint: `#17233C`; warning: `#E3A24B`; success: `#34D399`; error: `#FF7A73`.
+- Filled buttons invert: `--ink-fill` is light and `--on-fill` is dark, so a primary button stays the highest-contrast control in either scheme.
+- Charts keep their palette identity across schemes and change only lightness: every palette carries a `dark` counterpart in `chartThemes.ts`, and the resolved scheme picks one. The test asserts each dark colour stands off the dark surface at least as well as its light original does off white.
+- SQL syntax is themed from the same tokens (`--code-keyword`, `--code-string`, `--code-number`, `--code-name`, `--code-comment`); CodeMirror's own light colours are never used.
+- Switching scheme crossfades the workspace through a 180ms view transition rather than blanking it, and switches instantly under `prefers-reduced-motion`.
 
 ## Geometry and rhythm
 
