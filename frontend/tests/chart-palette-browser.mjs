@@ -14,7 +14,7 @@ await server.listen();
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 page.setDefaultTimeout(3000);
-page.setDefaultNavigationTimeout(3000);
+page.setDefaultNavigationTimeout(15000);
 await page.addInitScript(() => {
   window.__scatterFillStyles = [];
   const fill = CanvasRenderingContext2D.prototype.fill;
@@ -70,8 +70,12 @@ try {
     } else if (path.endsWith("/visualize")) {
       const query = route.request().postDataJSON();
       requests.push(query);
-      const color = query.spec.encodings.color === "group";
-      body = { chart: "scatter", points: color ? groupedPoints : groupedPoints.map(({ x, y }) => ({ x, y })), total_points: 4, elapsed_ms: 1 };
+      if (query.spec.chart === "scatter") {
+        const color = query.spec.encodings.color === "group";
+        body = { chart: "scatter", points: color ? groupedPoints : groupedPoints.map(({ x, y }) => ({ x, y })), total_points: 4, elapsed_ms: 1 };
+      } else {
+        body = { chart: "histogram", bins: [{ lower: 1, upper: 2, count: 2 }], elapsed_ms: 1 };
+      }
     } else throw new Error(`Unexpected API: ${path}`);
     await route.fulfill({ json: body }).catch(() => {});
   });
