@@ -765,7 +765,7 @@
     if (!spec || !selectedDataset) return;
     const clean = name.trim().slice(0, 40);
     if (!clean) return;
-    updateCurrentDashboard((document) => {
+    const next = updateCurrentDashboard((document) => {
       let tab = document.tabs.find((item) => item.name === clean);
       if (!tab) tab = { id: crypto.randomUUID(), name: clean, scrollTop: 0, placements: [] };
       const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec));
@@ -784,12 +784,28 @@
           : [...document.tabs, { ...tab, placements: [placement] }]
       };
     });
+    if (next && canvasMode === 'dashboard') void loadDashboardCharts();
   }
 
-  function placeDashboardChart(chartId: string, rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
-    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({
-      ...tab, placements: [...tab.placements, clampPlacement({ ...rect, id: crypto.randomUUID(), chartId })]
-    })));
+  function placeCurrentChart(rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
+    const spec = visualizeSpec;
+    if (!spec || !selectedDataset) return;
+    const next = updateCurrentDashboard((document) => {
+      let tab = document.tabs.find((item) => item.id === document.activeTabId);
+      if (!tab) tab = { id: crypto.randomUUID(), name: 'Dashboard', scrollTop: 0, placements: [] };
+      const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec));
+      const chart = saved ?? { id: crypto.randomUUID(), title: chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
+      const placement = clampPlacement({ ...rect, id: crypto.randomUUID(), chartId: chart.id });
+      return {
+        ...document,
+        activeTabId: tab.id,
+        charts: saved ? document.charts : [...document.charts, chart],
+        tabs: document.tabs.some((item) => item.id === tab!.id)
+          ? document.tabs.map((item) => item.id === tab!.id ? { ...item, placements: [...item.placements, placement] } : item)
+          : [...document.tabs, { ...tab, placements: [placement] }]
+      };
+    });
+    if (next) void loadDashboardCharts();
   }
 
   function moveDashboardPlacement(placement: DashboardPlacement) {
@@ -3020,9 +3036,13 @@
                     charts={currentDashboard?.charts ?? []}
                     chartStates={dashboardChartStates}
                     {count} {compact} chartTheme={chartThemeKey} {binLabel}
+                    columnSearch={visualizeSearch} setColumnSearch={(value) => visualizeSearch = value}
+                    columns={visualizeFieldOptions} selected={visualizeColumns}
+                    onToggleColumn={toggleVisualizeColumn}
+                    suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
                     onSelectTab={selectDashboardTab}
                     onCreateTab={createDashboardTab}
-                    onPlace={placeDashboardChart}
+                    onPlaceCurrent={placeCurrentChart}
                     onMove={moveDashboardPlacement}
                     onRemove={removeDashboardPlacement}
                     onMark={(chartId, mark) => void applyDashboardMark(chartId, mark)}

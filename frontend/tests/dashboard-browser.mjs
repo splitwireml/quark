@@ -64,6 +64,7 @@ try {
   await page.getByRole('button', { name: 'Overview', exact: true }).click();
 
   await page.getByRole('button', { name: 'Dashboard', exact: true }).click();
+  await page.getByRole('complementary', { name: 'Chart options' }).waitFor();
   await page.locator('article.tile').filter({ hasText: 'Bar · region' }).waitFor();
   await page.locator('article.tile').filter({ hasText: 'Scatter · x × y' }).waitFor();
 
@@ -106,19 +107,25 @@ try {
   await page.getByRole('button', { name: 'Remove filter x' }).first().click();
   await page.getByRole('button', { name: 'Remove filter x' }).first().waitFor({ state: 'detached' });
 
+  await page.getByRole('button', { name: 'New dashboard' }).click();
   await page.getByRole('textbox', { name: 'New dashboard name' }).fill('Sales detail');
-  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await page.getByRole('textbox', { name: 'New dashboard name' }).press('Enter');
   assert.equal(await page.locator('article.tile').count(), 0, 'new tabs start with an independent layout');
 
-  await page.getByRole('button', { name: 'Arrange' }).click();
+  await page.getByRole('group', { name: 'Chart type' }).getByRole('button', { name: 'Scatter' }).click();
+  await page.locator('article.tile').filter({ hasText: 'Scatter · x × y' }).waitFor();
+  await page.getByRole('button', { name: 'Remove Scatter · x × y' }).click();
+  assert.equal(await page.locator('article.tile').count(), 0, 'icon remove clears the tile without leaving the dashboard');
+
   const surface = page.locator('.canvas-surface');
   await surface.click({ position: { x: 100, y: 100 } });
-  assert.equal(await page.getByRole('region', { name: 'Choose a chart' }).count(), 0, 'a single click does not create a rectangle');
+  assert.equal(await page.locator('article.tile').count(), 0, 'a single click does not create a rectangle');
+  assert.equal(await page.getByRole('region', { name: 'Choose a chart' }).count(), 0, 'sketching does not open a chart picker');
   await surface.dblclick({ position: { x: 300, y: 300 } });
-  await page.getByRole('region', { name: 'Choose a chart' }).getByRole('button', { name: 'Bar · region' }).click();
   await page.waitForFunction(() => document.querySelectorAll('article.tile').length === 1);
+  assert.equal(await page.getByRole('region', { name: 'Choose a chart' }).count(), 0);
 
-  const move = page.getByRole('button', { name: 'Move Bar · region', exact: true });
+  const move = page.getByRole('button', { name: 'Move Scatter · x × y', exact: true });
   const beforeMove = await move.boundingBox();
   assert.ok(beforeMove);
   await page.mouse.move(beforeMove.x + 30, beforeMove.y + 15);
@@ -128,9 +135,9 @@ try {
   const afterMove = await move.boundingBox();
   assert.ok(afterMove && afterMove.x > beforeMove.x && afterMove.y > beforeMove.y, 'tile moves through real pointer input');
 
-  const dashboardScroller = page.locator('.dashboard > .scroller');
+  const dashboardScroller = page.locator('.workspace > .scroller');
   await dashboardScroller.evaluate((node) => { node.scrollTop = 200; });
-  const resize = page.getByRole('button', { name: 'Resize Bar · region' });
+  const resize = page.getByRole('button', { name: 'Resize Scatter · x × y' });
   const tile = page.locator('article.tile');
   const beforeResize = await tile.boundingBox();
   const resizeBounds = await resize.boundingBox();
@@ -149,8 +156,8 @@ try {
   await page.mouse.down();
   await page.mouse.move(scrollerBounds.x + scrollerBounds.width * 0.8, scrollerBounds.y + 340);
   await page.mouse.up();
-  await page.getByRole('region', { name: 'Choose a chart' }).getByRole('button', { name: 'Scatter · x × y' }).click();
   await page.waitForFunction(() => document.querySelectorAll('article.tile').length === 2);
+  assert.equal(await page.getByRole('region', { name: 'Choose a chart' }).count(), 0);
 
   await page.getByRole('tab', { name: 'Overview' }).click();
   assert.equal(await page.locator('article.tile').count(), 2, 'tab layouts remain independent');
