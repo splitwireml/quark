@@ -1,5 +1,6 @@
 <script lang="ts">
   import ChartFrame from './ChartFrame.svelte';
+  import Checkbox from '../atoms/Checkbox.svelte';
   import { formatTick, niceTicks, toPlotNumber } from '../../lib/visualize';
   import type { BoxGroup, ChartHover, NumericValue } from '../../lib/types';
 
@@ -13,8 +14,10 @@
   let { groups, xTitle, yTitle, compact, onSelect }: Props = $props();
 
   let hover = $state<ChartHover | null>(null);
+  let showOutliers = $state(false);
+  let hasOutliers = $derived(groups.some((group) => group.outliers.length > 0));
   let domain = $derived.by(() => {
-    const values = groups.flatMap((group) => [group.whisker_low, group.whisker_high, ...group.outliers].map(toPlotNumber)).filter(Number.isFinite);
+    const values = groups.flatMap((group) => [group.whisker_low, group.whisker_high, ...(showOutliers ? group.outliers : [])].map(toPlotNumber)).filter(Number.isFinite);
     const min = Math.min(...values);
     const max = Math.max(...values);
     const ticks = niceTicks(min, max, 6);
@@ -50,7 +53,14 @@
 </script>
 
 {#if groups.length}
-  <ChartFrame {xTicks} {yTicks} {xTitle} {yTitle} {hover} xAngle={groups.length > 1 ? -40 : 0} minPlotWidth={groups.length > 1 ? groups.length * 56 : 0} label="Box plot" onDismiss={() => hover = null}>
+  <div class="box-plot">
+  {#if hasOutliers}
+    <div class="controls">
+      <Checkbox checked={showOutliers} label="Show outliers" onchange={(checked) => { showOutliers = checked; hover = null; }} />
+      <span>{showOutliers ? 'Scale includes outliers' : 'Scale fits whiskers · outliers hidden'}</span>
+    </div>
+  {/if}
+  <ChartFrame {xTicks} {yTicks} {xTitle} {yTitle} {hover} xAngle={groups.length > 1 ? -40 : 0} minPlotWidth={groups.length > 1 ? groups.length * 96 : 0} label="Box plot" onDismiss={() => hover = null}>
     {#snippet children(plot)}
       {#each groups as group, index (String(group.label))}
         {@const band = plot.width / groups.length}
@@ -78,18 +88,24 @@
           <line x1={cx - boxW / 3} x2={cx + boxW / 3} y1={lo} y2={lo} />
           <rect x={cx - boxW / 2} y={Math.min(top, bottom)} width={boxW} height={Math.max(2, Math.abs(bottom - top))} rx="1" />
           <line class="median" x1={cx - boxW / 2} x2={cx + boxW / 2} y1={mid} y2={mid} />
-          {#each group.outliers as outlier, outlierIndex (`${group.label}-${outlierIndex}`)}
-            <circle cx={cx} cy={y(plot.y, plot.height, outlier)} r="2.5" />
-          {/each}
+          {#if showOutliers}
+            {#each group.outliers as outlier, outlierIndex (`${group.label}-${outlierIndex}`)}
+              <circle cx={cx} cy={y(plot.y, plot.height, outlier)} r="2.5" />
+            {/each}
+          {/if}
         </g>
       {/each}
     {/snippet}
   </ChartFrame>
+  </div>
 {:else}
   <p class="empty">No values to chart.</p>
 {/if}
 
 <style>
+  .box-plot { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-height: 28px; padding: 0 16px 4px 56px; }
+  .controls span { font-size: 11.5px; color: var(--muted); }
   .box { cursor: pointer; stroke: var(--chart-mark-strong); fill: var(--chart-box-fill, var(--chart-mark-fill)); }
   .box:hover, .box:focus-visible { fill: var(--chart-mark); outline: none; }
   .box :global(line) { stroke: var(--chart-mark-strong); }

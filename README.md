@@ -59,6 +59,8 @@ cd frontend && npm test && npm run check && npm run build
 
 The scrolling browser regression suite starts its own frontend server and mocks every API (no user data is changed). Run `cd frontend && npm run test:scroll-browser` with Playwright installed, or set `PLAYWRIGHT_MODULE` to an existing Playwright module path.
 
+The chart scrolling regression uses the same mocked-server setup: run `cd frontend && npm run test:chart-scroll-browser`; add `MINIMAL=1` for the 20-bar boundary case.
+
 The scatter browser regression uses the same mocked-server setup: run `cd frontend && npm run test:scatter-browser`; add `SCATTER_SINGLE=1`, `SCATTER_EMPTY=1`, or `SCATTER_ERROR=1` for focused data, empty, and failed-request cases.
 
 With the backend running, `cd frontend && npm run benchmark:arrow` compares JSON and Arrow against the registered AllSpecs source, including a 50-column projection. It checks cell parity and real scrolling, and reports payload bytes, fetch latency, decode plus viewport access, and scroll-to-paint medians. It does not change source data. The same `PLAYWRIGHT_MODULE` option applies; `QUARK_API_URL` and `QUARK_BENCH_SOURCE` can select another backend/source (the scroll test needs more than 11,000 rows).

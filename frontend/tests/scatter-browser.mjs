@@ -168,12 +168,44 @@ try {
     assert.ok(resizedCanvas.painted > 0, "resized scatter canvas must remain painted");
     assert.ok(resizedGeometry?.aligned, "resized scatter canvas must align with the plotted geometry");
 
-    const hit = page.getByRole("application", { name: "Scatter plot. Drag to select a region." });
+    const hit = page.getByRole("application", { name: "Scatter plot. Drag to select a region. Double-click to reset zoom." });
     const box = await hit.boundingBox();
     assert.ok(box, "scatter plot must expose a selectable region");
+    const ticks = () => page.locator('.frame .tick').allTextContents();
+    const originalTicks = await ticks();
+    const requestCount = requests.length;
+    async function dragRegion() {
+      await page.mouse.move(box.x + box.width * 0.25, box.y + box.height * 0.25);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.6, { steps: 4 });
+      await page.mouse.up();
+      await page.getByRole('button', { name: 'Zoom', exact: true }).waitFor();
+    }
+    await dragRegion();
+    await page.getByRole('button', { name: 'Zoom', exact: true }).click();
+    assert.notDeepEqual(await ticks(), originalTicks, 'zoom must change the axis range');
+    await page.mouse.dblclick(box.x + box.width * 0.4, box.y + box.height * 0.4);
+    assert.deepEqual(await ticks(), originalTicks, 'double-click must restore the full axis range');
+
+    await dragRegion();
+    await page.getByRole('button', { name: 'Zoom', exact: true }).click();
+    await dragRegion();
+    await page.mouse.dblclick(box.x + box.width * 0.4, box.y + box.height * 0.4);
+    assert.deepEqual(await ticks(), originalTicks, 'double-click through a selection must reset zoom');
+    assert.equal(await page.locator('rect.brush').count(), 0, 'reset must clear the selection');
+    assert.equal(await page.locator('.choice').count(), 0, 'reset must dismiss selection actions');
+    assert.equal(requests.length, requestCount, 'zoom and reset must not filter or request new data');
+
     await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.1);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.9, box.y + box.height * 0.9, { steps: 4 });
+    const brushStyle = await page.locator('rect.brush').evaluate((rect) => {
+      const style = getComputedStyle(rect);
+      return { fill: style.fill, stroke: style.stroke, pointerEvents: style.pointerEvents };
+    });
+    assert.equal(brushStyle.fill, 'none', 'drag rectangle must leave points unobscured');
+    assert.notEqual(brushStyle.stroke, 'none', 'drag rectangle must retain its visible outline');
+    assert.equal(brushStyle.pointerEvents, 'none', 'drag rectangle must not intercept plot input');
     await page.mouse.up();
     await page.getByRole("button", { name: "Filter", exact: true }).click();
     await waitFor(() => requests.some(q => q.spec.chart === "scatter" && q.filters?.length === 4));
@@ -184,7 +216,7 @@ try {
     assert.equal(await page.getByText("Computing chart…", { exact: true }).count(), 0, "scatter must leave Computing after the request resolves");
     assert.equal(await page.locator("canvas.dots").count(), 1, "scatter must render its canvas");
     assert.deepEqual(errors, [], "scatter must render without runtime errors");
-    console.log("PASS scatter leaves Computing, paints, resizes, selects, and supports color/size encodings");
+    console.log("PASS scatter paints, resizes, filters, resets zoom on double-click, and keeps the brush transparent");
   }
 } finally {
   await browser.close();

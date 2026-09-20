@@ -191,6 +191,7 @@
   .stage {
     position: relative;
     flex: 1;
+    min-width: 0;
     min-height: 0;
     display: flex;
     background: var(--surface);

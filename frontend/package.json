@@ -11,6 +11,7 @@
     "test:mutation": "node --experimental-strip-types --test tests/mutation-sql.test.js",
     "benchmark:arrow": "node tests/arrow-benchmark.mjs",
     "test:scroll-browser": "node tests/scroll-browser.mjs",
+    "test:chart-scroll-browser": "node tests/chart-scroll-browser.mjs",
     "test:scatter-browser": "node tests/scatter-browser.mjs",
     "test:chart-palette-browser": "node tests/chart-palette-browser.mjs"
   },

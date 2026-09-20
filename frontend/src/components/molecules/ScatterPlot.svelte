@@ -219,6 +219,7 @@
   function resetView() {
     view = null;
     brush = null;
+    hover = null;
   }
 </script>
 
@@ -233,7 +234,7 @@
           class="hit"
           x={current.x} y={current.y} width={current.width} height={current.height}
           role="application"
-          aria-label="Scatter plot. Drag to select a region."
+          aria-label="Scatter plot. Drag to select a region. Double-click to reset zoom."
           onpointerdown={(event) => onPointerDown(event, current)}
           onpointermove={(event) => onPointerMove(event, current)}
           onpointerup={onPointerUp}
@@ -270,7 +271,7 @@
   .wrap :global(.frame) { z-index: 1; }
   .hit { fill: transparent; cursor: crosshair; }
   .dots { position: absolute; pointer-events: none; z-index: 0; }
-  .brush { fill: var(--chart-mark-fill); stroke: var(--chart-mark-strong); stroke-dasharray: 4 3; }
+  .brush { fill: none; stroke: var(--chart-mark-strong); stroke-dasharray: 4 3; pointer-events: none; }
   .choice {
     position: absolute;
     z-index: 5;

@@ -35,7 +35,7 @@
     if (aggregated) {
       return {
         title: String(row.label),
-        lines: [compact(row.value), row.n != null ? `${count(row.n)} rows` : ''].filter(Boolean),
+        lines: [`${yTitle}: ${compact(row.value)}`],
         hint: 'Click to filter this value'
       };
     }
@@ -69,7 +69,7 @@
           style={`--chart-bar-fill:var(--chart-series-${(index % 6) + 1}-fill)`}
           tabindex="0"
           role="button"
-          aria-label={`${row.label}: ${aggregated ? compact(row.value) : `${count(row.value)} rows`}. Filter to this value.`}
+          aria-label={`${row.label}: ${aggregated ? `${yTitle}: ${compact(row.value)}` : `${count(row.value)} rows`}. Filter to this value.`}
           onclick={() => onSelect(row.label)}
           onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(row.label); } }}
           onpointerenter={() => hover = describe(row)}
