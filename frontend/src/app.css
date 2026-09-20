@@ -82,6 +82,12 @@
   --chart-series-4: #7BA3FF;
   --chart-series-5: #0A2F8C;
   --chart-series-6: #C9DBFF;
+  --chart-series-1-fill: #C9DBFF;
+  --chart-series-2-fill: #C9DBFF;
+  --chart-series-3-fill: #C9DBFF;
+  --chart-series-4-fill: #C9DBFF;
+  --chart-series-5-fill: #C9DBFF;
+  --chart-series-6-fill: #C9DBFF;
 }
 
 html[data-chart-theme='monotone'] {
@@ -95,6 +101,12 @@ html[data-chart-theme='monotone'] {
   --chart-series-4: #A8B2BE;
   --chart-series-5: #2B3444;
   --chart-series-6: #D5DBE4;
+  --chart-series-1-fill: #C5CDD8;
+  --chart-series-2-fill: #D5DBE4;
+  --chart-series-3-fill: #DEE3EA;
+  --chart-series-4-fill: #E7EBF0;
+  --chart-series-5-fill: #EEF1F5;
+  --chart-series-6-fill: #F5F7F9;
 }
 
 html[data-chart-theme='rich'] {
@@ -108,6 +120,12 @@ html[data-chart-theme='rich'] {
   --chart-series-4: #6B4CE6;
   --chart-series-5: #C43B5C;
   --chart-series-6: #2A8F3A;
+  --chart-series-1-fill: #C9DBFF;
+  --chart-series-2-fill: #BFEAE2;
+  --chart-series-3-fill: #F4D6AB;
+  --chart-series-4-fill: #D8CCFF;
+  --chart-series-5-fill: #F3C8D3;
+  --chart-series-6-fill: #C9E7CC;
 }
 
 @media (max-width: 960px) {

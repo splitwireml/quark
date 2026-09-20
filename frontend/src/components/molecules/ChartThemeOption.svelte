@@ -5,16 +5,16 @@
   let { value, selected, onSelect }: { value: ChartTheme; selected: boolean; onSelect: () => void } = $props();
 
   const copy: Record<ChartTheme, { title: string; detail: string }> = {
-    primary: { title: 'Primary', detail: 'The workspace accent. One blue, used with weight rather than extra hues.' },
-    monotone: { title: 'Monotone', detail: 'Ink on paper. Marks, fills, and emphasis stay in the grey scale.' },
-    rich: { title: 'Rich', detail: 'A fuller palette when a chart carries more than one series or encoding.' }
+    single: { title: 'Single color', detail: 'One hue throughout the chart, with emphasis on hover.' },
+    monotone: { title: 'Monotone', detail: 'One hue in a light-to-dark shade scale.' },
+    multicolor: { title: 'Multicolor', detail: 'Distinct hues for categories and chart series.' }
   };
 </script>
 
 <PreferenceOption name="chart-theme" {value} title={copy[value].title} detail={copy[value].detail} {selected} {onSelect} previewHeight={112}>
   <div class="preview" data-theme={value} aria-hidden="true">
     <svg viewBox="0 0 160 72">
-      {#if value === 'rich'}
+      {#if value === 'multicolor'}
         <circle class="s1" cx="28" cy="28" r="4.5" />
         <circle class="s2" cx="46" cy="18" r="4.5" />
         <circle class="s3" cx="62" cy="36" r="4.5" />
@@ -41,8 +41,8 @@
 <style>
   .preview { height: 100%; display: grid; place-items: center; padding: 12px 16px 0; }
   svg { width: 100%; max-width: 168px; height: 72px; }
-  .preview[data-theme='primary'] .bar, .preview[data-theme='primary'] .dot { fill: #C9DBFF; }
-  .preview[data-theme='primary'] .strong { fill: #1155F5; }
+  .preview[data-theme='single'] .bar, .preview[data-theme='single'] .dot { fill: #C9DBFF; }
+  .preview[data-theme='single'] .strong { fill: #1155F5; }
   .preview[data-theme='monotone'] .bar, .preview[data-theme='monotone'] .dot { fill: #C5CDD8; }
   .preview[data-theme='monotone'] .strong { fill: #1F2533; }
   .s1 { fill: #1155F5; }

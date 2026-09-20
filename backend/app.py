@@ -1575,7 +1575,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             x_name, y_name = spec.encodings.x, spec.encodings.y
             if not x_name or not y_name or x_name not in columns or y_name not in columns:
                 raise HTTPException(422, "Scatter requires x and y encodings")
+            color_name = spec.encodings.color
+            if color_name and color_name not in columns:
+                raise HTTPException(422, "Scatter color column was not found")
             x_field, y_field = quote(x_name), quote(y_name)
+            color_field = quote(color_name) if color_name else None
             x_ok = f"{x_field} IS NOT NULL"
             y_ok = f"{y_field} IS NOT NULL"
             if profile_kind(columns[x_name]) == "numeric":
@@ -1584,15 +1588,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 y_ok += f" AND isfinite({y_field}::DOUBLE)"
             where = f"WHERE {x_ok} AND {y_ok}"
             total_points = con.execute(f"SELECT count(*) FROM {source} {where}", values).fetchone()[0]
+            color_select = f", {color_field} AS color" if color_field else ""
             points = con.execute(f"""
-                SELECT {x_field} AS x, {y_field} AS y
+                SELECT {x_field} AS x, {y_field} AS y{color_select}
                 FROM {source} {where}
                 ORDER BY random()
                 LIMIT {SCATTER_LIMIT}
             """, values).fetchall()
+            point_rows = (
+                [{"x": safe(x), "y": safe(y), "color": safe(color)} for x, y, color in points]
+                if color_field else
+                [{"x": safe(x), "y": safe(y)} for x, y in points]
+            )
             return {
                 "chart": "scatter",
-                "points": [{"x": safe(x), "y": safe(y)} for x, y in points],
+                "points": point_rows,
                 "total_points": safe(total_points),
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }

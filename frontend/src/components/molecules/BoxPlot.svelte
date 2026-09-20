@@ -63,6 +63,7 @@
         {@const lo = y(plot.y, plot.height, group.whisker_low)}
         <g
           class="box"
+          style={`--chart-box-fill:var(--chart-series-${(index % 6) + 1}-fill)`}
           tabindex="0"
           role="button"
           aria-label={`${describe(group).title}: median ${compact(group.median)}. Filter to this range.`}
@@ -89,9 +90,9 @@
 {/if}
 
 <style>
-  .box { cursor: pointer; stroke: var(--chart-mark-ink); fill: var(--chart-mark-fill); }
+  .box { cursor: pointer; stroke: var(--chart-mark-strong); fill: var(--chart-box-fill, var(--chart-mark-fill)); }
   .box:hover, .box:focus-visible { fill: var(--chart-mark); outline: none; }
-  .box :global(line) { stroke: var(--chart-mark-ink); }
+  .box :global(line) { stroke: var(--chart-mark-strong); }
   .median { stroke-width: 2; }
   .box :global(circle) { fill: var(--chart-mark-strong); stroke: none; }
   .empty { margin: auto; font-size: 12.5px; color: var(--muted); }

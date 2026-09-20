@@ -265,6 +265,7 @@ export interface BoxVisualizeResponse {
 export interface ScatterPoint {
   x: NumericValue;
   y: NumericValue;
+  color?: string | number | boolean | null;
 }
 
 export interface ScatterVisualizeResponse {

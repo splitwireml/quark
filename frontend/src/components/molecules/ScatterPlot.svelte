@@ -43,6 +43,11 @@
   let ySpan = $derived(domain.yMax - domain.yMin || 1);
   let xTicks = $derived(domain.xTicks.map((value) => ({ label: formatTick(value), t: (value - domain.xMin) / xSpan })));
   let yTicks = $derived(domain.yTicks.map((value) => ({ label: formatTick(value), t: (value - domain.yMin) / ySpan })));
+  let colorLabels = $derived.by(() => {
+    const labels = [...new Set(points.filter((point) => point.color != null).map((point) => String(point.color)))];
+    labels.sort();
+    return new Map(labels.map((label, index) => [label, index]));
+  });
   let box = $derived(brush ? {
     x: Math.min(brush.x0, brush.x1),
     y: Math.min(brush.y0, brush.y1),
@@ -72,13 +77,19 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, plot.width, plot.height);
     const styles = getComputedStyle(canvas);
-    ctx.fillStyle = styles.getPropertyValue('--chart-mark').trim() || '#C9DBFF';
-    ctx.strokeStyle = styles.getPropertyValue('--chart-mark-strong').trim() || '#1155F5';
+    const mark = styles.getPropertyValue('--chart-mark').trim() || '#C9DBFF';
+    const strong = styles.getPropertyValue('--chart-mark-strong').trim() || '#1155F5';
+    const mode = document.documentElement.dataset.chartMode;
+    const categoryPalette = mode === 'multicolor' || mode === 'monotone';
+    const pointFills = categoryPalette ? Array.from({ length: 6 }, (_, index) => styles.getPropertyValue(`--chart-series-${index + 1}-fill`).trim() || mark) : [];
     ctx.lineWidth = 0.8;
     for (const point of points) {
       const x = ((toPlotNumber(point.x) - domain.xMin) / xSpan) * plot.width;
       const y = (1 - (toPlotNumber(point.y) - domain.yMin) / ySpan) * plot.height;
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const colorIndex = point.color == null ? -1 : colorLabels.get(String(point.color)) ?? -1;
+      ctx.fillStyle = categoryPalette && colorIndex >= 0 ? pointFills[colorIndex % pointFills.length] || mark : mark;
+      ctx.strokeStyle = strong;
       ctx.beginPath();
       ctx.arc(x, y, 2.6, 0, Math.PI * 2);
       ctx.fill();
@@ -89,7 +100,7 @@
   function describe(point: ScatterPoint): ChartHover {
     return {
       title: `${xTitle} × ${yTitle}`,
-      lines: [`${xTitle} ${compact(point.x)}`, `${yTitle} ${compact(point.y)}`],
+      lines: [point.color == null ? '' : `Color ${String(point.color)}`, `${xTitle} ${compact(point.x)}`, `${yTitle} ${compact(point.y)}`].filter(Boolean),
       hint: 'Drag to select a region'
     };
   }

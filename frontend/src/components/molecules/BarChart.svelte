@@ -66,6 +66,7 @@
         <rect
           {x} {y} width={w} height={barHeight} rx="1"
           class="bar"
+          style={`--chart-bar-fill:var(--chart-series-${(index % 6) + 1}-fill)`}
           tabindex="0"
           role="button"
           aria-label={`${row.label}: ${aggregated ? compact(row.value) : `${count(row.value)} rows`}. Filter to this value.`}
@@ -82,7 +83,7 @@
 {/if}
 
 <style>
-  .bar { fill: var(--chart-mark); cursor: pointer; }
+  .bar { fill: var(--chart-bar-fill, var(--chart-mark)); stroke: var(--chart-mark-strong); stroke-width: .75px; cursor: pointer; }
   .bar:hover, .bar:focus-visible { fill: var(--chart-mark-strong); outline: none; }
   .empty { margin: auto; font-size: 12.5px; color: var(--muted); }
   @media (prefers-reduced-motion: no-preference) {

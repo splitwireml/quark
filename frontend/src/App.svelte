@@ -13,6 +13,7 @@
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import { classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
+  import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
   import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartSpec, ChartType, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
   import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, chartThemeStorageKey, type ActionMenuMode, type ChartTheme, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
@@ -263,7 +264,10 @@
 
   let toolbarVisibility = $state<ToolbarVisibility>('show');
   let actionMenuMode = $state<ActionMenuMode>('simple');
-  let chartTheme = $state<ChartTheme>('primary');
+  let chartTheme = $state(defaultChartThemePreferences.mode);
+  let chartPalettes = $state<ChartThemePreferences['palettes']>({ ...defaultChartThemePreferences.palettes });
+  let chartPalette = $derived(chartPalettes[chartTheme]);
+  let chartThemeKey = $derived(`${chartTheme}:${chartPalette}`);
   let settingsOpen = $state(false);
   let densityMenuOpen = $state(false);
   let settingsError = $state('');
@@ -300,14 +304,30 @@
     try { localStorage.setItem(actionMenuStorageKey, value); settingsError = ''; }
     catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
   }
-  function applyChartTheme(value: ChartTheme) {
-    chartTheme = value;
-    document.documentElement.dataset.chartTheme = value;
+  function applyChartThemeColors() {
+    const root = document.documentElement;
+    const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
+    const legacyTheme = chartTheme === 'single' ? 'primary' : chartTheme === 'multicolor' ? 'rich' : 'monotone';
+    root.dataset.chartTheme = legacyTheme;
+    root.dataset.chartMode = chartTheme;
+    root.dataset.chartPalette = chartPalettes[chartTheme];
+    for (const [name, value] of Object.entries(chartThemeCssVariables(preferences))) root.style.setProperty(name, value);
+  }
+  function persistChartThemePreferences() {
+    const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
+    try { localStorage.setItem(chartThemeStorageKey, serializeChartThemePreferences(preferences)); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
   }
   function setChartTheme(value: ChartTheme) {
-    applyChartTheme(value);
-    try { localStorage.setItem(chartThemeStorageKey, value); settingsError = ''; }
-    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+    chartTheme = value;
+    applyChartThemeColors();
+    persistChartThemePreferences();
+  }
+  function setChartPalette(value: ChartPalette) {
+    if (!isChartPalette(chartTheme, value)) return;
+    chartPalettes = { ...chartPalettes, [chartTheme]: value };
+    applyChartThemeColors();
+    persistChartThemePreferences();
   }
   function clearCommandSequence() {
     commandPrefix = null; sourcePicking = false; sourceDigits = '';
@@ -439,9 +459,12 @@
     try {
       const value = localStorage.getItem(toolbarStorageKey); if (value === 'show' || value === 'hover' || value === 'hide') toolbarVisibility = value;
       const menu = localStorage.getItem(actionMenuStorageKey); if (menu === 'simple' || menu === 'comprehensive') actionMenuMode = menu;
-      const theme = localStorage.getItem(chartThemeStorageKey); if (theme === 'primary' || theme === 'monotone' || theme === 'rich') applyChartTheme(theme);
+      const chartPreferences = readChartThemePreferences(localStorage.getItem(chartThemeStorageKey));
+      chartTheme = chartPreferences.mode;
+      chartPalettes = { ...chartPreferences.palettes };
     }
     catch { settingsError = 'Preferences are unavailable in this browser.'; }
+    applyChartThemeColors();
     window.addEventListener('keydown', captureCommands, true);
     window.addEventListener('blur', clearCommandSequence);
     window.addEventListener('focusin', clearSequenceOnEdit);
@@ -2670,7 +2693,7 @@
 
   {#snippet main()}
     <main>
-      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} {chartTheme} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onChartTheme={setChartTheme} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
+      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} {chartTheme} chartPalette={chartPalette} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onChartTheme={setChartTheme} onChartPalette={setChartPalette} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
       <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
         <WelcomeScreen
@@ -2769,7 +2792,7 @@
                     onToggleColumn={toggleVisualizeColumn}
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
                     data={visualizeData} loading={visualizeLoading} error={visualizeError}
-                    {count} {compact} {chartTheme} {binLabel}
+                    {count} {compact} chartTheme={chartThemeKey} {binLabel}
                     onSelectBar={(label) => void applyChartMark({ kind: 'category', value: label })}
                     onSelectBin={(bin, last) => void applyChartMark({ kind: 'bin', lower: bin.lower, upper: bin.upper, last })}
                     onSelectBox={(group) => void applyChartMark(

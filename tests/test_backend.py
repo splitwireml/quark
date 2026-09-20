@@ -1997,6 +1997,20 @@ def test_visualize_sql_bar_and_rejects_unknown_columns_and_charts(client):
     }).status_code == 422
 
 
+def test_visualize_scatter_carries_color_categories_and_rejects_unknown_color(client):
+    node = upload(client, "scatter.csv", b"x,y,region\n1,10,east\n2,20,east\n3,30,west\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'scatter')['id']}"
+    response = client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "region"}},
+    })
+    assert response.status_code == 200, response.text
+    points = response.json()["points"]
+    assert sorted(point["color"] for point in points) == ["east", "east", "west"]
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "missing"}},
+    }).status_code == 422
+
+
 def test_visualize_bar_aggregates_numeric_measure(client):
     node = upload(client, "agg.csv", b"region,amount\neast,10\neast,30\nwest,40\n")
     base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'agg')['id']}"

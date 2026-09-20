@@ -5,13 +5,16 @@
   import ToolbarVisibilityOption from '../molecules/ToolbarVisibilityOption.svelte';
   import ActionMenuOption from '../molecules/ActionMenuOption.svelte';
   import ChartThemeOption from '../molecules/ChartThemeOption.svelte';
-  import type { ActionMenuMode, ChartTheme, ToolbarVisibility } from '../../lib/commands';
-  let { visibility, actionMenuMode, chartTheme, error, onActionMenuMode, onVisibility, onChartTheme, onClose }: {
-    visibility: ToolbarVisibility; actionMenuMode: ActionMenuMode; chartTheme: ChartTheme; error: string;
+  import ChartPaletteOption from '../molecules/ChartPaletteOption.svelte';
+  import { paletteOptions, type ChartPalette, type ChartTheme } from '../../lib/chartThemes';
+  import type { ActionMenuMode, ToolbarVisibility } from '../../lib/commands';
+  let { visibility, actionMenuMode, chartTheme, chartPalette, error, onActionMenuMode, onVisibility, onChartTheme, onChartPalette, onClose }: {
+    visibility: ToolbarVisibility; actionMenuMode: ActionMenuMode; chartTheme: ChartTheme; chartPalette: ChartPalette; error: string;
     onActionMenuMode: (value: ActionMenuMode) => void; onVisibility: (value: ToolbarVisibility) => void;
-    onChartTheme: (value: ChartTheme) => void; onClose: () => void;
+    onChartTheme: (value: ChartTheme) => void; onChartPalette: (value: ChartPalette) => void; onClose: () => void;
   } = $props();
-  const themes: ChartTheme[] = ['primary', 'monotone', 'rich'];
+  const themes: ChartTheme[] = ['single', 'monotone', 'multicolor'];
+  let palettes = $derived(paletteOptions(chartTheme));
   let heading: HTMLHeadingElement;
   onMount(() => heading.focus());
   const choices: { value: ToolbarVisibility; title: string; detail: string }[] = [
@@ -29,9 +32,13 @@
       <ToolbarVisibilityOption {...choice} selected={visibility === choice.value} onSelect={() => onVisibility(choice.value)} />
     {/each}</div>
   </fieldset>
-  <fieldset class="chart-theme-setting"><legend>Chart theme</legend><p class="description">Color for bars, boxes, and scatter marks. The table and chrome stay as they are.</p>
+  <fieldset class="chart-theme-setting"><legend>Chart colors</legend><p class="description">Choose one hue, a shade scale, or distinct hues for bars, boxes, and scatter marks.</p>
     <div class="options">{#each themes as theme (theme)}
       <ChartThemeOption value={theme} selected={chartTheme === theme} onSelect={() => onChartTheme(theme)} />
+    {/each}</div>
+    <div class="palette-heading"><strong>Palette</strong><span>Choose the colors used by this mode.</span></div>
+    <div class="palette-options">{#each palettes as palette (palette.id)}
+      <ChartPaletteOption {palette} selected={chartPalette === palette.id} onSelect={() => onChartPalette(palette.id)} />
     {/each}</div>
   </fieldset>
   <fieldset class="action-menu-setting"><legend>Action menu</legend><p class="description">Choose what appears when you press ⌘A.</p>
@@ -59,6 +66,10 @@
   .description { margin-bottom: 20px; }
   .options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
   .chart-theme-setting, .action-menu-setting { margin-top: 30px; }
+  .palette-heading { display: flex; align-items: baseline; gap: 10px; margin: 24px 0 12px; }
+  .palette-heading strong { font-size: 13px; font-weight: 500; color: var(--ink); }
+  .palette-heading span { font-size: 12px; color: var(--muted); }
+  .palette-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
   .menu-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
   .keyboard-note { display: flex; align-items: center; gap: 18px; margin: 28px 0; padding: 18px 0; border-bottom: 1px solid var(--line); }
   .key { display: flex; gap: 4px; }
@@ -66,4 +77,7 @@
   strong { color: var(--ink-2); font-weight: 500; }
   footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 24px; font-size: 11px; line-height: 1.5; color: var(--muted); }
   .error { margin-top: 16px; color: var(--error); }
+  @media (max-width: 760px) {
+    .options, .palette-options, .menu-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
 </style>
