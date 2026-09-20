@@ -2,22 +2,19 @@
   import Chip from '../atoms/Chip.svelte';
   import Eyebrow from '../atoms/Eyebrow.svelte';
   import TextInput from '../atoms/TextInput.svelte';
+  import Button from '../atoms/Button.svelte';
   import ChartTypeToggle from '../molecules/ChartTypeToggle.svelte';
-  import BarChart from '../molecules/BarChart.svelte';
-  import HistogramPlot from '../molecules/HistogramPlot.svelte';
-  import BoxPlot from '../molecules/BoxPlot.svelte';
-  import ScatterPlot from '../molecules/ScatterPlot.svelte';
-  import { groupColumns, metricTitle, visualizeMetrics } from '../../lib/visualize';
+  import ChartView from '../molecules/ChartView.svelte';
+  import { groupColumns, visualizeMetrics } from '../../lib/visualize';
   import type {
     AggregateCount,
     AggregateMetric,
-    BoxGroup,
+    ChartMark,
     ChartSpec,
     ChartSuggestion,
     ChartType,
     ColumnInfo,
     HistogramBin,
-    NumericValue,
     VisualizeResponse
   } from '../../lib/types';
 
@@ -38,18 +35,28 @@
     compact: (value: number | string | null | undefined) => string;
     chartTheme?: string;
     binLabel: (bin: HistogramBin) => string;
-    onSelectBar: (label: string | boolean | number) => void;
-    onSelectBin: (bin: HistogramBin, last: boolean) => void;
-    onSelectBox: (group: BoxGroup) => void;
-    onSelectRegion: (region: { xMin: NumericValue; xMax: NumericValue; yMin: NumericValue; yMax: NumericValue }) => void;
+    dashboardNames?: string[];
+    onAddToDashboard?: (name: string) => void;
+    onMark: (mark: ChartMark) => void;
   };
 
   let {
     columnSearch, setColumnSearch, columns, selected,
     onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
     data, loading, error, count, compact, chartTheme = 'primary', binLabel,
-    onSelectBar, onSelectBin, onSelectBox, onSelectRegion
+    dashboardNames = [], onAddToDashboard, onMark
   }: Props = $props();
+
+  let dashboardOpen = $state(false);
+  let newDashboardName = $state('');
+
+  function addDashboard(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    onAddToDashboard?.(trimmed);
+    newDashboardName = '';
+    dashboardOpen = false;
+  }
 
   let selectedNames = $derived(new Set(selected.map((column) => column.name)));
   let groups = $derived.by(() => {
@@ -73,20 +80,32 @@
     return `${data.bins.length} ${data.bins.length === 1 ? 'bin' : 'bins'} · ${data.elapsed_ms.toFixed(1)} ms`;
   });
   let showAggregate = $derived(spec?.chart === 'bar' && !!spec.encodings.value);
-  let xTitle = $derived(
-    spec?.chart === 'box' ? (spec.encodings.group ?? '')
-      : spec?.chart === 'scatter' ? (spec.encodings.x ?? '')
-      : spec?.encodings.category ?? spec?.encodings.value ?? spec?.encodings.x ?? ''
-  );
-  let yTitle = $derived(
-    spec?.chart === 'box' || spec?.chart === 'scatter' ? (spec.encodings.y ?? spec.encodings.value ?? '')
-      : spec?.chart === 'bar' && spec.encodings.value ? metricTitle(spec.metric, spec.encodings.value)
-      : 'Rows'
-  );
 </script>
 
 <section class="stage" aria-label="Chart">
   <aside class="pane" aria-label="Chart options">
+    {#if spec && onAddToDashboard}
+      <div class="pane-block add-dashboard">
+        <Button
+          type="button"
+          aria-expanded={dashboardOpen}
+          aria-controls="visualize-dashboard-choices"
+          aria-haspopup="true"
+          onclick={() => dashboardOpen = !dashboardOpen}
+        >Add to dashboard</Button>
+        {#if dashboardOpen}
+          <div id="visualize-dashboard-choices" class="dashboard-choices" role="group" aria-label="Choose a dashboard">
+            {#each dashboardNames as name (name)}
+              <button type="button" onclick={() => addDashboard(name)}>{name}</button>
+            {/each}
+            <form onsubmit={(event) => { event.preventDefault(); addDashboard(newDashboardName); }}>
+              <TextInput value={newDashboardName} oninput={(event: Event) => newDashboardName = (event.currentTarget as HTMLInputElement).value} aria-label="New dashboard name" placeholder="New dashboard" maxlength="40" />
+              <button type="submit" disabled={!newDashboardName.trim()}>Create</button>
+            </form>
+          </div>
+        {/if}
+      </div>
+    {/if}
     <div class="pane-block">
       <Eyebrow>Chart</Eyebrow>
       <ChartTypeToggle {suggestions} selected={spec?.chart ?? null} onSelect={onSelectChart} />
@@ -166,14 +185,8 @@
         <strong>Choose a column</strong>
         <span>Numbers, categories, and dates stay grouped in the pane.</span>
       </div>
-    {:else if data?.chart === 'bar'}
-      <BarChart rows={data.rows} {xTitle} {yTitle} {count} {compact} aggregated={showAggregate} onSelect={onSelectBar} />
-    {:else if data?.chart === 'histogram'}
-      <HistogramPlot bins={data.bins} {xTitle} {count} {binLabel} onSelect={onSelectBin} />
-    {:else if data?.chart === 'box'}
-      <BoxPlot groups={data.groups} {xTitle} {yTitle} {compact} onSelect={onSelectBox} />
-    {:else if data?.chart === 'scatter'}
-      <ScatterPlot points={data.points} {xTitle} {yTitle} {compact} theme={chartTheme} {onSelectRegion} />
+    {:else if data}
+      <ChartView {spec} {data} {count} {compact} {chartTheme} {binLabel} {onMark} />
     {:else}
       <div class="state">
         <strong>This chart is not available yet</strong>
@@ -215,6 +228,15 @@
     animation: pane-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
   }
   .pane-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .add-dashboard { position: relative; }
+  .dashboard-choices { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; }
+  .dashboard-choices > button, .dashboard-choices form { min-height: 28px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink); font-size: 11.5px; }
+  .dashboard-choices > button { padding: 0 8px; text-align: left; }
+  .dashboard-choices > button:hover, .dashboard-choices > button:focus-visible { border-color: var(--action); background: var(--action-tint); color: var(--action-dark); }
+  .dashboard-choices form { display: flex; overflow: hidden; }
+  .dashboard-choices form :global(.field) { min-width: 0; flex: 1; height: 28px; border: 0; border-radius: 0; }
+  .dashboard-choices form button { padding: 0 8px; border: 0; border-left: 1px solid var(--control-border); background: var(--surface-2); color: var(--action-dark); font-size: 11px; }
+  .dashboard-choices form button:disabled { opacity: 0.45; }
   .search :global(.field) { width: 100%; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .metrics { display: flex; flex-wrap: wrap; gap: 5px; }

@@ -106,7 +106,7 @@
   }
 
   function localPoint(event: PointerEvent): { x: number; y: number } | null {
-    const svg = (event.currentTarget as SVGGraphicsElement).ownerSVGElement;
+    const svg = (event.currentTarget as Element).closest('svg') as SVGSVGElement | null;
     const ctm = svg?.getScreenCTM();
     if (!svg || !ctm) return null;
     const point = svg.createSVGPoint();
@@ -221,6 +221,38 @@
     brush = null;
     hover = null;
   }
+
+  function keyboardSelect(event: KeyboardEvent, plot: PlotRect) {
+    if (event.key === 'Escape') { brush = null; return; }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      if (brush?.ready) filterRegion();
+      else brush = {
+        x0: plot.x + plot.width * 0.25, y0: plot.y + plot.height * 0.25,
+        x1: plot.x + plot.width * 0.75, y1: plot.y + plot.height * 0.75, ready: true
+      };
+      return;
+    }
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const current = brush?.ready ? brush : {
+      x0: plot.x + plot.width * 0.25, y0: plot.y + plot.height * 0.25,
+      x1: plot.x + plot.width * 0.75, y1: plot.y + plot.height * 0.75, ready: true
+    };
+    const dx = event.key === 'ArrowLeft' ? -plot.width * 0.05 : event.key === 'ArrowRight' ? plot.width * 0.05 : 0;
+    const dy = event.key === 'ArrowUp' ? -plot.height * 0.05 : event.key === 'ArrowDown' ? plot.height * 0.05 : 0;
+    if (event.shiftKey) {
+      const end = clamp({ x: current.x1 + dx, y: current.y1 + dy }, plot);
+      brush = { ...current, x1: end.x, y1: end.y };
+    } else {
+      const width = current.x1 - current.x0;
+      const height = current.y1 - current.y0;
+      const start = clamp({ x: current.x0 + dx, y: current.y0 + dy }, plot);
+      const x0 = Math.min(plot.x + plot.width - Math.abs(width), Math.max(plot.x, start.x));
+      const y0 = Math.min(plot.y + plot.height - Math.abs(height), Math.max(plot.y, start.y));
+      brush = { ...current, x0, y0, x1: x0 + width, y1: y0 + height };
+    }
+  }
 </script>
 
 <svelte:window onkeydown={(event) => { if (event.key === 'Escape') brush = null; }} />
@@ -229,17 +261,18 @@
     <ChartFrame {xTicks} {yTicks} {xTitle} {yTitle} {hover} label="Scatter plot" onDismiss={() => { if (!brush) hover = null; }}>
       {#snippet children(plot)}
         {@const current = plot}
-        <rect
-          {@attach syncPlot(current)}
-          class="hit"
-          x={current.x} y={current.y} width={current.width} height={current.height}
-          role="application"
-          aria-label="Scatter plot. Drag to select a region. Double-click to reset zoom."
-          onpointerdown={(event) => onPointerDown(event, current)}
-          onpointermove={(event) => onPointerMove(event, current)}
-          onpointerup={onPointerUp}
-          ondblclick={resetView}
-        />
+        <foreignObject {@attach syncPlot(current)} x={current.x} y={current.y} width={current.width} height={current.height}>
+          <button
+            type="button"
+            class="hit"
+            aria-label="Scatter plot. Drag to select a region. Keyboard: Enter creates or filters a region; arrows move it; Shift plus arrows resize it. Double-click resets zoom."
+            onpointerdown={(event) => onPointerDown(event, current)}
+            onpointermove={(event) => onPointerMove(event, current)}
+            onpointerup={onPointerUp}
+            onkeydown={(event) => keyboardSelect(event, current)}
+            ondblclick={resetView}
+          ></button>
+        </foreignObject>
         {#if box && box.width + box.height > 0}
           <rect class="brush" x={box.x} y={box.y} width={box.width} height={box.height} />
         {/if}
@@ -269,7 +302,8 @@
 <style>
   .wrap { position: relative; flex: 1; min-height: 0; display: flex; }
   .wrap :global(.frame) { z-index: 1; }
-  .hit { fill: transparent; cursor: crosshair; }
+  .hit { width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: crosshair; }
+  .hit:focus-visible { outline: 2px solid var(--chart-mark-strong); outline-offset: -2px; }
   .dots { position: absolute; pointer-events: none; z-index: 0; }
   .brush { fill: none; stroke: var(--chart-mark-strong); stroke-dasharray: 4 3; pointer-events: none; }
   .choice {

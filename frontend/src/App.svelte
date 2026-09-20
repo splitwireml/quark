@@ -13,8 +13,9 @@
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import { classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
+  import { chartTitle, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, withoutSelections } from './lib/dashboard';
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
-  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartSpec, ChartType, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, DashboardSelection, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
   import { editorHighlight, editorTheme } from './lib/editorTheme';
   import { readThemePreference, resolveScheme, themeStorageKey, type ColorScheme, type ThemePreference } from './lib/theme';
@@ -43,6 +44,7 @@
   import FilterInspector from './components/organisms/FilterInspector.svelte';
   import ProfileInspector from './components/organisms/ProfileInspector.svelte';
   import VisualizeStage from './components/organisms/VisualizeStage.svelte';
+  import DashboardStage from './components/organisms/DashboardStage.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
   import FormulaMenu from './components/organisms/FormulaMenu.svelte';
   import ExportMenu from './components/organisms/ExportMenu.svelte';
@@ -226,7 +228,7 @@
   let exportRequestId = 0;
   let versionsOpen = $state(false);
 
-  let canvasMode = $state<'rows' | 'chart'>('rows');
+  let canvasMode = $state<'rows' | 'chart' | 'dashboard'>('rows');
   let visualizeColumns = $state.raw<ColumnInfo[]>([]);
   let visualizeChart = $state<ChartType | null>(null);
   let visualizeMetric = $state<AggregateMetric | null>(null);
@@ -235,6 +237,10 @@
   let visualizeLoading = $state(false);
   let visualizeError = $state('');
   let visualizeRequestId = 0;
+  let dashboardDocuments = $state.raw<DashboardDataset[]>([]);
+  let dashboardSelections = $state.raw<DashboardSelection[]>([]);
+  let dashboardChartStates = $state.raw<Record<string, { data: VisualizeResponse | null; loading: boolean; error: string }>>({});
+  let dashboardRequestId = 0;
   const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter']);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
@@ -253,6 +259,7 @@
     sqlBase: string; activeSql: string; activeSqlNodeId: string; sqlText: string;
     columnOrder: string[]; hiddenColumns: string[];
     filters: FilterCondition[]; sorts: SortCondition[]; dedupeColumns: string[];
+    dashboardSelections: DashboardSelection[];
     join: JoinWorkspaceRequest | undefined; page: number;
   };
   // One entry per staged pending change, kept aligned by index with pendingChanges.
@@ -594,6 +601,7 @@
       ? { chart: pick.chart, encodings: pick.encodings, metric }
       : { chart: pick.chart, encodings: pick.encodings };
   });
+  let currentDashboard = $derived(dashboardDocuments.find((document) => document.datasetId === selectedDataset));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
   let columnMenuRegexResult = $derived(matchColumnsByRegex(columnOrder, columnMenuSearch.trim()));
   let columnMenuItems = $derived.by(() => {
@@ -617,7 +625,7 @@
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
   let querySummary = $derived(result ? queryMode === 'sql' ? `${count(result.total_rows)} SQL result rows, page ${result.page} of ${count(result.total_pages)}.` : `${count(result.total_rows)} rows, page ${result.page} of ${count(result.total_pages)}, ${filters.length} filters, ${sorts.length} sorts, and ${dedupeColumns.length} dedupe keys.` : '');
 
-  onMount(() => { loadVersioning(); void loadProjects(); return () => editorView?.destroy(); });
+  onMount(() => { loadVersioning(); loadDashboards(); void loadProjects(); return () => editorView?.destroy(); });
 
   function message(reason: unknown): string { return reason instanceof Error ? reason.message : 'Something went wrong'; }
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
@@ -630,12 +638,16 @@
     visualizeSearch = '';
     visualizeData = null;
     visualizeError = '';
+    dashboardRequestId++;
+    dashboardSelections = [];
+    dashboardChartStates = {};
     canvasMode = 'rows';
   }
 
-  function setCanvasMode(mode: 'rows' | 'chart') {
+  function setCanvasMode(mode: 'rows' | 'chart' | 'dashboard') {
     canvasMode = mode;
     if (mode === 'chart') void loadVisualize();
+    if (mode === 'dashboard') void loadDashboardCharts();
   }
 
   function toggleVisualizeColumn(name: string) {
@@ -694,10 +706,152 @@
 
   async function applyChartMark(mark: Parameters<typeof filtersFromMark>[1]) {
     if (!visualizeSpec) return;
-    const added = filtersFromMark(visualizeSpec, mark, filters.length);
+    const base = withoutSelections(filters, dashboardSelections);
+    const added = filtersFromMark(visualizeSpec, mark, base.length);
     if (!added.length) return;
     const summary = added.map(filterSummary).join(' and ');
-    await applyFilterChange([...filters, ...added], { kind: 'filter', summary: `Filter ${summary}`, details: { source: 'chart' } });
+    await applyFilterChange(composeFilters([...base, ...added], dashboardSelections), { kind: 'filter', summary: `Filter ${summary}`, details: { source: 'chart' } });
+  }
+
+  function loadDashboards() {
+    try { dashboardDocuments = readDashboards(localStorage.getItem(DASHBOARD_STORAGE_KEY)); }
+    catch { dashboardDocuments = []; }
+  }
+
+  function persistDashboards(next: DashboardDataset[]): boolean {
+    try {
+      localStorage.setItem(DASHBOARD_STORAGE_KEY, JSON.stringify(next));
+      dashboardDocuments = next;
+      storageError = '';
+      return true;
+    } catch {
+      storageError = 'Dashboards could not be stored in this browser.';
+      return false;
+    }
+  }
+
+  function updateCurrentDashboard(update: (document: DashboardDataset) => DashboardDataset): DashboardDataset | null {
+    if (!selectedDataset) return null;
+    const document = currentDashboard ?? emptyDashboardDataset(selectedDataset);
+    const next = update(document);
+    const documents = currentDashboard
+      ? dashboardDocuments.map((item) => item.datasetId === selectedDataset ? next : item)
+      : [...dashboardDocuments, next];
+    return persistDashboards(documents) ? next : null;
+  }
+
+  function createDashboardTab(name: string): string | null {
+    const clean = name.trim().slice(0, 40);
+    if (!clean) return null;
+    const existing = currentDashboard?.tabs.find((tab) => tab.name === clean);
+    if (existing) {
+      updateCurrentDashboard((document) => ({ ...document, activeTabId: existing.id }));
+      return existing.id;
+    }
+    const id = crypto.randomUUID();
+    return updateCurrentDashboard((document) => ({
+      ...document,
+      activeTabId: id,
+      tabs: [...document.tabs, { id, name: clean, scrollTop: 0, placements: [] }]
+    })) ? id : null;
+  }
+
+  function selectDashboardTab(id: string) {
+    updateCurrentDashboard((document) => document.tabs.some((tab) => tab.id === id) ? { ...document, activeTabId: id } : document);
+  }
+
+  function addChartToDashboard(name: string) {
+    const spec = visualizeSpec;
+    if (!spec || !selectedDataset) return;
+    const clean = name.trim().slice(0, 40);
+    if (!clean) return;
+    updateCurrentDashboard((document) => {
+      let tab = document.tabs.find((item) => item.name === clean);
+      if (!tab) tab = { id: crypto.randomUUID(), name: clean, scrollTop: 0, placements: [] };
+      const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec));
+      const chart = saved ?? { id: crypto.randomUUID(), title: chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
+      const placement = clampPlacement({
+        id: crypto.randomUUID(), chartId: chart.id, x: 20,
+        y: Math.max(20, ...tab.placements.map((item) => item.y + item.height + 20)),
+        ...DEFAULT_TILE
+      });
+      return {
+        ...document,
+        activeTabId: tab.id,
+        charts: saved ? document.charts : [...document.charts, chart],
+        tabs: document.tabs.some((item) => item.id === tab!.id)
+          ? document.tabs.map((item) => item.id === tab!.id ? { ...item, placements: [...item.placements, placement] } : item)
+          : [...document.tabs, { ...tab, placements: [placement] }]
+      };
+    });
+  }
+
+  function placeDashboardChart(chartId: string, rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({
+      ...tab, placements: [...tab.placements, clampPlacement({ ...rect, id: crypto.randomUUID(), chartId })]
+    })));
+  }
+
+  function moveDashboardPlacement(placement: DashboardPlacement) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({
+      ...tab, placements: tab.placements.map((item) => item.id === placement.id ? clampPlacement(placement) : item)
+    })));
+  }
+
+  function removeDashboardPlacement(id: string) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({
+      ...tab, placements: tab.placements.filter((item) => item.id !== id)
+    })));
+  }
+
+  function saveDashboardScroll(scrollTop: number) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({ ...tab, scrollTop })));
+  }
+
+  async function fetchDashboardChart(chart: DashboardDataset['charts'][number], id: number) {
+    try {
+      const body = { spec: chart.spec, page, page_size: pageSize, filters: filtersForChart(filters, dashboardSelections, chart.id), sorts, dedupe_columns: dedupeColumns };
+      const data = queryMode === 'sql'
+        ? await api.visualizeSql(activeSqlNodeId || selectedNodeId, { ...body, sql: sqlBase || activeSql })
+        : await api.visualizeDataset(selectedNodeId, selectedDataset, body);
+      if (id === dashboardRequestId) dashboardChartStates = { ...dashboardChartStates, [chart.id]: { data, loading: false, error: '' } };
+    } catch (reason) {
+      if (id === dashboardRequestId) dashboardChartStates = { ...dashboardChartStates, [chart.id]: { data: dashboardChartStates[chart.id]?.data ?? null, loading: false, error: message(reason) } };
+    }
+  }
+
+  async function loadDashboardCharts() {
+    const document = currentDashboard;
+    if (canvasMode !== 'dashboard' || !document) return;
+    const id = ++dashboardRequestId;
+    dashboardChartStates = Object.fromEntries(document.charts.map((chart) => [chart.id, {
+      data: dashboardChartStates[chart.id]?.data ?? null, loading: true, error: ''
+    }]));
+    await Promise.all(document.charts.map((chart) => fetchDashboardChart(chart, id)));
+  }
+
+  async function retryDashboardChart(chartId: string) {
+    const chart = currentDashboard?.charts.find((item) => item.id === chartId);
+    if (!chart) return;
+    const id = dashboardRequestId;
+    dashboardChartStates = { ...dashboardChartStates, [chart.id]: { data: dashboardChartStates[chart.id]?.data ?? null, loading: true, error: '' } };
+    await fetchDashboardChart(chart, id);
+  }
+
+  async function applyDashboardMark(chartId: string, mark: ChartMark) {
+    const chart = currentDashboard?.charts.find((item) => item.id === chartId);
+    if (!chart) return;
+    const before = undoPoint();
+    const beforeSelections = dashboardSelections;
+    const base = withoutSelections(filters, beforeSelections);
+    const selected = filtersFromMark(chart.spec, mark, base.length);
+    if (!selected.length) return;
+    const nextSelections = [...beforeSelections.filter((item) => item.chartId !== chartId), { chartId, filters: selected }];
+    dashboardSelections = nextSelections;
+    const summary = selected.map(filterSummary).join(' and ');
+    if (!await applyFilterChange(composeFilters(base, nextSelections), { kind: 'filter', summary: `Filter ${summary}`, details: { source: 'dashboard', chartId } }, before) && dashboardSelections === nextSelections) {
+      dashboardSelections = beforeSelections;
+    }
   }
 
   function filterSummary(filter: FilterCondition): string {
@@ -929,6 +1083,7 @@
       if (id !== requestId) return false;
       closeSql(false);
       clearAggregateDraft();
+      dashboardSelections = [];
       filters = [];
       sorts = [];
       dedupeColumns = [];
@@ -1287,6 +1442,7 @@
       filters: filters.map((filter) => ({ ...filter, ...(Array.isArray(filter.value) ? { value: [...filter.value] } : {}) })),
       sorts: sorts.map((sort) => ({ ...sort })),
       dedupeColumns: [...dedupeColumns],
+      dashboardSelections: dashboardSelections.map((selection) => ({ ...selection, filters: selection.filters.map((filter) => ({ ...filter })) })),
       join: activeJoin, page
     };
   }
@@ -1317,6 +1473,7 @@
       if (!replaceHistory(history)) return false;
       closeSql(false); clearAggregateDraft(); resetBackground();
       filters = point.filters; sorts = point.sorts;
+      dashboardSelections = point.dashboardSelections;
       dedupeColumns = [...point.dedupeColumns]; dedupeDraft = [...point.dedupeColumns];
       columnOrder = [...point.columnOrder]; hiddenColumns = [...point.hiddenColumns];
       activeJoin = point.join; sqlText = point.sqlText; sqlBase = point.sqlBase;
@@ -1324,6 +1481,7 @@
       result = next; page = next.page; pageInput = String(next.page);
       reorderOrigin = null; selectedCell = null; editingCell = null; recordingNotice = '';
       await tick(); gridApi?.scrollToAbsoluteRow((page - 1) * pageSize);
+      if (canvasMode === 'dashboard') void loadDashboardCharts();
       return true;
     } catch (reason) { recordingNotice = `Could not restore change: ${message(reason)}`; return false; }
     finally { historyBusy = false; }
@@ -1390,6 +1548,8 @@
     });
     if (replaceHistory(history)) {
       selectedDataset = history.id;
+      dashboardSelections = [];
+      dashboardChartStates = {};
       joinLeftViewId = history.id;
       joinRightViewId = '';
       joinLeftSourceId = '';
@@ -1506,6 +1666,8 @@
   }
 
   async function replayVersionSnapshot(version: Version): Promise<boolean> {
+    dashboardSelections = [];
+    dashboardChartStates = {};
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -1520,6 +1682,7 @@
     const before = undoPoint();
     if (!await replayVersionSnapshot(version)) {
       filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns;
+      dashboardSelections = before.dashboardSelections;
       dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page);
       recordingNotice = sqlError || 'Could not open this Version.';
       return;
@@ -1971,6 +2134,7 @@
     if (!targetNodeId || !query) { sqlError = 'Enter SQL to run.'; return false; }
     const source = keepSqlBase ? sqlBase || query : query;
     if (!keepSqlBase) {
+      dashboardSelections = [];
       filters = [];
       sorts = [];
       dedupeColumns = [];
@@ -2005,6 +2169,7 @@
       gridApi?.scrollToAbsoluteRow((next.page - 1) * next.page_size);
       if (sqlOpen) createSqlEditor();
       if (canvasMode === 'chart') void loadVisualize();
+      if (canvasMode === 'dashboard') void loadDashboardCharts();
       return true;
     } catch (reason) { if (id === requestId) sqlError = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
@@ -2089,49 +2254,68 @@
   function toggleCategory(value: string, checked: boolean) { selectedCategories = checked ? [...selectedCategories, value] : selectedCategories.filter((item) => item !== value); }
   function selectVisibleCategories() { selectedCategories = [...new Set([...selectedCategories, ...categoryValues.map((item) => item.value)])]; }
 
-  async function applyFilterChange(next: FilterCondition[], change: VersionChange, before = undoPoint()) {
+  async function applyFilterChange(next: FilterCondition[], change: VersionChange, before = undoPoint()): Promise<boolean> {
+    const previousRequestId = requestId;
     filters = next;
     page = 1;
     pageInput = '1';
-    if (await loadData()) stageChange(change, before);
-    else { filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; page = before.page; pageInput = String(page); }
+    if (await loadData()) { stageChange(change, before); return true; }
+    if (requestId > previousRequestId + 1) return false;
+    filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; page = before.page; pageInput = String(page);
+    return false;
   }
 
   async function addCategoryFilter() {
     if (!filterColumn || selectedCategories.length === 0) return;
+    const base = withoutSelections(filters, dashboardSelections);
     const values = [...selectedCategories];
-    const filter: FilterCondition = { column: filterColumn.name, operator: 'in', value: values, ...(filters.length ? { connector: 'and' as const } : {}) };
+    const filter: FilterCondition = { column: filterColumn.name, operator: 'in', value: values, ...(base.length ? { connector: 'and' as const } : {}) };
     closeInspector();
-    await applyFilterChange([...filters, filter], { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value: values } });
+    await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value: values } });
   }
 
   async function addFilter() {
     if (!filterColumn) return;
+    const base = withoutSelections(filters, dashboardSelections);
     const noValue = filterOperator === 'is_null' || filterOperator === 'not_null';
     if (!noValue && filterValue === '') return;
     const numericValue = filterColumn.numeric ? normalizedNumber(filterValue) : filterValue;
     if (!noValue && numericValue === null) return;
     if (filterColumn.numeric && numericValue !== null) filterValue = formattedNumber(numericValue);
     const value = noValue ? undefined : filterColumn.numeric ? numericValue! : isBooleanType(filterColumn.type) ? filterValue === 'true' : filterValue;
-    const filter: FilterCondition = { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }), ...(filters.length ? { connector: 'and' as const } : {}) };
+    const filter: FilterCondition = { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }), ...(base.length ? { connector: 'and' as const } : {}) };
     closeInspector();
-    await applyFilterChange([...filters, filter], { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
+    await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
   }
 
   function addNullFilter(operator: 'is_null' | 'not_null') { filterOperator = operator; void addFilter(); }
 
   async function toggleFilterConnector(index: number) {
-    const filter = filters[index];
+    if (selectionChartIdAtFilterIndex(filters, dashboardSelections, index)) return;
+    const base = withoutSelections(filters, dashboardSelections);
+    const filter = base[index];
     if (!filter || index === 0) return;
     const connector = filter.connector === 'or' ? 'and' : 'or';
-    await applyFilterChange(filters.map((item, itemIndex) => itemIndex === index ? { ...item, connector } : item), { kind: 'filter-connector', summary: `Use ${connector.toUpperCase()} before ${filter.column}`, details: { index, column: filter.column, connector } });
+    await applyFilterChange(composeFilters(base.map((item, itemIndex) => itemIndex === index ? { ...item, connector } : item), dashboardSelections), { kind: 'filter-connector', summary: `Use ${connector.toUpperCase()} before ${filter.column}`, details: { index, column: filter.column, connector } });
   }
 
   async function removeFilter(index: number) {
     const filter = filters[index];
     if (!filter) return;
+    const chartId = selectionChartIdAtFilterIndex(filters, dashboardSelections, index);
+    if (chartId) {
+      const before = undoPoint();
+      const beforeSelections = dashboardSelections;
+      const nextSelections = dashboardSelections.filter((selection) => selection.chartId !== chartId);
+      dashboardSelections = nextSelections;
+      if (!await applyFilterChange(composeFilters(withoutSelections(filters, beforeSelections), nextSelections), { kind: 'filter-remove', summary: `Clear ${currentDashboard?.charts.find((chart) => chart.id === chartId)?.title ?? 'chart'} selection`, details: { source: 'dashboard', chartId } }, before) && dashboardSelections === nextSelections) {
+        dashboardSelections = beforeSelections;
+      }
+      return;
+    }
+    const base = withoutSelections(filters, dashboardSelections);
     const value = Array.isArray(filter.value) ? [...filter.value] : filter.value;
-    await applyFilterChange(filters.filter((_, itemIndex) => itemIndex !== index), { kind: 'filter-remove', summary: `Remove filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
+    await applyFilterChange(composeFilters(base.filter((_, itemIndex) => itemIndex !== index), dashboardSelections), { kind: 'filter-remove', summary: `Remove filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
   }
   async function setColumnSort(column: ColumnInfo, direction: 'asc' | 'desc' | 'none') {
     const before = undoPoint();
@@ -2151,10 +2335,12 @@
   async function clearQuery() {
     const before = undoPoint();
     const count = filters.length;
+    const beforeSelections = dashboardSelections;
+    dashboardSelections = [];
     sorts = [];
     dedupeColumns = [];
     dedupeDraft = [];
-    await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } }, before);
+    if (!await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } }, before) && !dashboardSelections.length) dashboardSelections = beforeSelections;
   }
   async function backToBuilder() {
     if (!discardPending()) return;
@@ -2464,8 +2650,9 @@
   }
   async function filterCategoricalCell(column: ColumnInfo, value: unknown) {
     if (column.profile_kind !== 'categorical' || (typeof value !== 'string' && typeof value !== 'boolean') || filters.some((filter) => filter.column === column.name && filter.operator === '=' && filter.value === value)) return;
-    const filter: FilterCondition = { column: column.name, operator: '=', value, ...(filters.length ? { connector: 'and' as const } : {}) };
-    await applyFilterChange([...filters, filter], { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value } });
+    const base = withoutSelections(filters, dashboardSelections);
+    const filter: FilterCondition = { column: column.name, operator: '=', value, ...(base.length ? { connector: 'and' as const } : {}) };
+    await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value } });
   }
   function cellTitle(column: ColumnInfo, value: unknown): string { const text = display(value); return column.profile_kind === 'categorical' && (typeof value === 'string' || typeof value === 'boolean') ? `${text} — Double-click to filter by this value` : text; }
   function cellEditText(value: unknown): string { return value == null ? '' : display(value); }
@@ -2557,6 +2744,7 @@
       if (id !== requestId) return;
       closeSql(false);
       clearAggregateDraft();
+      dashboardSelections = [];
       filters = [];
       sorts = [];
       dedupeColumns = [];
@@ -2821,14 +3009,25 @@
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
                     data={visualizeData} loading={visualizeLoading} error={visualizeError}
                     {count} {compact} chartTheme={chartThemeKey} {binLabel}
-                    onSelectBar={(label) => void applyChartMark({ kind: 'category', value: label })}
-                    onSelectBin={(bin, last) => void applyChartMark({ kind: 'bin', lower: bin.lower, upper: bin.upper, last })}
-                    onSelectBox={(group) => void applyChartMark(
-                      visualizeSpec?.encodings.group && group.label !== 'all'
-                        ? { kind: 'category', value: group.label }
-                        : { kind: 'bin', lower: group.whisker_low, upper: group.whisker_high, last: true }
-                    )}
-                    onSelectRegion={(region) => void applyChartMark({ kind: 'region', ...region })}
+                    dashboardNames={currentDashboard?.tabs.map((tab) => tab.name) ?? []}
+                    onAddToDashboard={addChartToDashboard}
+                    onMark={(mark) => void applyChartMark(mark)}
+                  />
+                {:else if canvasMode === 'dashboard'}
+                  <DashboardStage
+                    tabs={currentDashboard?.tabs ?? []}
+                    activeTabId={currentDashboard?.activeTabId ?? ''}
+                    charts={currentDashboard?.charts ?? []}
+                    chartStates={dashboardChartStates}
+                    {count} {compact} chartTheme={chartThemeKey} {binLabel}
+                    onSelectTab={selectDashboardTab}
+                    onCreateTab={createDashboardTab}
+                    onPlace={placeDashboardChart}
+                    onMove={moveDashboardPlacement}
+                    onRemove={removeDashboardPlacement}
+                    onMark={(chartId, mark) => void applyDashboardMark(chartId, mark)}
+                    onRetryChart={(chartId) => void retryDashboardChart(chartId)}
+                    onScroll={saveDashboardScroll}
                   />
                 {:else}
                 <section class="table-pane {rowDensity}" aria-label="View rows" inert={!!inspectorMode}>
