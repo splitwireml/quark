@@ -12,9 +12,11 @@
   import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
+  import { classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
+  import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
+  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartSpec, ChartType, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
-  import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, type ActionMenuMode, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
+  import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, chartThemeStorageKey, type ActionMenuMode, type ChartTheme, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
   import CommandHint from './components/molecules/CommandHint.svelte';
   import CommandDialog from './components/organisms/CommandDialog.svelte';
   import SettingsPage from './components/organisms/SettingsPage.svelte';
@@ -38,6 +40,7 @@
   import InspectorPanel from './components/organisms/InspectorPanel.svelte';
   import FilterInspector from './components/organisms/FilterInspector.svelte';
   import ProfileInspector from './components/organisms/ProfileInspector.svelte';
+  import VisualizeStage from './components/organisms/VisualizeStage.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
   import FormulaMenu from './components/organisms/FormulaMenu.svelte';
   import ExportMenu from './components/organisms/ExportMenu.svelte';
@@ -221,6 +224,17 @@
   let exportRequestId = 0;
   let versionsOpen = $state(false);
 
+  let canvasMode = $state<'rows' | 'chart'>('rows');
+  let visualizeColumns = $state.raw<ColumnInfo[]>([]);
+  let visualizeChart = $state<ChartType | null>(null);
+  let visualizeMetric = $state<AggregateMetric | null>(null);
+  let visualizeSearch = $state('');
+  let visualizeData = $state.raw<VisualizeResponse | null>(null);
+  let visualizeLoading = $state(false);
+  let visualizeError = $state('');
+  let visualizeRequestId = 0;
+  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter']);
+
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
   let sqlText = $state('');
@@ -250,6 +264,10 @@
 
   let toolbarVisibility = $state<ToolbarVisibility>('show');
   let actionMenuMode = $state<ActionMenuMode>('simple');
+  let chartTheme = $state(defaultChartThemePreferences.mode);
+  let chartPalettes = $state<ChartThemePreferences['palettes']>({ ...defaultChartThemePreferences.palettes });
+  let chartPalette = $derived(chartPalettes[chartTheme]);
+  let chartThemeKey = $derived(`${chartTheme}:${chartPalette}`);
   let settingsOpen = $state(false);
   let densityMenuOpen = $state(false);
   let settingsError = $state('');
@@ -285,6 +303,31 @@
     actionMenuMode = value;
     try { localStorage.setItem(actionMenuStorageKey, value); settingsError = ''; }
     catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function applyChartThemeColors() {
+    const root = document.documentElement;
+    const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
+    const legacyTheme = chartTheme === 'single' ? 'primary' : chartTheme === 'multicolor' ? 'rich' : 'monotone';
+    root.dataset.chartTheme = legacyTheme;
+    root.dataset.chartMode = chartTheme;
+    root.dataset.chartPalette = chartPalettes[chartTheme];
+    for (const [name, value] of Object.entries(chartThemeCssVariables(preferences))) root.style.setProperty(name, value);
+  }
+  function persistChartThemePreferences() {
+    const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
+    try { localStorage.setItem(chartThemeStorageKey, serializeChartThemePreferences(preferences)); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function setChartTheme(value: ChartTheme) {
+    chartTheme = value;
+    applyChartThemeColors();
+    persistChartThemePreferences();
+  }
+  function setChartPalette(value: ChartPalette) {
+    if (!isChartPalette(chartTheme, value)) return;
+    chartPalettes = { ...chartPalettes, [chartTheme]: value };
+    applyChartThemeColors();
+    persistChartThemePreferences();
   }
   function clearCommandSequence() {
     commandPrefix = null; sourcePicking = false; sourceDigits = '';
@@ -416,8 +459,12 @@
     try {
       const value = localStorage.getItem(toolbarStorageKey); if (value === 'show' || value === 'hover' || value === 'hide') toolbarVisibility = value;
       const menu = localStorage.getItem(actionMenuStorageKey); if (menu === 'simple' || menu === 'comprehensive') actionMenuMode = menu;
+      const chartPreferences = readChartThemePreferences(localStorage.getItem(chartThemeStorageKey));
+      chartTheme = chartPreferences.mode;
+      chartPalettes = { ...chartPreferences.palettes };
     }
     catch { settingsError = 'Preferences are unavailable in this browser.'; }
+    applyChartThemeColors();
     window.addEventListener('keydown', captureCommands, true);
     window.addEventListener('blur', clearCommandSequence);
     window.addEventListener('focusin', clearSequenceOnEdit);
@@ -508,6 +555,19 @@
   let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateItem?.column));
   let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
   let canCreateAggregate = $derived(aggregateRecipe.length > 0 && aggregateFields.some((item) => (item.metrics?.length ?? 0) > 0));
+  let visualizeFieldOptions = $derived((result?.columns ?? []).filter((column) => classifyColumn(column) !== null));
+  let visualizeSuggestions = $derived(suggestCharts(visualizeColumns).filter((item) => implementedCharts.has(item.chart)));
+  let visualizeSpec = $derived.by((): ChartSpec | null => {
+    const suggestions = visualizeSuggestions;
+    if (!suggestions.length) return null;
+    const pick = (visualizeChart && suggestions.find((item) => item.chart === visualizeChart)) || suggestions[0];
+    const metric = pick.chart === 'bar' && pick.encodings.value
+      ? (visualizeMetric ?? pick.metric ?? 'avg')
+      : pick.metric;
+    return metric
+      ? { chart: pick.chart, encodings: pick.encodings, metric }
+      : { chart: pick.chart, encodings: pick.encodings };
+  });
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
   let columnMenuRegexResult = $derived(matchColumnsByRegex(columnOrder, columnMenuSearch.trim()));
   let columnMenuItems = $derived.by(() => {
@@ -537,6 +597,83 @@
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
   function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
+  function resetVisualizeDraft() {
+    visualizeColumns = [];
+    visualizeChart = null;
+    visualizeMetric = null;
+    visualizeSearch = '';
+    visualizeData = null;
+    visualizeError = '';
+    canvasMode = 'rows';
+  }
+
+  function setCanvasMode(mode: 'rows' | 'chart') {
+    canvasMode = mode;
+    if (mode === 'chart') void loadVisualize();
+  }
+
+  function toggleVisualizeColumn(name: string) {
+    if (visualizeColumns.some((column) => column.name === name)) {
+      visualizeColumns = visualizeColumns.filter((column) => column.name !== name);
+    } else {
+      const column = result?.columns.find((item) => item.name === name);
+      if (!column) return;
+      visualizeColumns = [...visualizeColumns, column];
+    }
+    visualizeSearch = '';
+    if (visualizeChart && !suggestCharts(visualizeColumns).some((item) => item.chart === visualizeChart && implementedCharts.has(item.chart))) {
+      visualizeChart = null;
+    }
+    void loadVisualize();
+  }
+
+  function selectVisualizeChart(chart: ChartType) {
+    visualizeChart = chart;
+    void loadVisualize();
+  }
+
+  function selectVisualizeMetric(metric: AggregateMetric) {
+    visualizeMetric = metric;
+    void loadVisualize();
+  }
+
+  async function loadVisualize() {
+    const spec = visualizeSpec;
+    if (canvasMode !== 'chart') return;
+    if (!spec || !implementedCharts.has(spec.chart)) {
+      visualizeData = null;
+      visualizeError = '';
+      visualizeLoading = false;
+      return;
+    }
+    const id = ++visualizeRequestId;
+    visualizeLoading = true;
+    visualizeError = '';
+    try {
+      const body = { spec, page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns };
+      const next = queryMode === 'sql'
+        ? await api.visualizeSql(activeSqlNodeId || selectedNodeId, { ...body, sql: sqlBase || activeSql })
+        : await api.visualizeDataset(selectedNodeId, selectedDataset, body);
+      if (id !== visualizeRequestId) return;
+      visualizeData = next;
+    } catch (reason) {
+      if (id === visualizeRequestId) {
+        visualizeError = message(reason);
+        visualizeData = null;
+      }
+    } finally {
+      if (id === visualizeRequestId) visualizeLoading = false;
+    }
+  }
+
+  async function applyChartMark(mark: Parameters<typeof filtersFromMark>[1]) {
+    if (!visualizeSpec) return;
+    const added = filtersFromMark(visualizeSpec, mark, filters.length);
+    if (!added.length) return;
+    const summary = added.map(filterSummary).join(' and ');
+    await applyFilterChange([...filters, ...added], { kind: 'filter', summary: `Filter ${summary}`, details: { source: 'chart' } });
+  }
+
   function filterSummary(filter: FilterCondition): string {
     const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most' };
     if (filter.operator === 'is_null' || filter.operator === 'not_null') return `${filter.column} ${labels[filter.operator]}`;
@@ -1511,6 +1648,7 @@
     activeJoin = undefined;
     lastHiddenColumn = null;
     shownColumnTypes = [];
+    resetVisualizeDraft();
     error = '';
     recordingNotice = '';
     queryMenuOpen = null;
@@ -1700,6 +1838,7 @@
     page = 1;
     pageInput = '1';
     railOpen = false;
+    resetVisualizeDraft();
     const version = history.versions.find((item) => item.id === history.activeVersionId) ?? history.versions[history.versions.length - 1];
     if (version) await replayVersionSnapshot(version);
   }
@@ -1837,6 +1976,7 @@
       await tick();
       gridApi?.scrollToAbsoluteRow((next.page - 1) * next.page_size);
       if (sqlOpen) createSqlEditor();
+      if (canvasMode === 'chart') void loadVisualize();
       return true;
     } catch (reason) { if (id === requestId) sqlError = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
@@ -2553,7 +2693,7 @@
 
   {#snippet main()}
     <main>
-      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
+      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} {chartTheme} chartPalette={chartPalette} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onChartTheme={setChartTheme} onChartPalette={setChartPalette} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
       <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
         <WelcomeScreen
@@ -2586,6 +2726,7 @@
             onUndo={() => void undoLastChange()}
             {exportOpen}
             inert={!!inspectorMode}
+            {canvasMode} onCanvasMode={setCanvasMode} canChart={!!result}
           >
             {#snippet versionMenu()}
               <VersionMenu
@@ -2644,6 +2785,24 @@
                 />
               {/if}
               <div class="data-stage">
+                {#if canvasMode === 'chart'}
+                  <VisualizeStage
+                    columnSearch={visualizeSearch} setColumnSearch={(value) => visualizeSearch = value}
+                    columns={visualizeFieldOptions} selected={visualizeColumns}
+                    onToggleColumn={toggleVisualizeColumn}
+                    suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
+                    data={visualizeData} loading={visualizeLoading} error={visualizeError}
+                    {count} {compact} chartTheme={chartThemeKey} {binLabel}
+                    onSelectBar={(label) => void applyChartMark({ kind: 'category', value: label })}
+                    onSelectBin={(bin, last) => void applyChartMark({ kind: 'bin', lower: bin.lower, upper: bin.upper, last })}
+                    onSelectBox={(group) => void applyChartMark(
+                      visualizeSpec?.encodings.group && group.label !== 'all'
+                        ? { kind: 'category', value: group.label }
+                        : { kind: 'bin', lower: group.whisker_low, upper: group.whisker_high, last: true }
+                    )}
+                    onSelectRegion={(region) => void applyChartMark({ kind: 'region', ...region })}
+                  />
+                {:else}
                 <section class="table-pane {rowDensity}" aria-label="View rows" inert={!!inspectorMode}>
                   <div class="table-card" class:recording={!!currentHistory?.pendingChanges.length} aria-busy={loadingData}>
                     {#if loadingData && !result}
@@ -2697,6 +2856,7 @@
                     />
                   {/if}
                 </section>
+                {/if}
                 {#if inspectorMode}
                   <InspectorPanel
                     title={filterColumn?.name ?? statsColumn?.name ?? ''}

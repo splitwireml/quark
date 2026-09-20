@@ -1933,3 +1933,117 @@ def test_find_cell_searches_whole_view_literal_values_and_wraps(client):
     assert client.post(endpoint, json={**body, "columns": ["missing"]}).status_code == 422
     assert client.post(endpoint, json={**body, "sql": "DELETE FROM search"}).status_code == 422
     assert client.post(endpoint, json={**body, "term": ""}).status_code == 422
+
+
+def test_visualize_bar_counts_top_values_and_other_bucket(client, tmp_path):
+    db = tmp_path / "viz.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE sales(region VARCHAR, price DOUBLE)")
+        con.execute("INSERT INTO sales VALUES ('east', 10), ('east', 20), ('east', 30), ('west', 40), ('west', 50), (NULL, 60)")
+        con.execute("INSERT INTO sales SELECT 'g' || i, 1 FROM range(31) t(i)")
+    node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'sales')['id']}"
+    body = {"spec": {"chart": "bar", "encodings": {"category": "region"}, "metric": "count"}}
+    response = client.post(base + "/visualize", json=body)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["chart"] == "bar"
+    assert payload["elapsed_ms"] >= 0
+    labels = [row["label"] for row in payload["rows"]]
+    assert "east" in labels and "west" in labels
+    east = next(row for row in payload["rows"] if row["label"] == "east")
+    west = next(row for row in payload["rows"] if row["label"] == "west")
+    assert east["value"] == 3
+    assert west["value"] == 2
+    assert len(payload["rows"]) == 30
+    assert None not in labels
+    # 33 non-null distinct regions (east, west, g0–g30); top 30 leave three g-groups in Other.
+    assert payload["other_count"] == 3
+
+
+def test_visualize_histogram_matches_filtered_profile_bins(client):
+    node = upload(client, "hist.csv", b"group,amount\nscope,1\nscope,2\nscope,3\nother,100\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'hist')['id']}"
+    request = {
+        "filters": [{"column": "group", "operator": "=", "value": "scope"}],
+        "spec": {"chart": "histogram", "encodings": {"value": "amount"}},
+    }
+    response = client.post(base + "/visualize", json=request)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["chart"] == "histogram"
+    assert sum(bin_["count"] for bin_ in payload["bins"]) == 3
+    stats = client.post(base + "/columns/amount/stats", json={"filters": request["filters"]})
+    assert stats.status_code == 200, stats.text
+    assert payload["bins"] == stats.json()["histogram"]
+
+
+def test_visualize_sql_bar_and_rejects_unknown_columns_and_charts(client):
+    node = upload(client, "items.csv", b"category,price\na,10\na,20\nb,30\n")
+    sql = 'SELECT * FROM "main"."items"'
+    endpoint = f"/api/nodes/{node['id']}/sql/visualize"
+    ok = client.post(endpoint, json={"sql": sql, "spec": {"chart": "bar", "encodings": {"category": "category"}, "metric": "count"}})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["rows"] == [{"label": "a", "value": 2, "n": 2}, {"label": "b", "value": 1, "n": 1}]
+    assert ok.json()["other_count"] == 0
+    assert client.post(endpoint, json={"sql": sql, "spec": {"chart": "bar", "encodings": {"category": "missing"}}}).status_code == 422
+    scatter = client.post(endpoint, json={"sql": sql, "spec": {"chart": "scatter", "encodings": {"x": "price", "y": "price"}}})
+    assert scatter.status_code == 200, scatter.text
+    assert scatter.json()["chart"] == "scatter"
+    assert len(scatter.json()["points"]) == 3
+    assert scatter.json()["total_points"] == 3
+    assert client.post(f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'items')['id']}/visualize", json={
+        "spec": {"chart": "histogram", "encodings": {"value": "category"}},
+    }).status_code == 422
+
+
+def test_visualize_scatter_carries_color_categories_and_rejects_unknown_color(client):
+    node = upload(client, "scatter.csv", b"x,y,region\n1,10,east\n2,20,east\n3,30,west\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'scatter')['id']}"
+    response = client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "region"}},
+    })
+    assert response.status_code == 200, response.text
+    points = response.json()["points"]
+    assert sorted(point["color"] for point in points) == ["east", "east", "west"]
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "missing"}},
+    }).status_code == 422
+
+
+def test_visualize_bar_aggregates_numeric_measure(client):
+    node = upload(client, "agg.csv", b"region,amount\neast,10\neast,30\nwest,40\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'agg')['id']}"
+    avg = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": {"category": "region", "value": "amount"}, "metric": "avg"}})
+    assert avg.status_code == 200, avg.text
+    rows = {row["label"]: row for row in avg.json()["rows"]}
+    assert rows["east"]["value"] == 20
+    assert rows["west"]["value"] == 40
+    assert rows["east"]["n"] == 2
+    median = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": {"category": "region", "value": "amount"}, "metric": "median"}})
+    assert median.json()["rows"][0]["value"] in (20, 40, 10, 30)
+    minimum = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": {"category": "region", "value": "amount"}, "metric": "min"}})
+    mins = {row["label"]: row["value"] for row in minimum.json()["rows"]}
+    assert mins == {"east": 10, "west": 40}
+
+
+def test_visualize_box_tukey_whiskers_outliers_and_groups(client):
+    node = upload(client, "box.csv", b"region,amount\n" + b"".join(f"east,{i}\n".encode() for i in range(1, 11)) + b"east,100\n" + b"".join(f"west,{i}\n".encode() for i in range(2, 8)))
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'box')['id']}"
+    single = client.post(base + "/visualize", json={"spec": {"chart": "box", "encodings": {"value": "amount"}}})
+    assert single.status_code == 200, single.text
+    payload = single.json()
+    assert payload["chart"] == "box"
+    group = payload["groups"][0]
+    assert group["p25"] < group["median"] < group["p75"]
+    assert group["whisker_low"] <= group["p25"]
+    assert group["p75"] <= group["whisker_high"]
+    assert 100 in group["outliers"] or 100.0 in group["outliers"]
+    assert group["whisker_high"] < 100
+    grouped = client.post(base + "/visualize", json={"spec": {"chart": "box", "encodings": {"value": "amount", "group": "region"}}})
+    assert grouped.status_code == 200, grouped.text
+    labels = {item["label"] for item in grouped.json()["groups"]}
+    assert labels == {"east", "west"}
+    east = next(item for item in grouped.json()["groups"] if item["label"] == "east")
+    assert 100 in east["outliers"] or 100.0 in east["outliers"]
+    assert client.post(base + "/visualize", json={"spec": {"chart": "box", "encodings": {"value": "region"}}}).status_code == 422

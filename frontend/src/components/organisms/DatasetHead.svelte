@@ -29,12 +29,16 @@
     exportOpen: boolean;
     exportMenu?: Snippet;
     inert?: boolean;
+    canvasMode?: 'rows' | 'chart';
+    onCanvasMode?: (mode: 'rows' | 'chart') => void;
+    canChart?: boolean;
   };
   let {
     title, versionLabel, canPreviousVersion, canNextVersion, onPreviousVersion, onNextVersion,
     versionOpen, onToggleVersions, versionMenu,
     showMeta, rows, ms, showRefresh, onRefresh, onExport, loadingData, canExport, exporting,
-    pendingCount, onStopRecording, canUndo, onUndo, exportOpen, exportMenu, inert = false
+    pendingCount, onStopRecording, canUndo, onUndo, exportOpen, exportMenu, inert = false,
+    canvasMode = 'rows', onCanvasMode, canChart = false
   }: Props = $props();
 </script>
 
@@ -57,6 +61,12 @@
       </div>
     {/if}
     {#if showMeta}<span class="sep" aria-hidden="true">|</span><span class="meta">{rows} rows</span><span class="sep" aria-hidden="true">|</span><span class="meta">{ms} ms</span>{/if}
+    {#if onCanvasMode}
+      <div class="mode" role="group" aria-label="Canvas">
+        <button type="button" class:on={canvasMode === 'rows'} aria-pressed={canvasMode === 'rows'} onclick={() => onCanvasMode('rows')}>Rows</button>
+        <button type="button" class:on={canvasMode === 'chart'} aria-pressed={canvasMode === 'chart'} disabled={!canChart} onclick={() => onCanvasMode('chart')}>Chart</button>
+      </div>
+    {/if}
   </div>
   {#if versionLabel || showRefresh || pendingCount}
     <div class="actions">
@@ -115,4 +125,26 @@
   .actions, .version-actions { display: flex; align-items: center; gap: 6px; }
   .export-anchor { position: relative; display: flex; }
   .version-actions { gap: 2px; }
+  .mode {
+    display: inline-flex;
+    align-self: center;
+    margin-left: 6px;
+    padding: 2px;
+    gap: 2px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+  }
+  .mode button {
+    height: 22px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    font: 11px var(--font-mono);
+    color: var(--muted);
+  }
+  .mode button:hover:not(:disabled) { color: var(--ink); }
+  .mode button.on { background: var(--surface); color: var(--ink); }
+  .mode button:disabled { opacity: 0.45; }
 </style>

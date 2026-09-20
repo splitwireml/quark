@@ -3,6 +3,8 @@ import type { TableRows } from './table-rows';
 export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=';
 export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
+export type VizKind = 'categorical' | 'discrete' | 'continuous' | 'date';
+export type ChartType = 'bar' | 'histogram' | 'box' | 'scatter' | 'line';
 export type AggregateCount = number | string;
 
 export interface SourceSummary {
@@ -194,6 +196,101 @@ export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColu
 
 export type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
 export type AggregateRecipeItem = { id: number; column: string; metrics: AggregateMetric[] | null };
+
+export interface ChartEncodings {
+  x?: string;
+  y?: string;
+  category?: string;
+  value?: string;
+  group?: string;
+  size?: string;
+  color?: string;
+  pattern?: string;
+}
+
+export interface ChartSpec {
+  chart: ChartType;
+  encodings: ChartEncodings;
+  metric?: AggregateMetric;
+  density?: boolean;
+}
+
+export interface ChartSuggestion {
+  chart: ChartType;
+  encodings: ChartEncodings;
+  metric?: AggregateMetric;
+}
+
+export type ChartMark =
+  | { kind: 'category'; value: string | boolean | number }
+  | { kind: 'bin'; lower: NumericValue; upper: NumericValue; last?: boolean }
+  | { kind: 'region'; xMin: NumericValue; xMax: NumericValue; yMin: NumericValue; yMax: NumericValue };
+
+export interface BarVisualizeRow {
+  label: string | boolean | number;
+  value: AggregateCount;
+  n?: AggregateCount;
+}
+
+export interface BarVisualizeResponse {
+  chart: 'bar';
+  rows: BarVisualizeRow[];
+  other_count: AggregateCount;
+  elapsed_ms: number;
+}
+
+export interface HistogramVisualizeResponse {
+  chart: 'histogram';
+  bins: HistogramBin[];
+  elapsed_ms: number;
+}
+
+export interface BoxGroup {
+  label: string | boolean | number;
+  p25: NumericValue;
+  median: NumericValue;
+  p75: NumericValue;
+  whisker_low: NumericValue;
+  whisker_high: NumericValue;
+  outliers: NumericValue[];
+  count: AggregateCount;
+}
+
+export interface BoxVisualizeResponse {
+  chart: 'box';
+  groups: BoxGroup[];
+  elapsed_ms: number;
+}
+
+export interface ScatterPoint {
+  x: NumericValue;
+  y: NumericValue;
+  color?: string | number | boolean | null;
+}
+
+export interface ScatterVisualizeResponse {
+  chart: 'scatter';
+  points: ScatterPoint[];
+  total_points: AggregateCount;
+  elapsed_ms: number;
+}
+
+export type VisualizeResponse = BarVisualizeResponse | HistogramVisualizeResponse | BoxVisualizeResponse | ScatterVisualizeResponse;
+
+export interface ChartHover {
+  title: string;
+  lines: string[];
+  hint?: string;
+}
+
+export interface VisualizeRequest extends QueryRequest {
+  spec: ChartSpec;
+}
+
+export interface SqlVisualizeRequest extends SqlQueryRequest {
+  spec: ChartSpec;
+}
+
 export type RowDensity = 'compact' | 'default' | 'comfortable';
 export type DistributionMode = 'count' | 'percent';
 

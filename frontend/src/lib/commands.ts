@@ -2,7 +2,9 @@ import type { IconName } from './icons';
 
 export type ToolbarVisibility = 'show' | 'hover' | 'hide';
 export type ActionMenuMode = 'simple' | 'comprehensive';
+export type { ChartTheme } from './chartThemes';
 export const actionMenuStorageKey = 'quark.action-menu';
+export const chartThemeStorageKey = 'quark.chart-theme';
 export type CommandPrefix = 'find' | 'column' | 'sidebar' | null;
 export const combinationTimeoutMs = 3000;
 export const toolbarStorageKey = 'quark.toolbar-visibility';
