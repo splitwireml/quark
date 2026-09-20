@@ -10,7 +10,8 @@
     "test": "node --experimental-strip-types --test tests/table-rows.test.js tests/aggregate-sql.test.js tests/clipboard.test.js tests/join-sql.test.js tests/mutation-sql.test.js tests/row-scrollbar.test.js tests/scroll-prefetch.test.js tests/versioning.test.js tests/commands.test.js tests/visualize.test.js",
     "test:mutation": "node --experimental-strip-types --test tests/mutation-sql.test.js",
     "benchmark:arrow": "node tests/arrow-benchmark.mjs",
-    "test:scroll-browser": "node tests/scroll-browser.mjs"
+    "test:scroll-browser": "node tests/scroll-browser.mjs",
+    "test:scatter-browser": "node tests/scatter-browser.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "latest",

@@ -50,12 +50,13 @@
     height: Math.abs(brush.y1 - brush.y0)
   } : null);
 
-  function rememberPlot(plot: PlotRect) {
-    const prev = plotRef;
-    if (!prev || prev.x !== plot.x || prev.y !== plot.y || prev.width !== plot.width || prev.height !== plot.height) {
-      plotRef = plot;
-    }
-    return plot;
+  function syncPlot(plot: PlotRect) {
+    return () => {
+      const prev = plotRef;
+      if (!prev || prev.x !== plot.x || prev.y !== plot.y || prev.width !== plot.width || prev.height !== plot.height) {
+        plotRef = plot;
+      }
+    };
   }
 
   $effect(() => {
@@ -215,8 +216,9 @@
   <div class="wrap">
     <ChartFrame {xTicks} {yTicks} {xTitle} {yTitle} {hover} label="Scatter plot" onDismiss={() => { if (!brush) hover = null; }}>
       {#snippet children(plot)}
-        {@const current = rememberPlot(plot)}
+        {@const current = plot}
         <rect
+          {@attach syncPlot(current)}
           class="hit"
           x={current.x} y={current.y} width={current.width} height={current.height}
           role="application"
