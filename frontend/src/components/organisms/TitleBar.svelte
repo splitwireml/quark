@@ -37,7 +37,7 @@
   .rail-toggle { display: inline-flex; }
   .glyph-btn:hover { background: var(--surface-hover); }
   .brand { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-weight: 600; color: var(--ink); }
-  .brand span { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: var(--radius-sm); background: var(--ink-fill); color: #fff; font-size: 11px; }
+  .brand span { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: var(--radius-sm); background: var(--ink-fill); color: var(--on-fill); font-size: 11px; }
   .breadcrumbs { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; font-size: 12.5px; color: var(--faint); }
   .breadcrumbs :global(.btn) { height: 26px; padding: 0 7px; }
   .breadcrumbs b { color: var(--ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

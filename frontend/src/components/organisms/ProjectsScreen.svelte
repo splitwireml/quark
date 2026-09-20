@@ -179,7 +179,7 @@
     pointer-events: auto;
     cursor: pointer;
   }
-  .go.ready:hover { background: color-mix(in srgb, var(--success) 86%, #000); }
+  .go.ready:hover { background: color-mix(in srgb, var(--success) 86%, var(--ink)); }
 
   .view-toggle {
     position: relative;

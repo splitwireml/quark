@@ -117,7 +117,7 @@
     display: flex; align-items: center; justify-content: center;
     border-radius: var(--radius-lg);
     background: var(--ink-fill);
-    color: #FFFFFF;
+    color: var(--on-fill);
     font-family: var(--font-mono);
     font-weight: 600;
   }

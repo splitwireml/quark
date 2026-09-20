@@ -105,7 +105,7 @@
   .row { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 6px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; }
   .row:hover { background: var(--surface-hover); }
   .row input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph); color: #fff; font-size: 8px; }
+  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph); color: var(--on-fill); font-size: 8px; }
   input:checked + .box { background: var(--action); border-color: var(--action); }
   .row span:not(.box) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row small { color: var(--faint); font-family: var(--font-mono); }
