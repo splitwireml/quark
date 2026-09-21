@@ -52,7 +52,7 @@
         onSelect={(value, series) => onMark({ kind: 'category', value, series })} />
       {#if data.series}
         <ChartLegend kind="series" title={spec.encodings.group ?? 'Series'}
-          items={data.series.map((label, index) => ({ label, color: `var(--chart-series-${(index % 6) + 1})` }))} />
+          items={data.series.map((label, index) => ({ label, color: `var(--chart-group-${(index % 6) + 1})` }))} />
       {/if}
     </div>
   {:else if data?.chart === 'histogram'}

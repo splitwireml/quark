@@ -252,6 +252,22 @@ export function serializeChartThemePreferences(preferences: ChartThemePreference
   return JSON.stringify(normalizeChartThemePreferences(preferences));
 }
 
+/* A single palette is one accent repeated six times, which is exactly right for an ungrouped
+   chart and useless for a grouped one — every series would draw the same blue. When a chart
+   actually carries series, borrow the monotone ramp closest in hue to the chosen accent. The
+   accent itself is untouched, so the workspace keeps the colour the user picked. */
+const singleGroupRamp: Record<string, ChartPalette> = {
+  blue: 'ocean', violet: 'ocean', teal: 'forest', amber: 'ember'
+};
+
+export function groupPaletteColorsFor(preferences: ChartThemePreferences, scheme: ColorScheme): ChartPaletteColors {
+  if (preferences.mode !== 'single') {
+    return paletteColorsFor(chartPaletteFor(preferences.mode, preferences.palettes[preferences.mode]), scheme);
+  }
+  const ramp = singleGroupRamp[preferences.palettes.single] ?? 'graphite';
+  return paletteColorsFor(chartPaletteFor('monotone', ramp), scheme);
+}
+
 export function chartThemeCssVariables(preferences: ChartThemePreferences, scheme: ColorScheme = 'light'): Record<string, string> {
   const selected = paletteColorsFor(chartPaletteFor(preferences.mode, preferences.palettes[preferences.mode]), scheme);
   const variables: Record<string, string> = {
@@ -263,6 +279,11 @@ export function chartThemeCssVariables(preferences: ChartThemePreferences, schem
   selected.series.forEach((color, index) => {
     variables[`--chart-series-${index + 1}`] = color;
     variables[`--chart-series-${index + 1}-fill`] = selected.seriesFill[index] ?? selected.mark;
+  });
+  const group = groupPaletteColorsFor(preferences, scheme);
+  group.series.forEach((color, index) => {
+    variables[`--chart-group-${index + 1}`] = color;
+    variables[`--chart-group-${index + 1}-fill`] = group.seriesFill[index] ?? group.mark;
   });
   return variables;
 }

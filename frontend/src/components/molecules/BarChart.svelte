@@ -92,8 +92,11 @@
           <rect
             {x} {y} width={w} height={barHeight} rx="1"
             class="bar"
+            class:series={!!series}
             class:flat={!clickable}
-            style={`--chart-bar-fill:var(--chart-series-${((series ? seriesIndex : index) % 6) + 1}-fill)`}
+            style={series
+              ? `--chart-bar-fill:var(--chart-group-${(seriesIndex % 6) + 1}); --chart-bar-stroke:var(--chart-group-${(seriesIndex % 6) + 1})`
+              : `--chart-bar-fill:var(--chart-series-${(index % 6) + 1}-fill)`}
             tabindex={clickable ? 0 : -1}
             role="button"
             aria-disabled={!clickable}
@@ -112,10 +115,12 @@
 {/if}
 
 <style>
-  .bar { fill: var(--chart-bar-fill, var(--chart-mark)); stroke: var(--chart-mark-strong); stroke-width: .75px; cursor: pointer; }
-  .bar:hover, .bar:focus-visible { fill: var(--chart-mark-strong); outline: none; }
+  .bar { fill: var(--chart-bar-fill, var(--chart-mark)); stroke: var(--chart-bar-stroke, var(--chart-mark-strong)); stroke-width: .75px; cursor: pointer; }
+  .bar:hover, .bar:focus-visible { fill: var(--chart-bar-stroke, var(--chart-mark-strong)); outline: none; }
+  .bar.series:hover, .bar.series:focus-visible { fill: color-mix(in srgb, var(--chart-bar-fill) 78%, var(--ink)); }
   .bar.flat { cursor: default; }
   .bar.flat:hover { fill: var(--chart-bar-fill, var(--chart-mark)); }
+  .bar.flat { opacity: .75; }
   .empty { margin: auto; font-size: 12.5px; color: var(--muted); }
   @media (prefers-reduced-motion: no-preference) {
     .bar { transform-box: fill-box; transform-origin: center bottom; animation: grow 160ms cubic-bezier(0.16, 1, 0.3, 1) both; transition: x 220ms cubic-bezier(0.22, 1, 0.36, 1), y 220ms cubic-bezier(0.22, 1, 0.36, 1), width 220ms cubic-bezier(0.22, 1, 0.36, 1), height 220ms cubic-bezier(0.22, 1, 0.36, 1); }
