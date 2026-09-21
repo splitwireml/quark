@@ -6,6 +6,7 @@
   import ScatterPlot from './ScatterPlot.svelte';
   import ChartLegend from './ChartLegend.svelte';
   import LineChart from './LineChart.svelte';
+  import PieChart from './PieChart.svelte';
   import { metricTitle } from '../../lib/visualize';
   import type { AggregateCount, BoxGroup, ChartMark, ChartSpec, HistogramBin, VisualizeResponse } from '../../lib/types';
 
@@ -31,10 +32,10 @@
   let yTitle = $derived(
     spec.chart === 'line' ? (spec.encodings.y ? metricTitle(spec.metric ?? 'avg', spec.encodings.y) : 'Rows')
       : spec.chart === 'box' || spec.chart === 'scatter' ? (spec.encodings.y ?? spec.encodings.value ?? '')
-      : spec.chart === 'bar' && spec.encodings.value ? metricTitle(spec.metric, spec.encodings.value)
+      : (spec.chart === 'bar' || spec.chart === 'pie') && spec.encodings.value ? metricTitle(spec.metric, spec.encodings.value)
       : 'Rows'
   );
-  let aggregated = $derived(spec.chart === 'bar' && !!spec.encodings.value);
+  let aggregated = $derived((spec.chart === 'bar' || spec.chart === 'pie') && !!spec.encodings.value);
 
   function boxMark(group: BoxGroup): ChartMark {
     return spec.encodings.group && group.label !== 'all'
@@ -84,6 +85,9 @@
           min={compact(data.size_domain[0])} max={compact(data.size_domain[1])} />
       {/if}
     </div>
+  {:else if data?.chart === 'pie'}
+    <PieChart rows={data.rows} title={yTitle} {count} {compact} {aggregated}
+      onSelect={(value) => onMark({ kind: 'category', value })} />
   {:else if data?.chart === 'line'}
     <!-- ponytail: a line mark filters the bucket start; widen to a bucket range filter if users ask for it -->
     <div class="stack">
@@ -95,7 +99,7 @@
       {/if}
     </div>
   {:else}
-    <div class="state"><strong>This chart is not available yet</strong><span>Bar, line, histogram, box, and scatter are ready for this column mix.</span></div>
+    <div class="state"><strong>This chart is not available yet</strong><span>Bar, line, pie, histogram, box, and scatter are ready for this column mix.</span></div>
   {/if}
   {#if loading && data}<span class="refreshing" role="status">Refreshing chart…</span>{/if}
 </div>

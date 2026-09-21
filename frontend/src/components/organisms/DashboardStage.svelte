@@ -71,7 +71,7 @@
     if (!pick || !editingChart) return null;
     const encodings = applyRoles(pick.encodings, pick.chart, editRoles, editColumns);
     return { ...editingChart.spec, ...pick, encodings,
-      metric: (pick.chart === 'bar' && encodings.value) || (pick.chart === 'line' && encodings.y)
+      metric: ((pick.chart === 'bar' || pick.chart === 'pie') && encodings.value) || (pick.chart === 'line' && encodings.y)
         ? editMetric ?? pick.metric ?? 'avg' : pick.metric,
       layout: pick.chart === 'bar' && encodings.group ? editLayout ?? editingChart.spec.layout ?? 'grouped' : undefined,
       grain: pick.chart === 'line' ? editGrain ?? editingChart.spec.grain : undefined };

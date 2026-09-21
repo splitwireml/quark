@@ -2186,3 +2186,35 @@ def test_visualize_line_rejects_a_non_date_x(client):
     assert client.post(base + "/visualize", json={
         "spec": {"chart": "line", "encodings": {"x": "x", "y": "y"}},
     }).status_code == 422
+
+
+def test_visualize_pie_uses_the_tighter_slice_limit(client):
+    body = b"tag,amount\n" + b"".join(f"t{i},{i}\n".encode() for i in range(20))
+    node = upload(client, "slices.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'slices')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "pie", "encodings": {"category": "tag", "value": "amount"}, "metric": "sum"},
+    }).json()
+    assert payload["chart"] == "pie"
+    assert len(payload["rows"]) == 8
+    assert payload["other_count"] > 0
+
+
+def test_visualize_pie_rejects_negative_values(client):
+    node = upload(client, "negative.csv", b"tag,amount\na,5\nb,-3\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'negative')['id']}"
+    response = client.post(base + "/visualize", json={
+        "spec": {"chart": "pie", "encodings": {"category": "tag", "value": "amount"}, "metric": "sum"},
+    })
+    assert response.status_code == 422
+    assert "negative" in response.json()["detail"].lower()
+
+
+def test_visualize_pie_ignores_a_group_encoding(client):
+    node = upload(client, "piegroup.csv", b"tag,quarter,amount\na,q1,5\na,q2,7\nb,q1,3\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'piegroup')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "pie", "encodings": {"category": "tag", "value": "amount", "group": "quarter"}, "metric": "sum"},
+    }).json()
+    assert payload["series"] is None
+    assert all("values" not in row for row in payload["rows"])

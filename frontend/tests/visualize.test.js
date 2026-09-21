@@ -45,9 +45,10 @@ test('classifies columns by profile kind and integer vs float', () => {
   assert.equal(classifyColumn(blob), null);
 });
 
-test('one categorical column suggests a count bar', () => {
+test('one categorical column suggests a count bar, then a pie', () => {
   const suggestion = defaultOf([region]);
-  assert.deepEqual(charts([region]), ['bar']);
+  assert.deepEqual(charts([region]), ['bar', 'pie']);
+  assert.deepEqual(suggestCharts([region])[1].encodings, { category: 'region' });
   assert.equal(suggestion.chart, 'bar');
   assert.deepEqual(suggestion.encodings, { category: 'region' });
   assert.equal(suggestion.metric, 'count');
@@ -73,12 +74,13 @@ test('one date column prefers a time histogram then a year bar', () => {
 
 test('categorical plus continuous defaults to an aggregated bar', () => {
   const suggestion = defaultOf([region, price]);
-  assert.deepEqual(charts([region, price]), ['bar', 'box', 'histogram']);
+  assert.deepEqual(charts([region, price]), ['bar', 'pie', 'box', 'histogram']);
   assert.equal(suggestion.chart, 'bar');
   assert.deepEqual(suggestion.encodings, { category: 'region', value: 'price' });
   assert.equal(suggestion.metric, 'avg');
-  assert.deepEqual(suggestCharts([region, price])[1].encodings, { group: 'region', value: 'price' });
+  assert.deepEqual(suggestCharts([region, price])[1].encodings, { category: 'region', value: 'price' });
   assert.deepEqual(suggestCharts([region, price])[2].encodings, { group: 'region', value: 'price' });
+  assert.deepEqual(suggestCharts([region, price])[3].encodings, { group: 'region', value: 'price' });
 });
 
 test('two number columns prefer scatter even when one is integer', () => {

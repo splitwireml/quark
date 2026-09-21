@@ -1446,19 +1446,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         started = time.perf_counter()
         columns = dict(metadata_columns)
-        if spec.chart == "bar":
+        if spec.chart in {"bar", "pie"}:
+            label = spec.chart.capitalize()
+            limit = PIE_LIMIT if spec.chart == "pie" else BAR_LIMIT
             column = spec.encodings.category
             if not column or column not in columns:
-                raise HTTPException(422, "Bar requires a category encoding")
+                raise HTTPException(422, f"{label} requires a category encoding")
             field = quote(column)
             measure = spec.encodings.value
             metric = spec.metric or ("avg" if measure else "count")
             extra_filter = ""
             if measure:
                 if measure not in columns:
-                    raise HTTPException(422, "Bar measure column was not found")
+                    raise HTTPException(422, f"{label} measure column was not found")
                 if metric != "count" and profile_kind(columns[measure]) != "numeric":
-                    raise HTTPException(422, "Bar measure requires a numeric column")
+                    raise HTTPException(422, f"{label} measure requires a numeric column")
                 template = METRIC_SQL.get(metric, METRIC_SQL["avg"])
                 value_sql = template.format(column=quote(measure))
                 extra_filter = f" AND {quote(measure)} IS NOT NULL"
@@ -1470,19 +1472,20 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 SELECT {field} AS label, {value_sql} AS value, count(*) AS n
                 FROM {source} WHERE {field} IS NOT NULL{extra_filter}
                 GROUP BY 1 ORDER BY value DESC NULLS LAST, label
-                LIMIT {BAR_LIMIT}
+                LIMIT {limit}
             """, values).fetchall()
             shown = sum(n for _, _, n in rows)
             non_null = con.execute(
                 f"SELECT count(*) FROM {source} WHERE {field} IS NOT NULL{extra_filter}",
                 values,
             ).fetchone()[0]
-            group_name = spec.encodings.group
+            # A pie shows shares of one whole, so a group encoding has nowhere to go.
+            group_name = None if spec.chart == "pie" else spec.encodings.group
             series_labels: list[str] | None = None
             series_values: dict[Any, list[Any]] = {}
             if group_name:
                 if group_name not in columns:
-                    raise HTTPException(422, "Bar group column was not found")
+                    raise HTTPException(422, f"{label} group column was not found")
                 group_field = quote(group_name)
                 labels = [label for label, _value, _n in rows]
                 # Rank series by row count, not by the metric: an average would order series by
@@ -1520,8 +1523,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                         if other:
                             cells_for_label.append(safe(other_by_label.get(label, 0)))
                         series_values[label] = cells_for_label
+            if spec.chart == "pie" and any(
+                value is not None and float(value) < 0 for _label, value, _n in rows
+            ):
+                raise HTTPException(422, "A pie chart cannot show negative values; use a bar chart instead")
             return {
-                "chart": "bar",
+                "chart": spec.chart,
                 "rows": [
                     {"label": safe(label), "value": safe(value), "n": safe(n)}
                     | ({"values": series_values[label]} if label in series_values else {})

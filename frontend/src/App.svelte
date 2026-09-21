@@ -244,7 +244,7 @@
   let dashboardSelections = $state.raw<DashboardSelection[]>([]);
   let dashboardChartStates = $state.raw<Record<string, { data: VisualizeResponse | null; loading: boolean; error: string }>>({});
   let dashboardRequestId = 0;
-  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter', 'line']);
+  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter', 'line', 'pie']);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -598,7 +598,8 @@
     if (!suggestions.length) return null;
     const pick = (visualizeChart && suggestions.find((item) => item.chart === visualizeChart)) || suggestions[0];
     const encodings = applyRoles(pick.encodings, pick.chart, visualizeRoles, visualizeColumns);
-    const aggregates = (pick.chart === 'bar' && encodings.value) || (pick.chart === 'line' && encodings.y);
+    const aggregates = ((pick.chart === 'bar' || pick.chart === 'pie') && encodings.value)
+      || (pick.chart === 'line' && encodings.y);
     const metric = aggregates ? (visualizeMetric ?? pick.metric ?? 'avg') : pick.metric;
     const layout = pick.chart === 'bar' && encodings.group ? (visualizeLayout ?? 'grouped') : undefined;
     const grain = pick.chart === 'line' && visualizeGrain ? visualizeGrain : undefined;

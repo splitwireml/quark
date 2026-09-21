@@ -54,7 +54,8 @@
     return groupColumns(visible);
   });
   let showAggregate = $derived(
-    (spec?.chart === 'bar' && !!spec.encodings.value) || (spec?.chart === 'line' && !!spec.encodings.y)
+    ((spec?.chart === 'bar' || spec?.chart === 'pie') && !!spec.encodings.value)
+    || (spec?.chart === 'line' && !!spec.encodings.y)
   );
   function bounded(x: number, y: number) {
     const parent = pane.parentElement!;

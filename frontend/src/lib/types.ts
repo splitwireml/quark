@@ -281,6 +281,8 @@ export interface BarVisualizeResponse {
   elapsed_ms: number;
 }
 
+export interface PieVisualizeResponse extends Omit<BarVisualizeResponse, 'chart'> { chart: 'pie' }
+
 export interface HistogramVisualizeResponse {
   chart: 'histogram';
   bins: HistogramBin[];
@@ -336,6 +338,7 @@ export interface LineVisualizeResponse {
 
 export type VisualizeResponse =
   | BarVisualizeResponse
+  | PieVisualizeResponse
   | HistogramVisualizeResponse
   | BoxVisualizeResponse
   | ScatterVisualizeResponse

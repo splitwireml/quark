@@ -53,6 +53,10 @@
 
   let status = $derived.by(() => {
     if (!data) return '';
+    if (data.chart === 'pie') {
+      const extra = Number(data.other_count) > 0 ? ` · ${count(data.other_count)} in Other` : '';
+      return `${data.rows.length} ${data.rows.length === 1 ? 'slice' : 'slices'}${extra} · ${data.elapsed_ms.toFixed(1)} ms`;
+    }
     if (data.chart === 'bar') {
       const extra = Number(data.other_count) > 0 ? ` · ${count(data.other_count)} in Other` : '';
       return `${data.rows.length} ${data.rows.length === 1 ? 'category' : 'categories'}${extra} · ${data.elapsed_ms.toFixed(1)} ms`;
@@ -95,7 +99,7 @@
     {:else}
       <div class="state">
         <strong>This chart is not available yet</strong>
-        <span>Bar, line, histogram, box, and scatter are ready for this column mix.</span>
+        <span>Bar, line, pie, histogram, box, and scatter are ready for this column mix.</span>
       </div>
     {/if}
   </div>

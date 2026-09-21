@@ -41,6 +41,10 @@ function barCount(column: Classified): ChartSuggestion {
   return { chart: 'bar', encodings: { category: column.name }, metric: 'count' };
 }
 
+function pieCount(column: Classified): ChartSuggestion {
+  return { chart: 'pie', encodings: { category: column.name }, metric: 'count' };
+}
+
 function hist(column: Classified, group?: Classified): ChartSuggestion {
   return { chart: 'histogram', encodings: group ? { group: group.name, value: column.name } : { value: column.name } };
 }
@@ -72,7 +76,7 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
 
   if (items.length === 1) {
     const [item] = items;
-    if (item.kind === 'categorical') return [barCount(item)];
+    if (item.kind === 'categorical') return [barCount(item), pieCount(item)];
     if (item.kind === 'discrete') return [barCount(item), hist(item), box(item)];
     if (item.kind === 'continuous') return [hist(item), box(item)];
     return [hist(item), barCount(item)];
@@ -89,7 +93,12 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
   }
 
   if (cats.length === 1 && nums.length === 1 && items.length === 2) {
-    return [barMeasure(cats[0], nums[0]), box(nums[0], cats[0]), hist(nums[0], cats[0])];
+    return [
+      barMeasure(cats[0], nums[0]),
+      { chart: 'pie', encodings: { category: cats[0].name, value: nums[0].name }, metric: 'sum' },
+      box(nums[0], cats[0]),
+      hist(nums[0], cats[0])
+    ];
   }
 
   if (nums.length === 3 && items.length === 3) {
@@ -246,6 +255,7 @@ export function formatTick(value: number): string {
 }
 
 export const visualizeMetrics: { value: AggregateMetric; label: string; tip: string }[] = [
+  { value: 'sum', label: 'Sum', tip: 'Total of the number in each category' },
   { value: 'avg', label: 'Avg', tip: 'Average of the number in each category' },
   { value: 'median', label: 'Median', tip: 'Median of the number in each category' },
   { value: 'stddev', label: 'Std', tip: 'Standard deviation in each category' },
