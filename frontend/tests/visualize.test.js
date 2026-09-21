@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  applyRoles,
+  chartRoles,
   classifyColumn,
   filtersFromMark,
   niceTicks,
@@ -190,4 +192,39 @@ test('clicking a histogram bin produces a closed-open range except the last bin'
     { column: 'price', operator: '>=', value: 80 },
     { column: 'price', operator: '<=', value: 100, connector: 'and' }
   ]);
+});
+
+test('chartRoles lists only the roles each chart accepts', () => {
+  assert.deepEqual(chartRoles('bar'), ['category', 'value', 'group']);
+  assert.deepEqual(chartRoles('pie'), ['category', 'value']);
+  assert.deepEqual(chartRoles('scatter'), ['x', 'y', 'size', 'color', 'pattern']);
+  assert.deepEqual(chartRoles('line'), ['x', 'y', 'group']);
+  assert.deepEqual(chartRoles('histogram'), ['value', 'group']);
+  assert.deepEqual(chartRoles('box'), ['value', 'group']);
+});
+
+test('applyRoles swaps two columns between roles', () => {
+  const encodings = { x: 'price', y: 'amount' };
+  const result = applyRoles(encodings, 'scatter', { price: 'y', amount: 'x' }, [price, amount]);
+  assert.deepEqual(result, { y: 'price', x: 'amount' });
+});
+
+test('applyRoles displaces the previous occupant of a role to unassigned', () => {
+  const result = applyRoles({ x: 'price', y: 'amount' }, 'scatter', { price: 'y' }, [price, amount]);
+  assert.deepEqual(result, { y: 'price' });
+});
+
+test('applyRoles leaves untouched roles to inference', () => {
+  const result = applyRoles({ x: 'price', y: 'amount', color: 'region' }, 'scatter', { region: 'pattern' }, [price, amount, region]);
+  assert.deepEqual(result, { x: 'price', y: 'amount', pattern: 'region' });
+});
+
+test('applyRoles drops an override whose column left the selection', () => {
+  const result = applyRoles({ x: 'price', y: 'amount' }, 'scatter', { region: 'color' }, [price, amount]);
+  assert.deepEqual(result, { x: 'price', y: 'amount' });
+});
+
+test('applyRoles drops an override the active chart does not accept', () => {
+  const result = applyRoles({ category: 'region', value: 'price' }, 'bar', { price: 'size' }, [region, price]);
+  assert.deepEqual(result, { category: 'region', value: 'price' });
 });

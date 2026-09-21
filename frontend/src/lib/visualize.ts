@@ -1,12 +1,16 @@
 import type { IconName } from './icons';
 import type {
   AggregateMetric,
+  BarLayout,
+  ChartEncodings,
   ChartMark,
   ChartSpec,
   ChartSuggestion,
   ChartType,
   ColumnInfo,
+  EncodingRole,
   FilterCondition,
+  TimeGrain,
   VizKind
 } from './types';
 
@@ -243,7 +247,8 @@ export const chartMeta: Record<ChartType, { label: string; tip: string; icon: Ic
   histogram: { label: 'Histogram', tip: 'Distribution of a number', icon: 'histogram' },
   box: { label: 'Box', tip: 'Median, quartiles, and outliers', icon: 'box' },
   scatter: { label: 'Scatter', tip: 'Two numbers against each other', icon: 'scatter' },
-  line: { label: 'Line', tip: 'A number over an ordered axis', icon: 'line' }
+  line: { label: 'Line', tip: 'A number over an ordered axis', icon: 'line' },
+  pie: { label: 'Pie', tip: 'Shares of a whole', icon: 'pie' }
 };
 
 export function groupColumns(columns: ColumnInfo[]): { kind: VizKind; label: string; columns: ColumnInfo[] }[] {
@@ -260,3 +265,50 @@ export function groupColumns(columns: ColumnInfo[]): { kind: VizKind; label: str
   ];
   return groups.filter((group) => group.columns.length > 0);
 }
+
+const CHART_ROLES: Record<ChartType, EncodingRole[]> = {
+  bar: ['category', 'value', 'group'],
+  pie: ['category', 'value'],
+  histogram: ['value', 'group'],
+  box: ['value', 'group'],
+  scatter: ['x', 'y', 'size', 'color', 'pattern'],
+  line: ['x', 'y', 'group']
+};
+
+export function chartRoles(chart: ChartType): EncodingRole[] {
+  return CHART_ROLES[chart];
+}
+
+export function applyRoles(
+  encodings: ChartEncodings,
+  chart: ChartType,
+  overrides: Record<string, EncodingRole>,
+  selected: ColumnInfo[]
+): ChartEncodings {
+  const legal = new Set(chartRoles(chart));
+  const present = new Set(selected.map((column) => column.name));
+  const result: ChartEncodings = { ...encodings };
+  for (const [name, role] of Object.entries(overrides)) {
+    if (!present.has(name) || !legal.has(role)) continue;
+    for (const key of Object.keys(result) as EncodingRole[]) {
+      if (result[key] === name) delete result[key];
+    }
+    result[role] = name;
+  }
+  return result;
+}
+
+export const barLayouts: { value: BarLayout; label: string; tip: string }[] = [
+  { value: 'grouped', label: 'Grouped', tip: 'One bar per series, side by side' },
+  { value: 'stacked', label: 'Stacked', tip: 'Series stacked into one bar per category' },
+  { value: 'stacked100', label: '100%', tip: 'Each bar fills the height, showing shares' }
+];
+
+export const timeGrains: { value: TimeGrain; label: string; tip: string }[] = [
+  { value: 'hour', label: 'Hour', tip: 'One point per hour' },
+  { value: 'day', label: 'Day', tip: 'One point per day' },
+  { value: 'week', label: 'Week', tip: 'One point per week' },
+  { value: 'month', label: 'Month', tip: 'One point per month' },
+  { value: 'quarter', label: 'Quarter', tip: 'One point per quarter' },
+  { value: 'year', label: 'Year', tip: 'One point per year' }
+];

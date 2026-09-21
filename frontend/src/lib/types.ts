@@ -4,7 +4,9 @@ export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'conta
 export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
 export type VizKind = 'categorical' | 'discrete' | 'continuous' | 'date';
-export type ChartType = 'bar' | 'histogram' | 'box' | 'scatter' | 'line';
+export type ChartType = 'bar' | 'histogram' | 'box' | 'scatter' | 'line' | 'pie';
+export type BarLayout = 'grouped' | 'stacked' | 'stacked100';
+export type TimeGrain = 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
 export type AggregateCount = number | string;
 
 export interface SourceSummary {
@@ -208,11 +210,15 @@ export interface ChartEncodings {
   pattern?: string;
 }
 
+export type EncodingRole = keyof ChartEncodings;
+
 export interface ChartSpec {
   chart: ChartType;
   encodings: ChartEncodings;
   metric?: AggregateMetric;
   density?: boolean;
+  layout?: BarLayout;
+  grain?: TimeGrain;
 }
 
 export interface DashboardChart {

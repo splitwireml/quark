@@ -32,4 +32,5 @@ export type IconName =
   | 'box'
   | 'scatter'
   | 'line'
+  | 'pie'
   | 'pin';
