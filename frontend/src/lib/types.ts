@@ -324,7 +324,22 @@ export interface ScatterVisualizeResponse {
   elapsed_ms: number;
 }
 
-export type VisualizeResponse = BarVisualizeResponse | HistogramVisualizeResponse | BoxVisualizeResponse | ScatterVisualizeResponse;
+export interface LinePoint { x: string; y: NumericValue }
+export interface LineSeries { label: string; points: LinePoint[] }
+
+export interface LineVisualizeResponse {
+  chart: 'line';
+  grain: TimeGrain;
+  series: LineSeries[];
+  elapsed_ms: number;
+}
+
+export type VisualizeResponse =
+  | BarVisualizeResponse
+  | HistogramVisualizeResponse
+  | BoxVisualizeResponse
+  | ScatterVisualizeResponse
+  | LineVisualizeResponse;
 
 export interface ChartHover {
   title: string;

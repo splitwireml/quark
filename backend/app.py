@@ -53,6 +53,10 @@ SCATTER_LIMIT = 5000
 SERIES_LIMIT = 6
 PIE_LIMIT = 8
 LINE_POINT_LIMIT = 400
+GRAIN_SECONDS = {
+    "hour": 3600, "day": 86400, "week": 604800,
+    "month": 2629746, "quarter": 7889238, "year": 31556952,
+}
 METRIC_SQL = {
     "count": "count({column})",
     "distinct": "count(DISTINCT {column})",
@@ -1718,6 +1722,85 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if shape_name:
                 response["shape_labels"] = shape_labels
             return response
+        if spec.chart == "line":
+            x_name = spec.encodings.x
+            if not x_name or x_name not in columns:
+                raise HTTPException(422, "Line requires an x encoding")
+            if profile_kind(columns[x_name]) != "date":
+                raise HTTPException(422, f"Line requires a date or timestamp x column; {x_name} is not one")
+            x_field = quote(x_name)
+            measure = spec.encodings.y
+            metric = spec.metric or ("avg" if measure else "count")
+            extra_filter = ""
+            if measure:
+                if measure not in columns:
+                    raise HTTPException(422, "Line measure column was not found")
+                if metric not in {"count", "distinct"} and profile_kind(columns[measure]) != "numeric":
+                    raise HTTPException(422, "Line measure requires a numeric column")
+                value_sql = METRIC_SQL.get(metric, METRIC_SQL["avg"]).format(column=quote(measure))
+                extra_filter = f" AND {quote(measure)} IS NOT NULL"
+                if metric not in {"count", "distinct"}:
+                    extra_filter += f" AND isfinite({quote(measure)}::DOUBLE)"
+            else:
+                value_sql = "count(*)"
+            where = f"WHERE {x_field} IS NOT NULL{extra_filter}"
+            grain = spec.grain
+            if grain is None:
+                low, high = con.execute(f"SELECT min({x_field}), max({x_field}) FROM {source} {where}", values).fetchone()
+                span = (high - low).total_seconds() if low is not None and high is not None else 0
+                grain = "year"
+                for candidate in ("hour", "day", "week", "month", "quarter", "year"):
+                    if span / GRAIN_SECONDS[candidate] <= LINE_POINT_LIMIT:
+                        grain = candidate
+                        break
+            # A Literal on the spec model has already restricted grain to these six names,
+            # so it is safe to interpolate rather than bind.
+            bucket = f"date_trunc('{grain}', {x_field})"
+
+            def series_points(clause: str, bound: list[Any]) -> list[dict[str, Any]]:
+                rows = con.execute(f"""
+                    SELECT bucket, value FROM (
+                        SELECT {bucket} AS bucket, {value_sql} AS value
+                        FROM {source} {where}{clause}
+                        GROUP BY 1 ORDER BY 1 DESC
+                        LIMIT {LINE_POINT_LIMIT}
+                    ) ORDER BY bucket
+                """, bound).fetchall()
+                return [{"x": safe(at), "y": safe(value)} for at, value in rows]
+
+            group_name = spec.encodings.group
+            if group_name and group_name not in columns:
+                raise HTTPException(422, "Line group column was not found")
+            if group_name:
+                group_field = quote(group_name)
+                ranked = con.execute(f"""
+                    SELECT {group_field} AS series, count(*) AS n
+                    FROM {source} {where} AND {group_field} IS NOT NULL
+                    GROUP BY 1 ORDER BY n DESC, series
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                top = [row[0] for row in ranked]
+                series = []
+                for label in top:
+                    points = series_points(f" AND {group_field} = ?", [*values, label])
+                    if points:
+                        series.append({"label": str(label), "points": points})
+                if top:
+                    marks = ", ".join("?" for _ in top)
+                    other = series_points(
+                        f" AND {group_field} IS NOT NULL AND {group_field} NOT IN ({marks})",
+                        [*values, *top],
+                    )
+                    if other:
+                        series.append({"label": "Other", "points": other})
+            else:
+                series = [{"label": "", "points": series_points("", values)}]
+            return {
+                "chart": "line",
+                "grain": grain,
+                "series": series,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
         raise HTTPException(422, f"Chart type {spec.chart} is not available yet")
 
     @lru_cache(maxsize=128)

@@ -85,7 +85,7 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
 
   if (nums.length === 2 && items.length === 2) {
     const encodings = { x: nums[0].name, y: nums[1].name };
-    return [{ chart: 'scatter', encodings }, { chart: 'line', encodings }];
+    return [{ chart: 'scatter', encodings }];
   }
 
   if (cats.length === 1 && nums.length === 1 && items.length === 2) {
@@ -329,3 +329,17 @@ export const timeGrains: { value: TimeGrain; label: string; tip: string }[] = [
   { value: 'quarter', label: 'Quarter', tip: 'One point per quarter' },
   { value: 'year', label: 'Year', tip: 'One point per year' }
 ];
+
+const GRAIN_SECONDS: Record<TimeGrain, number> = {
+  hour: 3600, day: 86400, week: 604800,
+  month: 2629746, quarter: 7889238, year: 31556952
+};
+
+export const LINE_POINT_LIMIT = 400;
+
+export function autoGrain(spanSeconds: number): TimeGrain {
+  for (const grain of ['hour', 'day', 'week', 'month', 'quarter', 'year'] as TimeGrain[]) {
+    if (spanSeconds / GRAIN_SECONDS[grain] <= LINE_POINT_LIMIT) return grain;
+  }
+  return 'year';
+}

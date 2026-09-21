@@ -2133,3 +2133,56 @@ def test_visualize_scatter_rejects_a_non_numeric_size(client):
     assert client.post(base + "/visualize", json={
         "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "size": "region"}},
     }).status_code == 422
+
+
+def test_visualize_line_buckets_by_an_automatic_grain(client):
+    body = b"day,amount\n" + b"".join(f"2026-01-{i:02d},{i}\n".encode() for i in range(1, 29))
+    node = upload(client, "daily.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'daily')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "line", "encodings": {"x": "day", "y": "amount"}, "metric": "sum"},
+    }).json()
+    assert payload["chart"] == "line"
+    # 27 days is 648 hours, over the 400-point budget, so the grain steps up to day.
+    assert payload["grain"] == "day"
+    assert len(payload["series"]) == 1
+    assert len(payload["series"][0]["points"]) == 28
+
+
+def test_visualize_line_honours_an_explicit_grain(client):
+    body = b"day,amount\n" + b"".join(f"2026-01-{i:02d},{i}\n".encode() for i in range(1, 29))
+    node = upload(client, "explicit.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'explicit')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "line", "encodings": {"x": "day", "y": "amount"}, "metric": "sum", "grain": "month"},
+    }).json()
+    assert payload["grain"] == "month"
+    assert len(payload["series"][0]["points"]) == 1
+    assert payload["series"][0]["points"][0]["y"] == sum(range(1, 29))
+
+
+def test_visualize_line_splits_into_series_by_group(client):
+    body = b"day,region,amount\n" + b"".join(
+        f"2026-01-{i:02d},{'east' if i % 2 else 'west'},{i}\n".encode() for i in range(1, 11)
+    )
+    node = upload(client, "lineseries.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'lineseries')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "line", "encodings": {"x": "day", "y": "amount", "group": "region"}, "metric": "sum"},
+    }).json()
+    assert sorted(series["label"] for series in payload["series"]) == ["east", "west"]
+
+
+def test_visualize_line_counts_rows_without_a_y_encoding(client):
+    node = upload(client, "counted.csv", b"day\n2026-01-01\n2026-01-01\n2026-01-02\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'counted')['id']}"
+    payload = client.post(base + "/visualize", json={"spec": {"chart": "line", "encodings": {"x": "day"}}}).json()
+    assert [point["y"] for point in payload["series"][0]["points"]] == [2, 1]
+
+
+def test_visualize_line_rejects_a_non_date_x(client):
+    node = upload(client, "notdate.csv", b"x,y\n1,2\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'notdate')['id']}"
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "line", "encodings": {"x": "x", "y": "y"}},
+    }).status_code == 422

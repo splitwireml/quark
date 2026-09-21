@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applyRoles,
+  autoGrain,
   chartRoles,
   classifyColumn,
   filtersFromMark,
@@ -81,13 +82,13 @@ test('categorical plus continuous defaults to an aggregated bar', () => {
 });
 
 test('two number columns prefer scatter even when one is integer', () => {
-  assert.deepEqual(charts([rating, price]), ['scatter', 'line']);
+  assert.deepEqual(charts([rating, price]), ['scatter']);
   assert.deepEqual(defaultOf([rating, price]).encodings, { x: 'rating', y: 'price' });
-  assert.deepEqual(charts([rating, col('qty', 'INTEGER', 'numeric')]), ['scatter', 'line']);
+  assert.deepEqual(charts([rating, col('qty', 'INTEGER', 'numeric')]), ['scatter']);
 });
 
-test('two continuous columns prefer scatter then line, in selection order', () => {
-  assert.deepEqual(charts([price, amount]), ['scatter', 'line']);
+test('two continuous columns are a scatter, in selection order', () => {
+  assert.deepEqual(charts([price, amount]), ['scatter']);
   assert.deepEqual(defaultOf([price, amount]).encodings, { x: 'price', y: 'amount' });
   assert.deepEqual(defaultOf([amount, price]).encodings, { x: 'amount', y: 'price' });
 });
@@ -260,4 +261,16 @@ test('two numerics and two categoricals fill color and shape but not size', () =
 test('four numerics put the spare ones on size and color', () => {
   const suggestion = defaultOf([price, amount, rating, delay]);
   assert.deepEqual(suggestion.encodings, { x: 'price', y: 'amount', size: 'rating', color: 'delay' });
+});
+
+test('autoGrain picks the finest grain that fits the point budget', () => {
+  assert.equal(autoGrain(60 * 60 * 24), 'hour');
+  assert.equal(autoGrain(60 * 60 * 24 * 60), 'day');
+  assert.equal(autoGrain(60 * 60 * 24 * 365 * 5), 'week');
+  assert.equal(autoGrain(60 * 60 * 24 * 365 * 20), 'month');
+  assert.equal(autoGrain(60 * 60 * 24 * 365 * 500), 'year');
+});
+
+test('two numeric columns no longer suggest a line chart', () => {
+  assert.deepEqual(charts([price, amount]), ['scatter']);
 });
