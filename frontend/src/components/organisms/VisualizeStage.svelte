@@ -12,6 +12,7 @@
     ColumnInfo,
     EncodingRole,
     HistogramBin,
+    TimeGrain,
     VisualizeResponse
   } from '../../lib/types';
 
@@ -26,6 +27,8 @@
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
     onSelectLayout: (layout: BarLayout) => void;
+    onSelectGrain: (grain: TimeGrain) => void;
+    activeGrain: TimeGrain | null;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -42,7 +45,7 @@
 
   let {
     columnSearch, setColumnSearch, columns, selected,
-    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout,
+    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout, onSelectGrain, activeGrain,
     roles, roleOf, onSetRole,
     data, loading, error, count, compact, chartTheme = 'primary', binLabel,
     onAddToDashboard, onMark
@@ -57,6 +60,10 @@
     if (data.chart === 'box') {
       return `${data.groups.length} ${data.groups.length === 1 ? 'distribution' : 'groups'} · ${data.elapsed_ms.toFixed(1)} ms`;
     }
+    if (data.chart === 'line') {
+      const points = data.series.reduce((sum, line) => sum + line.points.length, 0);
+      return `${data.series.length} ${data.series.length === 1 ? 'series' : 'series'} · ${count(points)} points by ${data.grain} · ${data.elapsed_ms.toFixed(1)} ms`;
+    }
     if (data.chart === 'scatter') {
       const sampled = Number(data.total_points) > data.points.length ? ` of ${count(data.total_points)}` : '';
       return `${count(data.points.length)} points${sampled} · ${data.elapsed_ms.toFixed(1)} ms`;
@@ -68,7 +75,7 @@
 <section class="stage" aria-label="Chart">
   <ChartOptionsPane
     {columnSearch} {setColumnSearch} {columns} {selected} {onToggleColumn}
-    {suggestions} {spec} {onSelectChart} {onSelectMetric} {onSelectLayout}
+    {suggestions} {spec} {onSelectChart} {onSelectMetric} {onSelectLayout} {onSelectGrain} {activeGrain}
     {roles} {roleOf} {onSetRole}
     {onAddToDashboard}
   />
@@ -88,7 +95,7 @@
     {:else}
       <div class="state">
         <strong>This chart is not available yet</strong>
-        <span>Bar, histogram, box, and scatter are ready for this column mix.</span>
+        <span>Bar, line, histogram, box, and scatter are ready for this column mix.</span>
       </div>
     {/if}
   </div>

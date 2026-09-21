@@ -274,3 +274,19 @@ test('autoGrain picks the finest grain that fits the point budget', () => {
 test('two numeric columns no longer suggest a line chart', () => {
   assert.deepEqual(charts([price, amount]), ['scatter']);
 });
+
+test('a date, a number, and a category make a grouped line', () => {
+  const suggestion = defaultOf([day, price, region]);
+  assert.equal(suggestion.chart, 'line');
+  assert.deepEqual(suggestion.encodings, { x: 'day', y: 'price', group: 'region' });
+});
+
+test('a date with only categories counts rows per group over time', () => {
+  const suggestion = defaultOf([day, region]);
+  assert.equal(suggestion.chart, 'line');
+  assert.deepEqual(suggestion.encodings, { x: 'day', group: 'region' });
+});
+
+test('a date and a number alone still prefer line then scatter', () => {
+  assert.deepEqual(charts([day, price]), ['line', 'scatter']);
+});

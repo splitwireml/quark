@@ -104,6 +104,16 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
     return [barMeasure(cats[0], nums[0], cats[1])];
   }
 
+  /* Any remaining selection built on a date is a line over that date: the first number is the
+     measure (or a row count when there is none) and the first category splits it into series,
+     so the group encoding stays reachable for line charts. */
+  if (dates.length) {
+    const encodings: ChartEncodings = { x: dates[0].name };
+    if (nums.length) encodings.y = nums[0].name;
+    if (cats.length) encodings.group = cats[0].name;
+    if (nums.length || cats.length) return [{ chart: 'line', encodings }];
+  }
+
   /* Anything else with two numbers is a scatter: the first two numbers are the axes and every
      remaining column lands on a channel, so the size, color, and shape encodings stay reachable
      instead of the whole selection falling through to no suggestion at all. */

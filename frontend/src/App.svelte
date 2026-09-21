@@ -15,7 +15,7 @@
   import { applyRoles, chartRoles, classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
   import { chartTitle, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
-  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, BarLayout, DashboardSelection, DatasetVersionHistory, EncodingRole, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, BarLayout, DashboardSelection, DatasetVersionHistory, EncodingRole, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, TimeGrain, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
   import { editorHighlight, editorTheme } from './lib/editorTheme';
   import { readThemePreference, resolveScheme, themeStorageKey, type ColorScheme, type ThemePreference } from './lib/theme';
@@ -234,6 +234,7 @@
   let visualizeMetric = $state<AggregateMetric | null>(null);
   let visualizeRoles = $state<Record<string, EncodingRole>>({});
   let visualizeLayout = $state<BarLayout | null>(null);
+  let visualizeGrain = $state<TimeGrain | null>(null);
   let visualizeSearch = $state('');
   let visualizeData = $state.raw<VisualizeResponse | null>(null);
   let visualizeLoading = $state(false);
@@ -243,7 +244,7 @@
   let dashboardSelections = $state.raw<DashboardSelection[]>([]);
   let dashboardChartStates = $state.raw<Record<string, { data: VisualizeResponse | null; loading: boolean; error: string }>>({});
   let dashboardRequestId = 0;
-  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter']);
+  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter', 'line']);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -597,14 +598,14 @@
     if (!suggestions.length) return null;
     const pick = (visualizeChart && suggestions.find((item) => item.chart === visualizeChart)) || suggestions[0];
     const encodings = applyRoles(pick.encodings, pick.chart, visualizeRoles, visualizeColumns);
-    const metric = pick.chart === 'bar' && encodings.value
-      ? (visualizeMetric ?? pick.metric ?? 'avg')
-      : pick.metric;
+    const aggregates = (pick.chart === 'bar' && encodings.value) || (pick.chart === 'line' && encodings.y);
+    const metric = aggregates ? (visualizeMetric ?? pick.metric ?? 'avg') : pick.metric;
     const layout = pick.chart === 'bar' && encodings.group ? (visualizeLayout ?? 'grouped') : undefined;
+    const grain = pick.chart === 'line' && visualizeGrain ? visualizeGrain : undefined;
     const base: ChartSpec = metric
       ? { chart: pick.chart, encodings, metric }
       : { chart: pick.chart, encodings };
-    return layout ? { ...base, layout } : base;
+    return { ...base, ...(layout ? { layout } : {}), ...(grain ? { grain } : {}) };
   });
   let currentDashboard = $derived(dashboardDocuments.find((document) => document.datasetId === selectedDataset));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
@@ -642,6 +643,7 @@
     visualizeMetric = null;
     visualizeRoles = {};
     visualizeLayout = null;
+    visualizeGrain = null;
     visualizeSearch = '';
     visualizeData = null;
     visualizeError = '';
@@ -678,6 +680,11 @@
 
   function selectVisualizeLayout(layout: BarLayout) {
     visualizeLayout = layout;
+    void loadVisualize();
+  }
+
+  function selectVisualizeGrain(grain: TimeGrain) {
+    visualizeGrain = grain;
     void loadVisualize();
   }
 
@@ -3053,6 +3060,8 @@
                     columns={visualizeFieldOptions} selected={visualizeColumns}
                     onToggleColumn={toggleVisualizeColumn}
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric} onSelectLayout={selectVisualizeLayout}
+                    onSelectGrain={selectVisualizeGrain}
+                    activeGrain={visualizeData?.chart === 'line' ? visualizeData.grain : null}
                     roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
                     roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
                     data={visualizeData} loading={visualizeLoading} error={visualizeError}
@@ -3071,6 +3080,8 @@
                     columns={visualizeFieldOptions} selected={visualizeColumns}
                     onToggleColumn={toggleVisualizeColumn}
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric} onSelectLayout={selectVisualizeLayout}
+                    onSelectGrain={selectVisualizeGrain}
+                    activeGrain={visualizeData?.chart === 'line' ? visualizeData.grain : null}
                     roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
                     roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
                     onSelectTab={selectDashboardTab}

@@ -8,8 +8,8 @@
   import ChartTypeToggle from './ChartTypeToggle.svelte';
   import ChipToggleGroup from './ChipToggleGroup.svelte';
   import RoleChip from './RoleChip.svelte';
-  import { barLayouts, groupColumns, visualizeMetrics } from '../../lib/visualize';
-  import type { AggregateMetric, BarLayout, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
+  import { barLayouts, groupColumns, timeGrains, visualizeMetrics } from '../../lib/visualize';
+  import type { AggregateMetric, BarLayout, ChartSpec, TimeGrain, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
 
   type Props = {
     columnSearch: string;
@@ -22,6 +22,8 @@
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
     onSelectLayout: (layout: BarLayout) => void;
+    onSelectGrain: (grain: TimeGrain) => void;
+    activeGrain: TimeGrain | null;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -32,7 +34,7 @@
 
   let {
     columnSearch, setColumnSearch, columns, selected,
-    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout,
+    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout, onSelectGrain, activeGrain,
     roles, roleOf, onSetRole,
     onAddToDashboard, editingTitle, onFinishEditing
   }: Props = $props();
@@ -51,7 +53,9 @@
     const visible = query ? columns.filter((column) => column.name.toLowerCase().includes(query)) : columns;
     return groupColumns(visible);
   });
-  let showAggregate = $derived(spec?.chart === 'bar' && !!spec.encodings.value);
+  let showAggregate = $derived(
+    (spec?.chart === 'bar' && !!spec.encodings.value) || (spec?.chart === 'line' && !!spec.encodings.y)
+  );
   function bounded(x: number, y: number) {
     const parent = pane.parentElement!;
     return {
@@ -176,7 +180,7 @@
           <ChipToggleGroup
             label="Aggregation"
             options={visualizeMetrics.map((metric) => ({ value: metric.value, label: metric.label, tip: metric.tip }))}
-            selected={spec?.metric ?? null}
+            selected={spec?.metric ?? (spec?.chart === 'line' ? 'avg' : null)}
             onSelect={(value) => onSelectMetric(value as AggregateMetric)}
           />
         </div>
@@ -186,6 +190,13 @@
           <Eyebrow>Layout</Eyebrow>
           <ChipToggleGroup label="Bar layout" options={barLayouts} selected={spec.layout ?? 'grouped'}
             onSelect={(value) => onSelectLayout(value as BarLayout)} />
+        </div>
+      {/if}
+      {#if spec?.chart === 'line'}
+        <div class="pane-block">
+          <Eyebrow>Grain</Eyebrow>
+          <ChipToggleGroup label="Time grain" options={timeGrains} selected={activeGrain}
+            onSelect={(value) => onSelectGrain(value as TimeGrain)} />
         </div>
       {/if}
       {#if selected.length}

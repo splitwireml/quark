@@ -5,6 +5,7 @@
   import BoxPlot from './BoxPlot.svelte';
   import ScatterPlot from './ScatterPlot.svelte';
   import ChartLegend from './ChartLegend.svelte';
+  import LineChart from './LineChart.svelte';
   import { metricTitle } from '../../lib/visualize';
   import type { AggregateCount, BoxGroup, ChartMark, ChartSpec, HistogramBin, VisualizeResponse } from '../../lib/types';
 
@@ -24,11 +25,12 @@
   let { spec, data, loading = false, error = '', count, compact, chartTheme = 'primary', binLabel, onMark, onRetry }: Props = $props();
   let xTitle = $derived(
     spec.chart === 'box' ? (spec.encodings.group ?? '')
-      : spec.chart === 'scatter' ? (spec.encodings.x ?? '')
+      : spec.chart === 'scatter' || spec.chart === 'line' ? (spec.encodings.x ?? '')
       : spec.encodings.category ?? spec.encodings.value ?? spec.encodings.x ?? ''
   );
   let yTitle = $derived(
-    spec.chart === 'box' || spec.chart === 'scatter' ? (spec.encodings.y ?? spec.encodings.value ?? '')
+    spec.chart === 'line' ? (spec.encodings.y ? metricTitle(spec.metric ?? 'avg', spec.encodings.y) : 'Rows')
+      : spec.chart === 'box' || spec.chart === 'scatter' ? (spec.encodings.y ?? spec.encodings.value ?? '')
       : spec.chart === 'bar' && spec.encodings.value ? metricTitle(spec.metric, spec.encodings.value)
       : 'Rows'
   );
@@ -82,8 +84,18 @@
           min={compact(data.size_domain[0])} max={compact(data.size_domain[1])} />
       {/if}
     </div>
+  {:else if data?.chart === 'line'}
+    <!-- ponytail: a line mark filters the bucket start; widen to a bucket range filter if users ask for it -->
+    <div class="stack">
+      <LineChart series={data.series} grain={data.grain} {xTitle} {yTitle} {compact}
+        onSelect={(x, label) => onMark({ kind: 'category', value: x, series: label || undefined })} />
+      {#if data.series.length > 1}
+        <ChartLegend kind="series" title={spec.encodings.group ?? 'Series'}
+          items={data.series.map((line, index) => ({ label: line.label, color: `var(--chart-group-${(index % 6) + 1})` }))} />
+      {/if}
+    </div>
   {:else}
-    <div class="state"><strong>This chart is not available yet</strong><span>Bar, histogram, box, and scatter are ready for this column mix.</span></div>
+    <div class="state"><strong>This chart is not available yet</strong><span>Bar, line, histogram, box, and scatter are ready for this column mix.</span></div>
   {/if}
   {#if loading && data}<span class="refreshing" role="status">Refreshing chart…</span>{/if}
 </div>
