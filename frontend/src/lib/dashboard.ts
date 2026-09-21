@@ -1,7 +1,7 @@
 import type { ChartSpec, DashboardDataset, DashboardPlacement, DashboardSelection, DashboardTab, FilterCondition } from './types';
 
 export const DASHBOARD_STORAGE_KEY = 'quark.dashboards.v1';
-export const DASHBOARD_WIDTH = 1200;
+export const MIN_TILE = { width: 64, height: 48 } as const;
 export const DEFAULT_TILE = { width: 560, height: 360 } as const;
 
 export function emptyDashboardDataset(datasetId: string): DashboardDataset {
@@ -72,16 +72,84 @@ export function selectionChartIdAtFilterIndex(filters: FilterCondition[], select
   }
 }
 
-export function clampPlacement(placement: DashboardPlacement): DashboardPlacement {
-  const width = Math.min(DASHBOARD_WIDTH, Math.max(280, Math.round(placement.width)));
-  const height = Math.max(220, Math.round(placement.height));
+export function nextDashboardName(names: readonly string[]): string {
+  let number = 1;
+  while (names.includes(`Dashboard_${number}`)) number++;
+  return `Dashboard_${number}`;
+}
+
+export function clampPlacement(placement: DashboardPlacement, boardWidth = Infinity): DashboardPlacement {
+  const width = Math.min(boardWidth, Math.max(MIN_TILE.width, Math.round(placement.width)));
   return {
     ...placement,
     width,
-    height,
-    x: Math.max(0, Math.min(DASHBOARD_WIDTH - width, Math.round(placement.x))),
+    height: Math.max(MIN_TILE.height, Math.round(placement.height)),
+    x: Math.max(0, Math.min(boardWidth - width, Math.round(placement.x))),
     y: Math.max(0, Math.round(placement.y))
   };
+}
+
+export type SnapGuide = { axis: 'x' | 'y'; position: number; start: number; end: number };
+
+export function snapResize(placement: DashboardPlacement, neighbors: DashboardPlacement[], threshold = 6) {
+  return snapPlacement(placement, neighbors, 'resize', threshold);
+}
+
+export function snapMove(placement: DashboardPlacement, neighbors: DashboardPlacement[], boardWidth = Infinity, threshold = 6) {
+  return snapPlacement(placement, neighbors, 'move', threshold, boardWidth);
+}
+
+function snapPlacement(placement: DashboardPlacement, neighbors: DashboardPlacement[], mode: 'move' | 'resize', threshold: number, boardWidth = Infinity) {
+  const guides: SnapGuide[] = [];
+  const result = { ...placement };
+  for (const axis of ['x', 'y'] as const) {
+    const size = axis === 'x' ? 'width' : 'height';
+    const cross = axis === 'x' ? 'y' : 'x';
+    const crossSize = axis === 'x' ? 'height' : 'width';
+    const offsets = mode === 'move' ? [0, placement[size] / 2, placement[size]] : [placement[size]];
+    let nearest: { position: number; delta: number; neighbor: DashboardPlacement } | undefined;
+    let distance = threshold + 1;
+    for (const neighbor of neighbors) {
+      if (neighbor.id === placement.id) continue;
+      const targets = [neighbor[axis], neighbor[axis] + neighbor[size]];
+      if (mode === 'move') targets.push(neighbor[axis] + neighbor[size] / 2);
+      for (const position of targets) {
+        for (const offset of offsets) {
+          const delta = position - (placement[axis] + offset);
+          const origin = placement[axis] + delta;
+          const fits = mode === 'resize' ? position - placement[axis] >= MIN_TILE[size]
+            : origin >= 0 && (axis !== 'x' || origin + placement.width <= boardWidth);
+          if (Math.abs(delta) <= threshold && Math.abs(delta) < distance && fits) {
+            nearest = { position, delta, neighbor };
+            distance = Math.abs(delta);
+          }
+        }
+      }
+    }
+    if (nearest) {
+      if (mode === 'move') result[axis] += nearest.delta;
+      else result[size] += nearest.delta;
+      guides.push({ axis, position: nearest.position,
+        start: Math.min(result[cross], nearest.neighbor[cross]) - 8,
+        end: Math.max(result[cross] + result[crossSize], nearest.neighbor[cross] + nearest.neighbor[crossSize]) + 8 });
+    }
+  }
+  return { placement: result, guides };
+}
+
+export function updatePlacedChart(document: DashboardDataset, placementId: string, spec: ChartSpec): DashboardDataset {
+  const placement = document.tabs.find((tab) => tab.id === document.activeTabId)?.placements.find((item) => item.id === placementId);
+  const chart = document.charts.find((item) => item.id === placement?.chartId);
+  if (!placement || !chart || JSON.stringify(chart.spec) === JSON.stringify(spec)) return document;
+  // Reused charts share a definition until one tile is edited.
+  const shared = document.tabs.flatMap((tab) => tab.placements).filter((item) => item.chartId === chart.id).length > 1;
+  const updated = { ...chart, id: shared ? crypto.randomUUID() : chart.id,
+    title: chart.title === chartTitle(chart.spec) ? chartTitle(spec) : chart.title,
+    spec: { ...spec, encodings: { ...spec.encodings } }
+  };
+  return updateActiveDashboardTab({ ...document,
+    charts: shared ? [...document.charts, updated] : document.charts.map((item) => item.id === chart.id ? updated : item)
+  }, (tab) => ({ ...tab, placements: tab.placements.map((item) => item.id === placementId ? { ...item, chartId: updated.id } : item) }));
 }
 
 export function readDashboards(value: string | null): DashboardDataset[] {

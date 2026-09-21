@@ -13,7 +13,7 @@
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import { classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
-  import { chartTitle, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, withoutSelections } from './lib/dashboard';
+  import { chartTitle, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
   import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, DashboardSelection, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
@@ -740,19 +740,12 @@
     return persistDashboards(documents) ? next : null;
   }
 
-  function createDashboardTab(name: string): string | null {
-    const clean = name.trim().slice(0, 40);
-    if (!clean) return null;
-    const existing = currentDashboard?.tabs.find((tab) => tab.name === clean);
-    if (existing) {
-      updateCurrentDashboard((document) => ({ ...document, activeTabId: existing.id }));
-      return existing.id;
-    }
+  function createDashboardTab(): string | null {
     const id = crypto.randomUUID();
     return updateCurrentDashboard((document) => ({
       ...document,
       activeTabId: id,
-      tabs: [...document.tabs, { id, name: clean, scrollTop: 0, placements: [] }]
+      tabs: [...document.tabs, { id, name: nextDashboardName(document.tabs.map((tab) => tab.name)), scrollTop: 0, placements: [] }]
     })) ? id : null;
   }
 
@@ -760,39 +753,20 @@
     updateCurrentDashboard((document) => document.tabs.some((tab) => tab.id === id) ? { ...document, activeTabId: id } : document);
   }
 
-  function addChartToDashboard(name: string) {
-    const spec = visualizeSpec;
-    if (!spec || !selectedDataset) return;
-    const clean = name.trim().slice(0, 40);
-    if (!clean) return;
-    const next = updateCurrentDashboard((document) => {
-      let tab = document.tabs.find((item) => item.name === clean);
-      if (!tab) tab = { id: crypto.randomUUID(), name: clean, scrollTop: 0, placements: [] };
-      const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec));
-      const chart = saved ?? { id: crypto.randomUUID(), title: chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
-      const placement = clampPlacement({
-        id: crypto.randomUUID(), chartId: chart.id, x: 20,
-        y: Math.max(20, ...tab.placements.map((item) => item.y + item.height + 20)),
-        ...DEFAULT_TILE
-      });
-      return {
-        ...document,
-        activeTabId: tab.id,
-        charts: saved ? document.charts : [...document.charts, chart],
-        tabs: document.tabs.some((item) => item.id === tab!.id)
-          ? document.tabs.map((item) => item.id === tab!.id ? { ...item, placements: [...item.placements, placement] } : item)
-          : [...document.tabs, { ...tab, placements: [placement] }]
-      };
+  function addChartToDashboard(): boolean {
+    const tab = currentDashboard?.tabs.find((item) => item.id === currentDashboard.activeTabId);
+    return placeCurrentChart({ x: 20,
+      y: Math.max(20, ...(tab?.placements.map((item) => item.y + item.height + 20) ?? [0])),
+      ...DEFAULT_TILE
     });
-    if (next && canvasMode === 'dashboard') void loadDashboardCharts();
   }
 
   function placeCurrentChart(rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
     const spec = visualizeSpec;
-    if (!spec || !selectedDataset) return;
+    if (!spec || !selectedDataset) return false;
     const next = updateCurrentDashboard((document) => {
       let tab = document.tabs.find((item) => item.id === document.activeTabId);
-      if (!tab) tab = { id: crypto.randomUUID(), name: 'Dashboard', scrollTop: 0, placements: [] };
+      if (!tab) tab = { id: crypto.randomUUID(), name: nextDashboardName(document.tabs.map((tab) => tab.name)), scrollTop: 0, placements: [] };
       const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec));
       const chart = saved ?? { id: crypto.randomUUID(), title: chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
       const placement = clampPlacement({ ...rect, id: crypto.randomUUID(), chartId: chart.id });
@@ -806,6 +780,34 @@
       };
     });
     if (next) void loadDashboardCharts();
+    return !!next;
+  }
+
+  function renameDashboardTab(id: string, name: string) {
+    const clean = name.trim().slice(0, 40);
+    if (!clean) return;
+    updateCurrentDashboard((document) => ({ ...document,
+      tabs: document.tabs.map((tab) => tab.id === id ? { ...tab, name: clean } : tab)
+    }));
+  }
+
+  function renameDashboardChart(id: string, title: string) {
+    const clean = title.trim().slice(0, 120);
+    if (!clean) return;
+    updateCurrentDashboard((document) => ({ ...document,
+      charts: document.charts.map((chart) => chart.id === id ? { ...chart, title: clean } : chart)
+    }));
+  }
+
+  function editDashboardChart(placementId: string, spec: ChartSpec) {
+    const previous = currentDashboard;
+    const next = updateCurrentDashboard((document) => updatePlacedChart(document, placementId, spec));
+    if (!next || next === previous) return;
+    const chartId = next.tabs.find((tab) => tab.id === next.activeTabId)?.placements.find((item) => item.id === placementId)?.chartId;
+    if (!chartId) return;
+    const selectionIndex = filters.findIndex((_, index) => selectionChartIdAtFilterIndex(filters, dashboardSelections, index) === chartId);
+    if (selectionIndex >= 0) void removeFilter(selectionIndex).finally(() => loadDashboardCharts());
+    else void loadDashboardCharts();
   }
 
   function moveDashboardPlacement(placement: DashboardPlacement) {
@@ -3025,7 +3027,6 @@
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
                     data={visualizeData} loading={visualizeLoading} error={visualizeError}
                     {count} {compact} chartTheme={chartThemeKey} {binLabel}
-                    dashboardNames={currentDashboard?.tabs.map((tab) => tab.name) ?? []}
                     onAddToDashboard={addChartToDashboard}
                     onMark={(mark) => void applyChartMark(mark)}
                   />
@@ -3042,6 +3043,9 @@
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
                     onSelectTab={selectDashboardTab}
                     onCreateTab={createDashboardTab}
+                    onRenameTab={renameDashboardTab}
+                    onRenameChart={renameDashboardChart}
+                    onEditChart={editDashboardChart}
                     onPlaceCurrent={placeCurrentChart}
                     onMove={moveDashboardPlacement}
                     onRemove={removeDashboardPlacement}

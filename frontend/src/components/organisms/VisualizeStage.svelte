@@ -30,8 +30,7 @@
     compact: (value: number | string | null | undefined) => string;
     chartTheme?: string;
     binLabel: (bin: HistogramBin) => string;
-    dashboardNames?: string[];
-    onAddToDashboard?: (name: string) => void;
+    onAddToDashboard?: () => boolean;
     onMark: (mark: ChartMark) => void;
   };
 
@@ -39,7 +38,7 @@
     columnSearch, setColumnSearch, columns, selected,
     onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
     data, loading, error, count, compact, chartTheme = 'primary', binLabel,
-    dashboardNames = [], onAddToDashboard, onMark
+    onAddToDashboard, onMark
   }: Props = $props();
 
   let status = $derived.by(() => {
@@ -63,7 +62,7 @@
   <ChartOptionsPane
     {columnSearch} {setColumnSearch} {columns} {selected} {onToggleColumn}
     {suggestions} {spec} {onSelectChart} {onSelectMetric}
-    {dashboardNames} {onAddToDashboard}
+    {onAddToDashboard}
   />
 
   <div class="canvas">
@@ -100,7 +99,7 @@
     display: flex;
     background: var(--surface);
   }
-  .canvas { flex: 1; min-width: 0; min-height: 0; display: flex; padding: 8px 268px 28px 8px; }
+  .canvas { flex: 1; min-width: 0; min-height: 0; display: flex; padding: 8px 8px 28px; }
   .state {
     margin: auto;
     display: flex;
