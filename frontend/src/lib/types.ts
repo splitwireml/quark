@@ -270,11 +270,13 @@ export interface BarVisualizeRow {
   label: string | boolean | number;
   value: AggregateCount;
   n?: AggregateCount;
+  values?: AggregateCount[];
 }
 
 export interface BarVisualizeResponse {
   chart: 'bar';
   rows: BarVisualizeRow[];
+  series: string[] | null;
   other_count: AggregateCount;
   elapsed_ms: number;
 }

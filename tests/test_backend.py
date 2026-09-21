@@ -2047,3 +2047,55 @@ def test_visualize_box_tukey_whiskers_outliers_and_groups(client):
     east = next(item for item in grouped.json()["groups"] if item["label"] == "east")
     assert 100 in east["outliers"] or 100.0 in east["outliers"]
     assert client.post(base + "/visualize", json={"spec": {"chart": "box", "encodings": {"value": "region"}}}).status_code == 422
+
+
+def test_visualize_bar_groups_into_aligned_series(client):
+    node = upload(client, "grouped.csv", b"region,quarter,amount\neast,q1,10\neast,q2,20\nwest,q1,30\nwest,q2,40\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'grouped')['id']}"
+    response = client.post(base + "/visualize", json={
+        "spec": {"chart": "bar", "encodings": {"category": "region", "value": "amount", "group": "quarter"}, "metric": "sum"},
+    })
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["series"] == ["q1", "q2"]
+    rows = {row["label"]: row["values"] for row in payload["rows"]}
+    assert rows["east"] == [10, 20]
+    assert rows["west"] == [30, 40]
+
+
+def test_visualize_bar_folds_series_beyond_the_cap_into_other(client):
+    body = b"region,tag,amount\n" + b"".join(f"east,t{i},{i}\n".encode() for i in range(10))
+    node = upload(client, "manyseries.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'manyseries')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "bar", "encodings": {"category": "region", "value": "amount", "group": "tag"}, "metric": "sum"},
+    }).json()
+    assert len(payload["series"]) == 7
+    assert payload["series"][-1] == "Other"
+    assert len(payload["rows"][0]["values"]) == 7
+
+
+def test_visualize_bar_layout_does_not_change_the_rows(client):
+    node = upload(client, "layout.csv", b"region,quarter,amount\neast,q1,10\neast,q2,20\nwest,q1,30\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'layout')['id']}"
+    encodings = {"category": "region", "value": "amount", "group": "quarter"}
+    grouped = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": encodings, "metric": "sum", "layout": "grouped"}}).json()
+    stacked = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": encodings, "metric": "sum", "layout": "stacked100"}}).json()
+    assert grouped["rows"] == stacked["rows"]
+    assert grouped["series"] == stacked["series"]
+
+
+def test_visualize_bar_without_group_keeps_the_old_shape(client):
+    node = upload(client, "plain.csv", b"region,amount\neast,10\nwest,30\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'plain')['id']}"
+    payload = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": {"category": "region"}}}).json()
+    assert payload["series"] is None
+    assert all("values" not in row for row in payload["rows"])
+
+
+def test_visualize_bar_rejects_an_unknown_group_column(client):
+    node = upload(client, "badgroup.csv", b"region,amount\neast,10\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'badgroup')['id']}"
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "bar", "encodings": {"category": "region", "group": "missing"}},
+    }).status_code == 422

@@ -50,6 +50,9 @@ BAR_LIMIT = 30
 BOX_GROUP_LIMIT = 12
 OUTLIER_LIMIT = 200
 SCATTER_LIMIT = 5000
+SERIES_LIMIT = 6
+PIE_LIMIT = 8
+LINE_POINT_LIMIT = 400
 METRIC_SQL = {
     "count": "count({column})",
     "distinct": "count(DISTINCT {column})",
@@ -123,10 +126,12 @@ class ChartEncodings(BaseModel):
 
 class ChartSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    chart: Literal["bar", "histogram", "box", "scatter", "line"]
+    chart: Literal["bar", "histogram", "box", "scatter", "line", "pie"]
     encodings: ChartEncodings = ChartEncodings()
     metric: Literal["count", "distinct", "min", "max", "sum", "avg", "median", "stddev"] | None = None
     density: bool = False
+    layout: Literal["grouped", "stacked", "stacked100"] | None = None
+    grain: Literal["hour", "day", "week", "month", "quarter", "year"] | None = None
 
 
 class VisualizeRequest(Query):
@@ -1468,9 +1473,57 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 f"SELECT count(*) FROM {source} WHERE {field} IS NOT NULL{extra_filter}",
                 values,
             ).fetchone()[0]
+            group_name = spec.encodings.group
+            series_labels: list[str] | None = None
+            series_values: dict[Any, list[Any]] = {}
+            if group_name:
+                if group_name not in columns:
+                    raise HTTPException(422, "Bar group column was not found")
+                group_field = quote(group_name)
+                labels = [label for label, _value, _n in rows]
+                # Rank series by row count, not by the metric: an average would order series by
+                # magnitude and float a one-row series above a thousand-row one.
+                ranked = con.execute(f"""
+                    SELECT {group_field} AS series, count(*) AS n
+                    FROM {source} WHERE {field} IS NOT NULL AND {group_field} IS NOT NULL{extra_filter}
+                    GROUP BY 1 ORDER BY n DESC, series
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                top = [row[0] for row in ranked]
+                if labels and top:
+                    label_marks = ", ".join("?" for _ in labels)
+                    series_marks = ", ".join("?" for _ in top)
+                    cells = con.execute(f"""
+                        SELECT {field} AS label, {group_field} AS series, {value_sql} AS value
+                        FROM {source}
+                        WHERE {field} IN ({label_marks}) AND {group_field} IN ({series_marks}){extra_filter}
+                        GROUP BY 1, 2
+                    """, [*values, *labels, *top]).fetchall()
+                    other = con.execute(f"""
+                        SELECT {field} AS label, {value_sql} AS value
+                        FROM {source}
+                        WHERE {field} IN ({label_marks}) AND {group_field} IS NOT NULL
+                          AND {group_field} NOT IN ({series_marks}){extra_filter}
+                        GROUP BY 1
+                    """, [*values, *labels, *top]).fetchall()
+                    series_labels = [str(item) for item in top]
+                    grid = {(label, str(series)): value for label, series, value in cells}
+                    other_by_label = {label: value for label, value in other}
+                    if other:
+                        series_labels.append("Other")
+                    for label in labels:
+                        cells_for_label = [safe(grid.get((label, str(series)), 0)) for series in top]
+                        if other:
+                            cells_for_label.append(safe(other_by_label.get(label, 0)))
+                        series_values[label] = cells_for_label
             return {
                 "chart": "bar",
-                "rows": [{"label": safe(label), "value": safe(value), "n": safe(n)} for label, value, n in rows],
+                "rows": [
+                    {"label": safe(label), "value": safe(value), "n": safe(n)}
+                    | ({"values": series_values[label]} if label in series_values else {})
+                    for label, value, n in rows
+                ],
+                "series": series_labels,
                 "other_count": safe(non_null - shown),
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
