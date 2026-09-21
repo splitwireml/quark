@@ -2,13 +2,14 @@
   import { tick } from 'svelte';
   import IconButton from '../atoms/IconButton.svelte';
   import { floatingTooltips } from '../../lib/tooltips';
-  import Chip from '../atoms/Chip.svelte';
   import Eyebrow from '../atoms/Eyebrow.svelte';
   import Icon from '../atoms/Icon.svelte';
   import TextInput from '../atoms/TextInput.svelte';
   import ChartTypeToggle from './ChartTypeToggle.svelte';
+  import ChipToggleGroup from './ChipToggleGroup.svelte';
+  import RoleChip from './RoleChip.svelte';
   import { groupColumns, visualizeMetrics } from '../../lib/visualize';
-  import type { AggregateMetric, ChartSpec, ChartSuggestion, ChartType, ColumnInfo } from '../../lib/types';
+  import type { AggregateMetric, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
 
   type Props = {
     columnSearch: string;
@@ -20,6 +21,9 @@
     spec: ChartSpec | null;
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
+    roles: EncodingRole[];
+    roleOf: (name: string) => EncodingRole | null;
+    onSetRole: (name: string, role: EncodingRole) => void;
     onAddToDashboard?: () => boolean;
     editingTitle?: string;
     onFinishEditing?: () => void;
@@ -28,6 +32,7 @@
   let {
     columnSearch, setColumnSearch, columns, selected,
     onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
+    roles, roleOf, onSetRole,
     onAddToDashboard, editingTitle, onFinishEditing
   }: Props = $props();
 
@@ -167,19 +172,12 @@
       {#if showAggregate}
         <div class="pane-block">
           <Eyebrow>Aggregate</Eyebrow>
-          <div class="metrics" role="group" aria-label="Aggregation">
-            {#each visualizeMetrics as metric (metric.value)}
-              <button
-                type="button"
-                class="metric-chip"
-                class:on={spec?.metric === metric.value}
-                aria-pressed={spec?.metric === metric.value}
-                data-tip={metric.tip}
-                data-tip-position="top"
-                onclick={() => onSelectMetric(metric.value)}
-              >{metric.label}</button>
-            {/each}
-          </div>
+          <ChipToggleGroup
+            label="Aggregation"
+            options={visualizeMetrics.map((metric) => ({ value: metric.value, label: metric.label, tip: metric.tip }))}
+            selected={spec?.metric ?? null}
+            onSelect={(value) => onSelectMetric(value as AggregateMetric)}
+          />
         </div>
       {/if}
       {#if selected.length}
@@ -187,9 +185,13 @@
           <Eyebrow>Selected</Eyebrow>
           <div class="chips">
             {#each selected as column (column.name)}
-              <Chip tone="accent" onRemove={() => onToggleColumn(column.name)} removeLabel={`Remove ${column.name}`}>
-                {column.name}
-              </Chip>
+              <RoleChip
+                name={column.name}
+                role={roleOf(column.name)}
+                {roles}
+                onSetRole={(role) => onSetRole(column.name, role)}
+                onRemove={() => onToggleColumn(column.name)}
+              />
             {/each}
           </div>
         </div>
@@ -268,20 +270,7 @@
   .added { color: var(--muted); font-size: 11px; }
   .pane :global([data-tip]::after) { display: none; }
   .search :global(.field) { width: 100%; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .metrics { display: flex; flex-wrap: wrap; gap: 5px; }
-  .metric-chip {
-    height: 26px;
-    padding: 0 9px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--control-border);
-    background: var(--surface);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--muted);
-  }
-  .metric-chip.on { border-color: var(--ink-fill); background: var(--ink-fill); color: var(--on-fill); }
-  .metric-chip:hover:not(.on) { border-color: var(--faint); color: var(--ink); }
+  .chips { display: flex; flex-direction: column; gap: 4px; }
   .fields { display: flex; flex-direction: column; gap: 2px; }
   .field {
     display: flex;

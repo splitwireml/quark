@@ -12,10 +12,10 @@
   import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import { classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
+  import { applyRoles, chartRoles, classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
   import { chartTitle, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
-  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, DashboardSelection, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, DashboardSelection, DatasetVersionHistory, EncodingRole, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
   import { editorHighlight, editorTheme } from './lib/editorTheme';
   import { readThemePreference, resolveScheme, themeStorageKey, type ColorScheme, type ThemePreference } from './lib/theme';
@@ -232,6 +232,7 @@
   let visualizeColumns = $state.raw<ColumnInfo[]>([]);
   let visualizeChart = $state<ChartType | null>(null);
   let visualizeMetric = $state<AggregateMetric | null>(null);
+  let visualizeRoles = $state<Record<string, EncodingRole>>({});
   let visualizeSearch = $state('');
   let visualizeData = $state.raw<VisualizeResponse | null>(null);
   let visualizeLoading = $state(false);
@@ -594,12 +595,13 @@
     const suggestions = visualizeSuggestions;
     if (!suggestions.length) return null;
     const pick = (visualizeChart && suggestions.find((item) => item.chart === visualizeChart)) || suggestions[0];
-    const metric = pick.chart === 'bar' && pick.encodings.value
+    const encodings = applyRoles(pick.encodings, pick.chart, visualizeRoles, visualizeColumns);
+    const metric = pick.chart === 'bar' && encodings.value
       ? (visualizeMetric ?? pick.metric ?? 'avg')
       : pick.metric;
     return metric
-      ? { chart: pick.chart, encodings: pick.encodings, metric }
-      : { chart: pick.chart, encodings: pick.encodings };
+      ? { chart: pick.chart, encodings, metric }
+      : { chart: pick.chart, encodings };
   });
   let currentDashboard = $derived(dashboardDocuments.find((document) => document.datasetId === selectedDataset));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
@@ -635,6 +637,7 @@
     visualizeColumns = [];
     visualizeChart = null;
     visualizeMetric = null;
+    visualizeRoles = {};
     visualizeSearch = '';
     visualizeData = null;
     visualizeError = '';
@@ -658,11 +661,27 @@
       if (!column) return;
       visualizeColumns = [...visualizeColumns, column];
     }
+    if (visualizeRoles[name] && !visualizeColumns.some((column) => column.name === name)) {
+      const { [name]: _dropped, ...rest } = visualizeRoles;
+      visualizeRoles = rest;
+    }
     visualizeSearch = '';
     if (visualizeChart && !suggestCharts(visualizeColumns).some((item) => item.chart === visualizeChart && implementedCharts.has(item.chart))) {
       visualizeChart = null;
     }
     void loadVisualize();
+  }
+
+  function setVisualizeRole(name: string, role: EncodingRole) {
+    visualizeRoles = { ...visualizeRoles, [name]: role };
+    void loadVisualize();
+  }
+
+  function visualizeRoleOf(name: string): EncodingRole | null {
+    const encodings = visualizeSpec?.encodings;
+    if (!encodings) return null;
+    const entry = (Object.entries(encodings) as [EncodingRole, string][]).find(([, value]) => value === name);
+    return entry ? entry[0] : null;
   }
 
   function selectVisualizeChart(chart: ChartType) {
@@ -3025,6 +3044,8 @@
                     columns={visualizeFieldOptions} selected={visualizeColumns}
                     onToggleColumn={toggleVisualizeColumn}
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
+                    roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
+                    roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
                     data={visualizeData} loading={visualizeLoading} error={visualizeError}
                     {count} {compact} chartTheme={chartThemeKey} {binLabel}
                     onAddToDashboard={addChartToDashboard}
@@ -3041,6 +3062,8 @@
                     columns={visualizeFieldOptions} selected={visualizeColumns}
                     onToggleColumn={toggleVisualizeColumn}
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric}
+                    roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
+                    roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
                     onSelectTab={selectDashboardTab}
                     onCreateTab={createDashboardTab}
                     onRenameTab={renameDashboardTab}

@@ -9,6 +9,7 @@
     ChartSuggestion,
     ChartType,
     ColumnInfo,
+    EncodingRole,
     HistogramBin,
     VisualizeResponse
   } from '../../lib/types';
@@ -23,6 +24,9 @@
     spec: ChartSpec | null;
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
+    roles: EncodingRole[];
+    roleOf: (name: string) => EncodingRole | null;
+    onSetRole: (name: string, role: EncodingRole) => void;
     data: VisualizeResponse | null;
     loading: boolean;
     error: string;
@@ -37,6 +41,7 @@
   let {
     columnSearch, setColumnSearch, columns, selected,
     onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
+    roles, roleOf, onSetRole,
     data, loading, error, count, compact, chartTheme = 'primary', binLabel,
     onAddToDashboard, onMark
   }: Props = $props();
@@ -62,6 +67,7 @@
   <ChartOptionsPane
     {columnSearch} {setColumnSearch} {columns} {selected} {onToggleColumn}
     {suggestions} {spec} {onSelectChart} {onSelectMetric}
+    {roles} {roleOf} {onSetRole}
     {onAddToDashboard}
   />
 

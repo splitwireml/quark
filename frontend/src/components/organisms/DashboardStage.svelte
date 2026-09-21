@@ -6,8 +6,8 @@
   import ChartOptionsPane from '../molecules/ChartOptionsPane.svelte';
   import ChartView from '../molecules/ChartView.svelte';
   import { clampPlacement, DEFAULT_TILE, snapMove, snapResize, type SnapGuide } from '../../lib/dashboard';
-  import { suggestCharts } from '../../lib/visualize';
-  import type { AggregateCount, AggregateMetric, ChartMark, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, DashboardChart, DashboardPlacement, DashboardTab, HistogramBin, VisualizeResponse } from '../../lib/types';
+  import { applyRoles, chartRoles, suggestCharts } from '../../lib/visualize';
+  import type { AggregateCount, AggregateMetric, ChartMark, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, DashboardChart, EncodingRole, DashboardPlacement, DashboardTab, HistogramBin, VisualizeResponse } from '../../lib/types';
 
   type ChartState = { data: VisualizeResponse | null; loading: boolean; error: string };
   type Rect = Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>;
@@ -29,6 +29,9 @@
     spec: ChartSpec | null;
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
+    roles: EncodingRole[];
+    roleOf: (name: string) => EncodingRole | null;
+    onSetRole: (name: string, role: EncodingRole) => void;
     onSelectTab: (id: string) => void;
     onCreateTab: () => void;
     onRenameTab: (id: string, name: string) => void;
@@ -45,6 +48,7 @@
   let {
     tabs, activeTabId, charts, chartStates, count, compact, chartTheme = 'primary', binLabel,
     columnSearch, setColumnSearch, columns, selected, onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
+    roles, roleOf, onSetRole,
     onSelectTab, onCreateTab, onRenameTab, onRenameChart, onEditChart, onPlaceCurrent, onMove, onRemove, onMark, onRetryChart, onScroll
   }: Props = $props();
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
@@ -53,15 +57,29 @@
   let editColumns = $state.raw<ColumnInfo[]>([]);
   let editType = $state<ChartType | null>(null);
   let editMetric = $state<AggregateMetric | null>(null);
+  let editRoles = $state<Record<string, EncodingRole>>({});
   let editingPlacement = $derived(activeTab?.placements.find((item) => item.id === editingId));
   let editingChart = $derived(charts.find((item) => item.id === editingPlacement?.chartId));
   let editSuggestions = $derived(suggestCharts(editColumns).filter((item) => item.chart !== 'line'));
   let editSpec = $derived.by((): ChartSpec | null => {
     const pick = editSuggestions.find((item) => item.chart === editType) ?? editSuggestions[0];
     if (!pick || !editingChart) return null;
-    return { ...editingChart.spec, ...pick,
-      metric: pick.chart === 'bar' && pick.encodings.value ? editMetric ?? pick.metric : pick.metric };
+    const encodings = applyRoles(pick.encodings, pick.chart, editRoles, editColumns);
+    return { ...editingChart.spec, ...pick, encodings,
+      metric: pick.chart === 'bar' && encodings.value ? editMetric ?? pick.metric : pick.metric };
   });
+
+  function editRoleOf(name: string): EncodingRole | null {
+    const encodings = editSpec?.encodings;
+    if (!encodings) return null;
+    const entry = (Object.entries(encodings) as [EncodingRole, string][]).find(([, value]) => value === name);
+    return entry ? entry[0] : null;
+  }
+
+  function setEditRole(name: string, role: EncodingRole) {
+    editRoles = { ...editRoles, [name]: role };
+    saveEdit();
+  }
   let scroller = $state<HTMLDivElement | null>(null);
   let viewportHeight = $state(0);
   let board = $state<HTMLDivElement | null>(null);
@@ -168,6 +186,11 @@
     editColumns = names.map((name) => columns.find((column) => column.name === name)).filter((column): column is ColumnInfo => !!column);
     editType = chart.spec.chart;
     editMetric = chart.spec.metric ?? null;
+    editRoles = Object.fromEntries(
+      (Object.entries(e) as [EncodingRole, string][])
+        .filter(([, value]) => !!value)
+        .map(([role, value]) => [value, role])
+    );
     setColumnSearch('');
     palette.reveal();
   }
@@ -204,6 +227,10 @@
       if (!column) return;
       editColumns = editColumns.some((item) => item.name === name)
         ? editColumns.filter((item) => item.name !== name) : [...editColumns, column];
+      if (editRoles[name] && !editColumns.some((item) => item.name === name)) {
+        const { [name]: _dropped, ...rest } = editRoles;
+        editRoles = rest;
+      }
       setColumnSearch('');
       saveEdit();
       return;
@@ -362,8 +389,11 @@
       {columnSearch} {setColumnSearch} {columns} selected={editingChart ? editColumns : selected}
       onToggleColumn={toggleColumn}
       suggestions={editingChart ? editSuggestions : suggestions} spec={editingChart ? editSpec : spec}
-      editingTitle={editingChart?.title} onFinishEditing={() => editingId = ''}
+      editingTitle={editingChart?.title} onFinishEditing={() => { editingId = ''; editRoles = {}; }}
       onSelectChart={pickChart} onSelectMetric={pickMetric}
+      roles={editingChart ? (editSpec ? chartRoles(editSpec.chart) : []) : roles}
+      roleOf={editingChart ? editRoleOf : roleOf}
+      onSetRole={editingChart ? setEditRole : onSetRole}
     />
     {#key activeTabId || 'empty'}
     <div class="scroller" role="tabpanel" id={`dashboard-panel-${activeTabId || 'empty'}`} aria-labelledby={activeTab ? `dashboard-tab-${activeTabId}` : undefined} tabindex="0" bind:this={scroller} bind:clientHeight={viewportHeight} {@attach restoreScroll} onscroll={(event) => onScroll(event.currentTarget.scrollTop)}>
