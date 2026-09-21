@@ -59,7 +59,14 @@
       {/if}
     </div>
   {:else if data?.chart === 'histogram'}
-    <HistogramPlot bins={data.bins} {xTitle} {count} {binLabel} onSelect={(bin, last) => onMark({ kind: 'bin', lower: bin.lower, upper: bin.upper, last })} />
+    <div class="stack">
+      <HistogramPlot bins={data.bins} series={data.series} {xTitle} {count} {binLabel}
+        onSelect={(bin, last) => onMark({ kind: 'bin', lower: bin.lower, upper: bin.upper, last })} />
+      {#if data.series}
+        <ChartLegend kind="series" title={spec.encodings.group ?? 'Series'}
+          items={data.series.map((line, index) => ({ label: line.label, color: `var(--chart-group-${(index % 6) + 1})` }))} />
+      {/if}
+    </div>
   {:else if data?.chart === 'box'}
     <BoxPlot groups={data.groups} {xTitle} {yTitle} {compact} onSelect={(group) => onMark(boxMark(group))} />
   {:else if data?.chart === 'scatter'}

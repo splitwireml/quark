@@ -2218,3 +2218,48 @@ def test_visualize_pie_ignores_a_group_encoding(client):
     }).json()
     assert payload["series"] is None
     assert all("values" not in row for row in payload["rows"])
+
+
+def test_visualize_histogram_groups_share_bin_edges(client):
+    body = b"region,amount\n" + b"".join(
+        f"{'east' if i % 2 else 'west'},{i}\n".encode() for i in range(1, 101)
+    )
+    node = upload(client, "grouphist.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'grouphist')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "histogram", "encodings": {"value": "amount", "group": "region"}},
+    }).json()
+    assert sorted(series["label"] for series in payload["series"]) == ["east", "west"]
+    edges = [(item["lower"], item["upper"]) for item in payload["bins"]]
+    for series in payload["series"]:
+        assert [(item["lower"], item["upper"]) for item in series["bins"]] == edges
+    assert sum(item["count"] for item in payload["bins"]) == 100
+    assert sum(item["count"] for series in payload["series"] for item in series["bins"]) == 100
+
+
+def test_visualize_histogram_without_group_omits_series(client):
+    node = upload(client, "plainhist.csv", b"amount\n1\n2\n3\n4\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'plainhist')['id']}"
+    payload = client.post(base + "/visualize", json={"spec": {"chart": "histogram", "encodings": {"value": "amount"}}}).json()
+    assert "series" not in payload
+
+
+def test_visualize_histogram_skips_series_for_a_date_column(client):
+    body = b"region,day\n" + b"".join(
+        f"{'east' if i % 2 else 'west'},2026-01-{i:02d}\n".encode() for i in range(1, 29)
+    )
+    node = upload(client, "datehist.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'datehist')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "histogram", "encodings": {"value": "day", "group": "region"}},
+    }).json()
+    assert payload["bins"]
+    assert "series" not in payload
+
+
+def test_visualize_histogram_rejects_an_unknown_group(client):
+    node = upload(client, "histbadgroup.csv", b"amount\n1\n2\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'histbadgroup')['id']}"
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "histogram", "encodings": {"value": "amount", "group": "missing"}},
+    }).status_code == 422

@@ -1545,11 +1545,71 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if profile_kind(columns[column]) not in {"numeric", "date"}:
                 raise HTTPException(422, "Histogram requires a numeric or date column")
             profile = profile_response(con, source, values, metadata_columns, column)
-            return {
+            bins = profile["histogram"]
+            response: dict[str, Any] = {
                 "chart": "histogram",
-                "bins": profile["histogram"],
+                "bins": bins,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
+            group_name = spec.encodings.group
+            if group_name and group_name not in columns:
+                raise HTTPException(422, "Histogram group column was not found")
+            # ponytail: grouped counts reuse the equal-width bucket formula, so they need
+            # equal-width bins. Date and huge-integer columns fall back to ntile bins, which are
+            # not, and those keep the single distribution. Widen by binning from the edge list
+            # if someone asks for grouped date histograms.
+            uniform = (
+                bool(group_name)
+                and profile_kind(columns[column]) == "numeric"
+                and len(bins) >= 2
+                and bins[0]["upper"] > bins[0]["lower"]
+                and max(
+                    abs((item["upper"] - item["lower"]) - (bins[0]["upper"] - bins[0]["lower"]))
+                    for item in bins
+                ) <= (bins[0]["upper"] - bins[0]["lower"]) * 1e-6
+            )
+            if uniform:
+                field = quote(column)
+                group_field = quote(group_name)
+                lower = bins[0]["lower"]
+                width = bins[0]["upper"] - bins[0]["lower"]
+                finite = f"{field} IS NOT NULL AND isfinite({field}::DOUBLE) AND {group_field} IS NOT NULL"
+                ranked = con.execute(f"""
+                    SELECT {group_field} AS series, count(*) AS n
+                    FROM {source} WHERE {finite}
+                    GROUP BY 1 ORDER BY n DESC, series
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                top = [row[0] for row in ranked]
+                if top:
+                    # The three bucket parameters sit in the SELECT, ahead of {source} in the
+                    # FROM, and DuckDB binds in statement order. The Other fold happens in
+                    # Python to keep every other placeholder out of the SELECT.
+                    counted = con.execute(f"""
+                        SELECT {group_field} AS series,
+                               least(?, floor(({field} - ?) / ?)::INTEGER) AS idx,
+                               count(*) AS n
+                        FROM {source} WHERE {finite}
+                        GROUP BY 1, 2
+                    """, [len(bins) - 1, lower, width, *values]).fetchall()
+                    kept = {str(item) for item in top}
+                    buckets: dict[str, dict[int, int]] = {}
+                    for series_label, index, n in counted:
+                        key = str(series_label) if str(series_label) in kept else "Other"
+                        slot = buckets.setdefault(key, {})
+                        slot[int(index)] = slot.get(int(index), 0) + n
+                    labels = [str(item) for item in top]
+                    if "Other" in buckets:
+                        labels.append("Other")
+                    response["series"] = [{
+                        "label": label,
+                        "bins": [{
+                            "lower": item["lower"],
+                            "upper": item["upper"],
+                            "count": safe(buckets.get(label, {}).get(index, 0)),
+                        } for index, item in enumerate(bins)],
+                    } for label in labels]
+            return response
         if spec.chart == "box":
             column = spec.encodings.value
             if not column or column not in columns:

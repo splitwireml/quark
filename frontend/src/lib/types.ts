@@ -286,6 +286,7 @@ export interface PieVisualizeResponse extends Omit<BarVisualizeResponse, 'chart'
 export interface HistogramVisualizeResponse {
   chart: 'histogram';
   bins: HistogramBin[];
+  series?: { label: string; bins: HistogramBin[] }[];
   elapsed_ms: number;
 }
 
