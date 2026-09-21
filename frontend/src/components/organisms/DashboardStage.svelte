@@ -7,7 +7,7 @@
   import ChartView from '../molecules/ChartView.svelte';
   import { clampPlacement, DEFAULT_TILE, snapMove, snapResize, type SnapGuide } from '../../lib/dashboard';
   import { applyRoles, chartRoles, suggestCharts } from '../../lib/visualize';
-  import type { AggregateCount, AggregateMetric, ChartMark, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, DashboardChart, EncodingRole, DashboardPlacement, DashboardTab, HistogramBin, VisualizeResponse } from '../../lib/types';
+  import type { AggregateCount, AggregateMetric, BarLayout, ChartMark, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, DashboardChart, EncodingRole, DashboardPlacement, DashboardTab, HistogramBin, VisualizeResponse } from '../../lib/types';
 
   type ChartState = { data: VisualizeResponse | null; loading: boolean; error: string };
   type Rect = Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>;
@@ -29,6 +29,7 @@
     spec: ChartSpec | null;
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
+    onSelectLayout: (layout: BarLayout) => void;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -47,7 +48,7 @@
 
   let {
     tabs, activeTabId, charts, chartStates, count, compact, chartTheme = 'primary', binLabel,
-    columnSearch, setColumnSearch, columns, selected, onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
+    columnSearch, setColumnSearch, columns, selected, onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout,
     roles, roleOf, onSetRole,
     onSelectTab, onCreateTab, onRenameTab, onRenameChart, onEditChart, onPlaceCurrent, onMove, onRemove, onMark, onRetryChart, onScroll
   }: Props = $props();
@@ -58,6 +59,7 @@
   let editType = $state<ChartType | null>(null);
   let editMetric = $state<AggregateMetric | null>(null);
   let editRoles = $state<Record<string, EncodingRole>>({});
+  let editLayout = $state<BarLayout | null>(null);
   let editingPlacement = $derived(activeTab?.placements.find((item) => item.id === editingId));
   let editingChart = $derived(charts.find((item) => item.id === editingPlacement?.chartId));
   let editSuggestions = $derived(suggestCharts(editColumns).filter((item) => item.chart !== 'line'));
@@ -66,7 +68,8 @@
     if (!pick || !editingChart) return null;
     const encodings = applyRoles(pick.encodings, pick.chart, editRoles, editColumns);
     return { ...editingChart.spec, ...pick, encodings,
-      metric: pick.chart === 'bar' && encodings.value ? editMetric ?? pick.metric : pick.metric };
+      metric: pick.chart === 'bar' && encodings.value ? editMetric ?? pick.metric : pick.metric,
+      layout: pick.chart === 'bar' && encodings.group ? editLayout ?? editingChart.spec.layout ?? 'grouped' : undefined };
   });
 
   function editRoleOf(name: string): EncodingRole | null {
@@ -74,6 +77,11 @@
     if (!encodings) return null;
     const entry = (Object.entries(encodings) as [EncodingRole, string][]).find(([, value]) => value === name);
     return entry ? entry[0] : null;
+  }
+
+  function setEditLayout(layout: BarLayout) {
+    editLayout = layout;
+    saveEdit();
   }
 
   function setEditRole(name: string, role: EncodingRole) {
@@ -186,6 +194,7 @@
     editColumns = names.map((name) => columns.find((column) => column.name === name)).filter((column): column is ColumnInfo => !!column);
     editType = chart.spec.chart;
     editMetric = chart.spec.metric ?? null;
+    editLayout = chart.spec.layout ?? null;
     editRoles = Object.fromEntries(
       (Object.entries(e) as [EncodingRole, string][])
         .filter(([, value]) => !!value)
@@ -389,8 +398,9 @@
       {columnSearch} {setColumnSearch} {columns} selected={editingChart ? editColumns : selected}
       onToggleColumn={toggleColumn}
       suggestions={editingChart ? editSuggestions : suggestions} spec={editingChart ? editSpec : spec}
-      editingTitle={editingChart?.title} onFinishEditing={() => { editingId = ''; editRoles = {}; }}
+      editingTitle={editingChart?.title} onFinishEditing={() => { editingId = ''; editRoles = {}; editLayout = null; }}
       onSelectChart={pickChart} onSelectMetric={pickMetric}
+      onSelectLayout={editingChart ? setEditLayout : onSelectLayout}
       roles={editingChart ? (editSpec ? chartRoles(editSpec.chart) : []) : roles}
       roleOf={editingChart ? editRoleOf : roleOf}
       onSetRole={editingChart ? setEditRole : onSetRole}

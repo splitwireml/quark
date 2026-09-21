@@ -4,6 +4,7 @@
   import type {
     AggregateCount,
     AggregateMetric,
+    BarLayout,
     ChartMark,
     ChartSpec,
     ChartSuggestion,
@@ -24,6 +25,7 @@
     spec: ChartSpec | null;
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
+    onSelectLayout: (layout: BarLayout) => void;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -40,7 +42,7 @@
 
   let {
     columnSearch, setColumnSearch, columns, selected,
-    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
+    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout,
     roles, roleOf, onSetRole,
     data, loading, error, count, compact, chartTheme = 'primary', binLabel,
     onAddToDashboard, onMark
@@ -66,7 +68,7 @@
 <section class="stage" aria-label="Chart">
   <ChartOptionsPane
     {columnSearch} {setColumnSearch} {columns} {selected} {onToggleColumn}
-    {suggestions} {spec} {onSelectChart} {onSelectMetric}
+    {suggestions} {spec} {onSelectChart} {onSelectMetric} {onSelectLayout}
     {roles} {roleOf} {onSetRole}
     {onAddToDashboard}
   />

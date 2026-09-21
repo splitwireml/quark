@@ -8,8 +8,8 @@
   import ChartTypeToggle from './ChartTypeToggle.svelte';
   import ChipToggleGroup from './ChipToggleGroup.svelte';
   import RoleChip from './RoleChip.svelte';
-  import { groupColumns, visualizeMetrics } from '../../lib/visualize';
-  import type { AggregateMetric, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
+  import { barLayouts, groupColumns, visualizeMetrics } from '../../lib/visualize';
+  import type { AggregateMetric, BarLayout, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
 
   type Props = {
     columnSearch: string;
@@ -21,6 +21,7 @@
     spec: ChartSpec | null;
     onSelectChart: (chart: ChartType) => void;
     onSelectMetric: (metric: AggregateMetric) => void;
+    onSelectLayout: (layout: BarLayout) => void;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -31,7 +32,7 @@
 
   let {
     columnSearch, setColumnSearch, columns, selected,
-    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric,
+    onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout,
     roles, roleOf, onSetRole,
     onAddToDashboard, editingTitle, onFinishEditing
   }: Props = $props();
@@ -178,6 +179,13 @@
             selected={spec?.metric ?? null}
             onSelect={(value) => onSelectMetric(value as AggregateMetric)}
           />
+        </div>
+      {/if}
+      {#if spec?.chart === 'bar' && spec.encodings.group}
+        <div class="pane-block">
+          <Eyebrow>Layout</Eyebrow>
+          <ChipToggleGroup label="Bar layout" options={barLayouts} selected={spec.layout ?? 'grouped'}
+            onSelect={(value) => onSelectLayout(value as BarLayout)} />
         </div>
       {/if}
       {#if selected.length}

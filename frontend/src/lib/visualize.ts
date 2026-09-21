@@ -122,7 +122,11 @@ export function filtersFromMark(spec: ChartSpec, mark: ChartMark, existingCount 
   if (mark.kind === 'category') {
     const column = spec.encodings.category ?? spec.encodings.group;
     if (!column) return [];
-    return [{ column, operator: '=', value: mark.value, ...and(0) }];
+    const filters: FilterCondition[] = [{ column, operator: '=', value: mark.value, ...and(0) }];
+    if (mark.series !== undefined && spec.encodings.group && spec.encodings.group !== column) {
+      filters.push({ column: spec.encodings.group, operator: '=', value: mark.series, ...and(1) });
+    }
+    return filters;
   }
   if (mark.kind === 'region') {
     const filters: FilterCondition[] = [];

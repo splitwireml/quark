@@ -228,3 +228,18 @@ test('applyRoles drops an override the active chart does not accept', () => {
   const result = applyRoles({ category: 'region', value: 'price' }, 'bar', { price: 'size' }, [region, price]);
   assert.deepEqual(result, { category: 'region', value: 'price' });
 });
+
+test('clicking a series bar filters on both the category and the group', () => {
+  const spec = { chart: 'bar', encodings: { category: 'region', value: 'price', group: 'flag' }, metric: 'sum' };
+  assert.deepEqual(filtersFromMark(spec, { kind: 'category', value: 'east', series: 'true' }), [
+    { column: 'region', operator: '=', value: 'east' },
+    { column: 'flag', operator: '=', value: 'true', connector: 'and' }
+  ]);
+});
+
+test('a category mark without a series filters on the category alone', () => {
+  const spec = { chart: 'bar', encodings: { category: 'region', group: 'flag' } };
+  assert.deepEqual(filtersFromMark(spec, { kind: 'category', value: 'east' }), [
+    { column: 'region', operator: '=', value: 'east' }
+  ]);
+});

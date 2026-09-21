@@ -4,6 +4,7 @@
   import HistogramPlot from './HistogramPlot.svelte';
   import BoxPlot from './BoxPlot.svelte';
   import ScatterPlot from './ScatterPlot.svelte';
+  import ChartLegend from './ChartLegend.svelte';
   import { metricTitle } from '../../lib/visualize';
   import type { AggregateCount, BoxGroup, ChartMark, ChartSpec, HistogramBin, VisualizeResponse } from '../../lib/types';
 
@@ -46,7 +47,14 @@
   {:else if error}
     <div class="state error" role="alert"><strong>Chart unavailable</strong><span>{error}</span>{#if onRetry}<Button onclick={onRetry}>Retry chart</Button>{/if}</div>
   {:else if data?.chart === 'bar'}
-    <BarChart rows={data.rows} {xTitle} {yTitle} {count} {compact} {aggregated} onSelect={(value) => onMark({ kind: 'category', value })} />
+    <div class="stack">
+      <BarChart rows={data.rows} series={data.series} layout={spec.layout ?? 'grouped'} {xTitle} {yTitle} {count} {compact} {aggregated}
+        onSelect={(value, series) => onMark({ kind: 'category', value, series })} />
+      {#if data.series}
+        <ChartLegend kind="series" title={spec.encodings.group ?? 'Series'}
+          items={data.series.map((label, index) => ({ label, color: `var(--chart-series-${(index % 6) + 1})` }))} />
+      {/if}
+    </div>
   {:else if data?.chart === 'histogram'}
     <HistogramPlot bins={data.bins} {xTitle} {count} {binLabel} onSelect={(bin, last) => onMark({ kind: 'bin', lower: bin.lower, upper: bin.upper, last })} />
   {:else if data?.chart === 'box'}
@@ -61,6 +69,7 @@
 
 <style>
   .chart-view { position: relative; flex: 1; min-width: 0; min-height: 0; width: 100%; display: flex; }
+  .stack { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .state { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px; text-align: center; color: var(--muted); font-size: 12.5px; }
   .state strong { color: var(--ink); }
   .state.error strong { color: var(--error); }

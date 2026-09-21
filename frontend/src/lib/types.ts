@@ -262,7 +262,7 @@ export interface ChartSuggestion {
 }
 
 export type ChartMark =
-  | { kind: 'category'; value: string | boolean | number }
+  | { kind: 'category'; value: string | boolean | number; series?: string | boolean | number }
   | { kind: 'bin'; lower: NumericValue; upper: NumericValue; last?: boolean }
   | { kind: 'region'; xMin: NumericValue; xMax: NumericValue; yMin: NumericValue; yMax: NumericValue };
 
