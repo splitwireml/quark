@@ -1,6 +1,8 @@
 # Visualization Engine: Multi-Group Controls and New Chart Types — Design
 
-**Status:** Approved design. Implementation plan to follow.
+**Status:** Shipped 2026-09-21 across ten commits on `dashboard-improvements`, following `docs/plans/2026-09-21-visualization-engine.md`.
+
+Three gaps this design missed, found during implementation and fixed with tests: `suggestCharts` returned no suggestion for date + number + category or for three numbers plus a category, leaving the line group and the scatter size/colour/shape channels unreachable; the aggregate picker keyed off `encodings.value` so a line chart had no metric control while the backend silently averaged; and a single-hue palette drew every series the same colour, now solved by a `--chart-group-*` token set that borrows the closest monotone ramp.
 
 **Goal:** Give the visualization engine user-controlled encoding roles, series-aware bar charts, real scatter scales for size, color, and shape, a date-axis line chart with time-grain controls, and a pie chart.
 
