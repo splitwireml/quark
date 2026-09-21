@@ -308,12 +308,19 @@ export interface ScatterPoint {
   x: NumericValue;
   y: NumericValue;
   color?: string | number | boolean | null;
+  size?: NumericValue;
+  shape?: string | number | boolean | null;
 }
 
 export interface ScatterVisualizeResponse {
   chart: 'scatter';
   points: ScatterPoint[];
   total_points: AggregateCount;
+  color_kind?: 'categorical' | 'numeric';
+  color_domain?: [NumericValue, NumericValue];
+  color_labels?: string[];
+  shape_labels?: string[];
+  size_domain?: [NumericValue, NumericValue];
   elapsed_ms: number;
 }
 

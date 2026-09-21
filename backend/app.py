@@ -1629,10 +1629,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if not x_name or not y_name or x_name not in columns or y_name not in columns:
                 raise HTTPException(422, "Scatter requires x and y encodings")
             color_name = spec.encodings.color
-            if color_name and color_name not in columns:
-                raise HTTPException(422, "Scatter color column was not found")
+            size_name = spec.encodings.size
+            shape_name = spec.encodings.pattern
+            for role, name in (("color", color_name), ("size", size_name), ("shape", shape_name)):
+                if name and name not in columns:
+                    raise HTTPException(422, f"Scatter {role} column was not found")
+            if size_name and profile_kind(columns[size_name]) != "numeric":
+                raise HTTPException(422, "Scatter size requires a numeric column")
             x_field, y_field = quote(x_name), quote(y_name)
-            color_field = quote(color_name) if color_name else None
             x_ok = f"{x_field} IS NOT NULL"
             y_ok = f"{y_field} IS NOT NULL"
             if profile_kind(columns[x_name]) == "numeric":
@@ -1641,24 +1645,79 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 y_ok += f" AND isfinite({y_field}::DOUBLE)"
             where = f"WHERE {x_ok} AND {y_ok}"
             total_points = con.execute(f"SELECT count(*) FROM {source} {where}", values).fetchone()[0]
-            color_select = f", {color_field} AS color" if color_field else ""
+
+            # Scales come from the whole filtered relation, never from the random sample below:
+            # a sample-derived domain would shift on every refetch and recolour the same point.
+            def scale_domain(name: str) -> list[Any]:
+                field_sql = quote(name)
+                low, high = con.execute(
+                    f"SELECT min({field_sql}), max({field_sql}) FROM {source} {where}"
+                    f" AND {field_sql} IS NOT NULL AND isfinite({field_sql}::DOUBLE)",
+                    values,
+                ).fetchone()
+                return [safe(low), safe(high)]
+
+            def top_labels(name: str) -> list[str]:
+                field_sql = quote(name)
+                ranked = con.execute(f"""
+                    SELECT {field_sql} AS label, count(*) AS n
+                    FROM {source} {where} AND {field_sql} IS NOT NULL
+                    GROUP BY 1 ORDER BY n DESC, label
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                return [str(row[0]) for row in ranked]
+
+            color_numeric = bool(color_name) and profile_kind(columns[color_name]) == "numeric"
+            extras = [(name, alias) for name, alias in (
+                (color_name, "color"), (size_name, "size"), (shape_name, "shape")
+            ) if name]
+            select_extra = "".join(f", {quote(name)} AS {alias}" for name, alias in extras)
             points = con.execute(f"""
-                SELECT {x_field} AS x, {y_field} AS y{color_select}
+                SELECT {x_field} AS x, {y_field} AS y{select_extra}
                 FROM {source} {where}
                 ORDER BY random()
                 LIMIT {SCATTER_LIMIT}
             """, values).fetchall()
-            point_rows = (
-                [{"x": safe(x), "y": safe(y), "color": safe(color)} for x, y, color in points]
-                if color_field else
-                [{"x": safe(x), "y": safe(y)} for x, y in points]
-            )
-            return {
+            color_labels = None if not color_name or color_numeric else top_labels(color_name)
+            shape_labels = top_labels(shape_name) if shape_name else None
+
+            def fold(value: Any, labels: list[str] | None) -> Any:
+                if labels is None or value is None:
+                    return safe(value)
+                return str(value) if str(value) in labels else "Other"
+
+            point_rows = []
+            for row in points:
+                record: dict[str, Any] = {"x": safe(row[0]), "y": safe(row[1])}
+                for offset, (_name, alias) in enumerate(extras, start=2):
+                    raw = row[offset]
+                    if alias == "color":
+                        record["color"] = safe(raw) if color_numeric else fold(raw, color_labels)
+                    elif alias == "shape":
+                        record["shape"] = fold(raw, shape_labels)
+                    else:
+                        record["size"] = safe(raw)
+                point_rows.append(record)
+            for labels in (color_labels, shape_labels):
+                if labels is not None and len(labels) == SERIES_LIMIT:
+                    labels.append("Other")
+            response: dict[str, Any] = {
                 "chart": "scatter",
                 "points": point_rows,
                 "total_points": safe(total_points),
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
+            if color_name:
+                response["color_kind"] = "numeric" if color_numeric else "categorical"
+                if color_numeric:
+                    response["color_domain"] = scale_domain(color_name)
+                else:
+                    response["color_labels"] = color_labels
+            if size_name:
+                response["size_domain"] = scale_domain(size_name)
+            if shape_name:
+                response["shape_labels"] = shape_labels
+            return response
         raise HTTPException(422, f"Chart type {spec.chart} is not available yet")
 
     @lru_cache(maxsize=128)

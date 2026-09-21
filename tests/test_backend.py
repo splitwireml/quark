@@ -2099,3 +2099,37 @@ def test_visualize_bar_rejects_an_unknown_group_column(client):
     assert client.post(base + "/visualize", json={
         "spec": {"chart": "bar", "encodings": {"category": "region", "group": "missing"}},
     }).status_code == 422
+
+
+def test_visualize_scatter_returns_size_and_color_domains_over_the_whole_relation(client, monkeypatch):
+    body = b"x,y,weight,region\n" + b"".join(f"{i},{i * 2},{i},r{i % 3}\n".encode() for i in range(1, 101))
+    node = upload(client, "scales.csv", body)
+    monkeypatch.setattr(backend_app, "SCATTER_LIMIT", 5)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'scales')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "size": "weight", "color": "weight"}},
+    }).json()
+    assert len(payload["points"]) == 5
+    assert payload["size_domain"] == [1, 100]
+    assert payload["color_kind"] == "numeric"
+    assert payload["color_domain"] == [1, 100]
+
+
+def test_visualize_scatter_labels_categorical_color_and_shape(client):
+    node = upload(client, "shapes.csv", b"x,y,region,tier\n1,2,east,gold\n3,4,west,silver\n5,6,east,gold\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'shapes')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "region", "pattern": "tier"}},
+    }).json()
+    assert payload["color_kind"] == "categorical"
+    assert sorted(payload["color_labels"]) == ["east", "west"]
+    assert sorted(payload["shape_labels"]) == ["gold", "silver"]
+    assert all("shape" in point for point in payload["points"])
+
+
+def test_visualize_scatter_rejects_a_non_numeric_size(client):
+    node = upload(client, "badsize.csv", b"x,y,region\n1,2,east\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'badsize')['id']}"
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "size": "region"}},
+    }).status_code == 422
