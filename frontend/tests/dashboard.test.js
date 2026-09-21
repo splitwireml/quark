@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { clampPlacement, nextDashboardName, snapMove, snapResize, updatePlacedChart, composeFilters, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, withoutSelections } from '../src/lib/dashboard.ts';
+import { chartTitle, clampPlacement, nextDashboardName, snapMove, snapResize, updatePlacedChart, composeFilters, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, withoutSelections } from '../src/lib/dashboard.ts';
 
 const base = [{ column: 'year', operator: '>=', value: 2024 }];
 const selections = [
@@ -113,4 +113,13 @@ test('editing one placement preserves siblings, layout, and custom chart titles'
   assert.equal(updatePlacedChart(document, 'p', spec), document);
   const automatic = updatePlacedChart({ ...document, charts: [{ id: 'c', title: 'Bar · region', spec }] }, 'p', nextSpec);
   assert.equal(automatic.charts[1].title, 'Histogram · sales');
+});
+
+test('a chart title names the group, size, and color columns', () => {
+  const spec = { chart: 'scatter', encodings: { x: 'price', y: 'amount', size: 'weight', color: 'region' } };
+  assert.equal(chartTitle(spec), 'Scatter · price × amount × weight × region');
+});
+
+test('a chart title without the new channels is unchanged', () => {
+  assert.equal(chartTitle({ chart: 'bar', encodings: { category: 'region' } }), 'Bar · region');
 });

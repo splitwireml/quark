@@ -243,3 +243,21 @@ test('a category mark without a series filters on the category alone', () => {
     { column: 'region', operator: '=', value: 'east' }
   ]);
 });
+
+test('extra columns beyond a scatter pair land on the size, color, and shape channels', () => {
+  const suggestion = defaultOf([price, amount, rating, region, flag]);
+  assert.equal(suggestion.chart, 'scatter');
+  assert.deepEqual(suggestion.encodings, {
+    x: 'price', y: 'amount', size: 'rating', color: 'region', pattern: 'flag'
+  });
+});
+
+test('two numerics and two categoricals fill color and shape but not size', () => {
+  const suggestion = defaultOf([price, amount, region, flag]);
+  assert.deepEqual(suggestion.encodings, { x: 'price', y: 'amount', color: 'region', pattern: 'flag' });
+});
+
+test('four numerics put the spare ones on size and color', () => {
+  const suggestion = defaultOf([price, amount, rating, delay]);
+  assert.deepEqual(suggestion.encodings, { x: 'price', y: 'amount', size: 'rating', color: 'delay' });
+});

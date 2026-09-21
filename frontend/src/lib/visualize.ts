@@ -104,6 +104,19 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
     return [barMeasure(cats[0], nums[0], cats[1])];
   }
 
+  /* Anything else with two numbers is a scatter: the first two numbers are the axes and every
+     remaining column lands on a channel, so the size, color, and shape encodings stay reachable
+     instead of the whole selection falling through to no suggestion at all. */
+  if (nums.length >= 2) {
+    const [xColumn, yColumn, ...spareNums] = nums;
+    const encodings: ChartEncodings = { x: xColumn.name, y: yColumn.name };
+    if (spareNums.length) encodings.size = spareNums[0].name;
+    if (cats.length) encodings.color = cats[0].name;
+    else if (spareNums.length > 1) encodings.color = spareNums[1].name;
+    if (cats.length > 1) encodings.pattern = cats[1].name;
+    return [{ chart: 'scatter', encodings }];
+  }
+
   return [];
 }
 

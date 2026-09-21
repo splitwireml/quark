@@ -9,7 +9,10 @@ export function emptyDashboardDataset(datasetId: string): DashboardDataset {
 }
 
 export function chartTitle(spec: ChartSpec): string {
-  const fields = [spec.encodings.category, spec.encodings.x, spec.encodings.value, spec.encodings.y, spec.encodings.group].filter(Boolean);
+  const fields = [
+    spec.encodings.category, spec.encodings.x, spec.encodings.value, spec.encodings.y,
+    spec.encodings.group, spec.encodings.size, spec.encodings.color, spec.encodings.pattern
+  ].filter(Boolean);
   return `${spec.chart[0].toUpperCase()}${spec.chart.slice(1)} · ${fields.join(' × ') || 'Chart'}`;
 }
 

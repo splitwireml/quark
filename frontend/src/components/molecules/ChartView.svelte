@@ -60,7 +60,28 @@
   {:else if data?.chart === 'box'}
     <BoxPlot groups={data.groups} {xTitle} {yTitle} {compact} onSelect={(group) => onMark(boxMark(group))} />
   {:else if data?.chart === 'scatter'}
-    <ScatterPlot points={data.points} {xTitle} {yTitle} {compact} theme={chartTheme} onSelectRegion={(region) => onMark({ kind: 'region', ...region })} />
+    <div class="stack">
+      <ScatterPlot points={data.points} {xTitle} {yTitle} {compact} theme={chartTheme}
+        colorKind={data.color_kind} colorDomain={data.color_domain} colorLabels={data.color_labels}
+        shapeLabels={data.shape_labels} sizeDomain={data.size_domain}
+        onSelectRegion={(region) => onMark({ kind: 'region', ...region })} />
+      {#if data.color_kind === 'numeric' && data.color_domain}
+        <ChartLegend kind="gradient" title={spec.encodings.color ?? 'Color'}
+          from="var(--chart-mark)" to="var(--chart-mark-strong)"
+          min={compact(data.color_domain[0])} max={compact(data.color_domain[1])} />
+      {:else if data.color_labels}
+        <ChartLegend kind="series" title={spec.encodings.color ?? 'Color'}
+          items={data.color_labels.map((label, index) => ({ label, color: `var(--chart-group-${(index % 6) + 1})` }))} />
+      {/if}
+      {#if data.shape_labels}
+        <ChartLegend kind="series" title={spec.encodings.pattern ?? 'Shape'}
+          items={data.shape_labels.map((label) => ({ label, color: 'var(--chart-mark-strong)' }))} />
+      {/if}
+      {#if data.size_domain}
+        <ChartLegend kind="size" title={spec.encodings.size ?? 'Size'}
+          min={compact(data.size_domain[0])} max={compact(data.size_domain[1])} />
+      {/if}
+    </div>
   {:else}
     <div class="state"><strong>This chart is not available yet</strong><span>Bar, histogram, box, and scatter are ready for this column mix.</span></div>
   {/if}
