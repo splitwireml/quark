@@ -9,9 +9,12 @@
     operators: { value: FilterOperator; label: string }[];
     operator: FilterOperator;
     value: string;
+    upperValue: string;
     setOperator: (v: FilterOperator) => void;
     setValue: (v: string) => void;
+    setUpperValue: (v: string) => void;
     onblurValue?: () => void;
+    onblurUpperValue?: () => void;
     valueInput?: HTMLInputElement | HTMLSelectElement | null;
     onSubmitFilter: (event: SubmitEvent) => void;
     categorySearch: string;
@@ -33,7 +36,7 @@
   };
 
   let {
-    column, isText, operators, operator, value, setOperator, setValue, onblurValue, valueInput = $bindable(null), onSubmitFilter,
+    column, isText, operators, operator, value, upperValue, setOperator, setValue, setUpperValue, onblurValue, onblurUpperValue, valueInput = $bindable(null), onSubmitFilter,
     categorySearch, setCategorySearch, setCategoryInputRef, onSearchCategories,
     categoryValues, categoriesLoading, categoriesError, categoryTotal, categoryHasMore, onLoadMore,
     selectedCategories, onToggleCategory, onSelectVisible, onClearSelected, onAddNullFilter, count
@@ -85,10 +88,10 @@
   </section>
   <details class="advanced">
     <summary>Advanced condition</summary>
-    <FilterOperatorForm {column} {operators} {operator} {value} {setOperator} {setValue} {onblurValue} bind:valueInput onsubmit={onSubmitFilter} />
+    <FilterOperatorForm {column} {operators} {operator} {value} {upperValue} {setOperator} {setValue} {setUpperValue} {onblurValue} {onblurUpperValue} bind:valueInput onsubmit={onSubmitFilter} />
   </details>
 {:else}
-  <FilterOperatorForm {column} {operators} {operator} {value} {setOperator} {setValue} {onblurValue} bind:valueInput onsubmit={onSubmitFilter} />
+  <FilterOperatorForm {column} {operators} {operator} {value} {upperValue} {setOperator} {setValue} {setUpperValue} {onblurValue} {onblurUpperValue} bind:valueInput onsubmit={onSubmitFilter} />
 {/if}
 
 <style>

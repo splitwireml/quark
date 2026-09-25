@@ -9,9 +9,18 @@
     yTitle: string;
     compact: (value: number | string | null | undefined) => string;
     theme?: string;
+    colorKind?: 'categorical' | 'numeric';
+    colorDomain?: [NumericValue, NumericValue];
+    colorLabels?: string[];
+    shapeLabels?: string[];
+    sizeDomain?: [NumericValue, NumericValue];
     onSelectRegion: (region: { xMin: NumericValue; xMax: NumericValue; yMin: NumericValue; yMax: NumericValue }) => void;
   };
-  let { points, xTitle, yTitle, compact, theme = 'primary', onSelectRegion }: Props = $props();
+  let {
+    points, xTitle, yTitle, compact, theme = 'primary',
+    colorKind, colorDomain, colorLabels, shapeLabels, sizeDomain,
+    onSelectRegion
+  }: Props = $props();
 
   type Brush = { x0: number; y0: number; x1: number; y1: number; ready: boolean };
 
@@ -43,11 +52,39 @@
   let ySpan = $derived(domain.yMax - domain.yMin || 1);
   let xTicks = $derived(domain.xTicks.map((value) => ({ label: formatTick(value), t: (value - domain.xMin) / xSpan })));
   let yTicks = $derived(domain.yTicks.map((value) => ({ label: formatTick(value), t: (value - domain.yMin) / ySpan })));
-  let colorLabels = $derived.by(() => {
-    const labels = [...new Set(points.filter((point) => point.color != null).map((point) => String(point.color)))];
-    labels.sort();
+  let categoryIndex = $derived.by(() => {
+    const labels = colorLabels
+      ?? [...new Set(points.filter((point) => point.color != null).map((point) => String(point.color)))].sort();
     return new Map(labels.map((label, index) => [label, index]));
   });
+  let shapeIndex = $derived(new Map((shapeLabels ?? []).map((label, index) => [label, index])));
+
+  function hexToRgb(hex: string): [number, number, number] {
+    const value = hex.trim().replace('#', '');
+    const full = value.length === 3 ? value.split('').map((char) => char + char).join('') : value;
+    const number = Number.parseInt(full, 16);
+    return Number.isFinite(number) ? [(number >> 16) & 255, (number >> 8) & 255, number & 255] : [0, 0, 0];
+  }
+
+  function mix(from: string, to: string, t: number): string {
+    const a = hexToRgb(from);
+    const b = hexToRgb(to);
+    const clamped = Math.max(0, Math.min(1, t));
+    const channel = (index: number) => Math.round(a[index] + (b[index] - a[index]) * clamped);
+    return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+  }
+
+  const SHAPES = ['circle', 'square', 'triangle', 'diamond', 'cross', 'triangle-down'] as const;
+
+  function drawShape(ctx: CanvasRenderingContext2D, shape: string, x: number, y: number, r: number) {
+    ctx.beginPath();
+    if (shape === 'square') ctx.rect(x - r, y - r, r * 2, r * 2);
+    else if (shape === 'triangle') { ctx.moveTo(x, y - r); ctx.lineTo(x + r, y + r); ctx.lineTo(x - r, y + r); ctx.closePath(); }
+    else if (shape === 'triangle-down') { ctx.moveTo(x, y + r); ctx.lineTo(x + r, y - r); ctx.lineTo(x - r, y - r); ctx.closePath(); }
+    else if (shape === 'diamond') { ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath(); }
+    else if (shape === 'cross') { ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r); ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); }
+    else ctx.arc(x, y, r, 0, Math.PI * 2);
+  }
   let box = $derived(brush ? {
     x: Math.min(brush.x0, brush.x1),
     y: Math.min(brush.y0, brush.y1),
@@ -81,26 +118,50 @@
     const strong = styles.getPropertyValue('--chart-mark-strong').trim() || '#1155F5';
     const mode = document.documentElement.dataset.chartMode;
     const categoryPalette = mode === 'multicolor' || mode === 'monotone';
-    const pointFills = categoryPalette ? Array.from({ length: 6 }, (_, index) => styles.getPropertyValue(`--chart-series-${index + 1}-fill`).trim() || mark) : [];
+    const pointFills = Array.from({ length: 6 }, (_, index) => styles.getPropertyValue(`--chart-group-${index + 1}`).trim() || mark);
+    const flatPalette = !categoryPalette && !colorLabels;
+    const sizeLow = sizeDomain ? Number(sizeDomain[0]) : 0;
+    const sizeHigh = sizeDomain ? Number(sizeDomain[1]) : 1;
+    const sizeSpan = sizeHigh - sizeLow || 1;
+    const colorLow = colorDomain ? Number(colorDomain[0]) : 0;
+    const colorHigh = colorDomain ? Number(colorDomain[1]) : 1;
+    const colorSpan = colorHigh - colorLow || 1;
+    const R_MIN = 1.6;
+    const R_MAX = 7;
+    void shapeIndex;
     ctx.lineWidth = 0.8;
     for (const point of points) {
       const x = ((toPlotNumber(point.x) - domain.xMin) / xSpan) * plot.width;
       const y = (1 - (toPlotNumber(point.y) - domain.yMin) / ySpan) * plot.height;
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const colorIndex = point.color == null ? -1 : colorLabels.get(String(point.color)) ?? -1;
-      ctx.fillStyle = categoryPalette && colorIndex >= 0 ? pointFills[colorIndex % pointFills.length] || mark : mark;
+      // sqrt so the drawn AREA tracks the value; scaling the radius would square it.
+      const radius = sizeDomain && point.size != null
+        ? R_MIN + (R_MAX - R_MIN) * Math.sqrt(Math.max(0, Math.min(1, (Number(point.size) - sizeLow) / sizeSpan)))
+        : 2.6;
+      if (colorKind === 'numeric' && point.color != null) {
+        ctx.fillStyle = mix(mark, strong, (Number(point.color) - colorLow) / colorSpan);
+      } else {
+        const colorIndex = point.color == null ? -1 : categoryIndex.get(String(point.color)) ?? -1;
+        ctx.fillStyle = colorIndex >= 0 && !flatPalette ? pointFills[colorIndex % pointFills.length] || mark : mark;
+      }
       ctx.strokeStyle = strong;
-      ctx.beginPath();
-      ctx.arc(x, y, 2.6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+      const shapeKey = point.shape == null ? 'circle' : SHAPES[shapeIndex.get(String(point.shape)) ?? 0];
+      drawShape(ctx, shapeKey, x, y, radius);
+      if (shapeKey === 'cross') ctx.stroke();
+      else { ctx.fill(); ctx.stroke(); }
     }
   });
 
   function describe(point: ScatterPoint): ChartHover {
     return {
       title: `${xTitle} × ${yTitle}`,
-      lines: [point.color == null ? '' : `Color ${String(point.color)}`, `${xTitle} ${compact(point.x)}`, `${yTitle} ${compact(point.y)}`].filter(Boolean),
+      lines: [
+        point.color == null ? '' : `Color ${String(point.color)}`,
+        point.size == null ? '' : `Size ${compact(point.size)}`,
+        point.shape == null ? '' : `Shape ${String(point.shape)}`,
+        `${xTitle} ${compact(point.x)}`,
+        `${yTitle} ${compact(point.y)}`
+      ].filter(Boolean),
       hint: 'Drag to select a region'
     };
   }

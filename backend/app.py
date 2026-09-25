@@ -41,7 +41,7 @@ ARROW_NATIVE = {
 INTEGER = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT")
 TEXT = ("VARCHAR", "CHAR", "TEXT")
 DATE = ("DATE", "TIME", "TIMESTAMP")
-OPERATORS = {"=", "!=", "in", "is_null", "not_null", "contains", "starts_with", "ends_with", ">", ">=", "<", "<="}
+OPERATORS = {"=", "!=", "in", "is_null", "not_null", "contains", "starts_with", "ends_with", ">", ">=", "<", "<=", "between"}
 ILLEGAL_XML = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 INVALID_SHEET_NAME = re.compile(r"[\\/*?:\[\]]")
 CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -50,6 +50,13 @@ BAR_LIMIT = 30
 BOX_GROUP_LIMIT = 12
 OUTLIER_LIMIT = 200
 SCATTER_LIMIT = 5000
+SERIES_LIMIT = 6
+PIE_LIMIT = 8
+LINE_POINT_LIMIT = 400
+GRAIN_SECONDS = {
+    "hour": 3600, "day": 86400, "week": 604800,
+    "month": 2629746, "quarter": 7889238, "year": 31556952,
+}
 METRIC_SQL = {
     "count": "count({column})",
     "distinct": "count(DISTINCT {column})",
@@ -123,10 +130,18 @@ class ChartEncodings(BaseModel):
 
 class ChartSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    chart: Literal["bar", "histogram", "box", "scatter", "line"]
+    chart: Literal["bar", "histogram", "box", "scatter", "line", "pie", "metric"]
     encodings: ChartEncodings = ChartEncodings()
     metric: Literal["count", "distinct", "min", "max", "sum", "avg", "median", "stddev"] | None = None
     density: bool = False
+    layout: Literal["grouped", "stacked", "stacked100"] | None = None
+    grain: Literal["hour", "day", "week", "month", "quarter", "year"] | None = None
+    # A metric card can carry its own aggregate expression, plus how the card presents the number.
+    expression: str | None = Field(None, max_length=2000)
+    label: str | None = Field(None, max_length=200)
+    align: Literal["start", "center", "end"] | None = None
+    font: Literal["sans", "mono"] | None = None
+    size: Literal["fit", "sm", "md", "lg"] | None = None
 
 
 class VisualizeRequest(Query):
@@ -684,6 +699,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise HTTPException(422, "Filter value is required")
             if condition.operator == "in" and (not isinstance(condition.value, list) or not condition.value):
                 raise HTTPException(422, "IN filter requires a non-empty list")
+            if condition.operator == "between" and (not isinstance(condition.value, list) or len(condition.value) != 2 or any(not isinstance(bound, (str, int, float)) for bound in condition.value)):
+                raise HTTPException(422, "BETWEEN filter requires two bounds")
             if condition.operator in {"contains", "starts_with", "ends_with"} and not column_types[condition.column].upper().startswith(TEXT):
                 raise HTTPException(422, "Text operator requires a text column")
             column = quote(condition.column)
@@ -693,6 +710,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             elif condition.operator == "in":
                 clauses.append(f"{column} IN ({', '.join('?' for _ in condition.value)})")
                 display_clauses.append(f"{column} IN ({', '.join(literal(value) for value in condition.value)})")
+                values.extend(condition.value)
+            elif condition.operator == "between":
+                clauses.append(f"{column} BETWEEN ? AND ?")
+                display_clauses.append(f"{column} BETWEEN {literal(condition.value[0])} AND {literal(condition.value[1])}")
                 values.extend(condition.value)
             elif condition.operator in {"contains", "starts_with", "ends_with"}:
                 clauses.append(f"{condition.operator}({column}, ?)")
@@ -1437,19 +1458,54 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         started = time.perf_counter()
         columns = dict(metadata_columns)
-        if spec.chart == "bar":
+        if spec.chart == "metric":
+            column = spec.encodings.value
+            metric = spec.metric or "count"
+            expression = (spec.expression or "").strip()
+            if expression:
+                # The expression is the user's own SQL, so it is held to the read-only single-SELECT
+                # rule the SQL editor uses, and it may not smuggle in placeholders for the bound filters.
+                if "?" in expression:
+                    raise HTTPException(422, "A metric formula cannot contain ? placeholders")
+                value_sql = expression
+                read_only_sql(con, f"SELECT {value_sql} AS value FROM {source}")
+            elif column is None:
+                value_sql = "count(*)"
+            else:
+                if column not in columns:
+                    raise HTTPException(422, "Metric column was not found")
+                if metric in {"sum", "avg", "median", "stddev"} and profile_kind(columns[column]) != "numeric":
+                    raise HTTPException(422, "This metric requires a numeric column")
+                value_sql = METRIC_SQL[metric].format(column=quote(column))
+            try:
+                value, rows = con.execute(
+                    f"SELECT {value_sql}, count(*) FROM {source}", values
+                ).fetchone()
+            except duckdb.Error as exc:
+                if not expression:
+                    raise
+                raise HTTPException(422, f"This metric formula did not run: {exc}") from exc
+            return {
+                "chart": "metric",
+                "value": safe(value),
+                "rows": safe(rows),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        if spec.chart in {"bar", "pie"}:
+            label = spec.chart.capitalize()
+            limit = PIE_LIMIT if spec.chart == "pie" else BAR_LIMIT
             column = spec.encodings.category
             if not column or column not in columns:
-                raise HTTPException(422, "Bar requires a category encoding")
+                raise HTTPException(422, f"{label} requires a category encoding")
             field = quote(column)
             measure = spec.encodings.value
             metric = spec.metric or ("avg" if measure else "count")
             extra_filter = ""
             if measure:
                 if measure not in columns:
-                    raise HTTPException(422, "Bar measure column was not found")
+                    raise HTTPException(422, f"{label} measure column was not found")
                 if metric != "count" and profile_kind(columns[measure]) != "numeric":
-                    raise HTTPException(422, "Bar measure requires a numeric column")
+                    raise HTTPException(422, f"{label} measure requires a numeric column")
                 template = METRIC_SQL.get(metric, METRIC_SQL["avg"])
                 value_sql = template.format(column=quote(measure))
                 extra_filter = f" AND {quote(measure)} IS NOT NULL"
@@ -1461,16 +1517,69 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 SELECT {field} AS label, {value_sql} AS value, count(*) AS n
                 FROM {source} WHERE {field} IS NOT NULL{extra_filter}
                 GROUP BY 1 ORDER BY value DESC NULLS LAST, label
-                LIMIT {BAR_LIMIT}
+                LIMIT {limit}
             """, values).fetchall()
             shown = sum(n for _, _, n in rows)
             non_null = con.execute(
                 f"SELECT count(*) FROM {source} WHERE {field} IS NOT NULL{extra_filter}",
                 values,
             ).fetchone()[0]
+            # A pie shows shares of one whole, so a group encoding has nowhere to go.
+            group_name = None if spec.chart == "pie" else spec.encodings.group
+            series_labels: list[str] | None = None
+            series_values: dict[Any, list[Any]] = {}
+            if group_name:
+                if group_name not in columns:
+                    raise HTTPException(422, f"{label} group column was not found")
+                group_field = quote(group_name)
+                labels = [label for label, _value, _n in rows]
+                # Rank series by row count, not by the metric: an average would order series by
+                # magnitude and float a one-row series above a thousand-row one.
+                ranked = con.execute(f"""
+                    SELECT {group_field} AS series, count(*) AS n
+                    FROM {source} WHERE {field} IS NOT NULL AND {group_field} IS NOT NULL{extra_filter}
+                    GROUP BY 1 ORDER BY n DESC, series
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                top = [row[0] for row in ranked]
+                if labels and top:
+                    label_marks = ", ".join("?" for _ in labels)
+                    series_marks = ", ".join("?" for _ in top)
+                    cells = con.execute(f"""
+                        SELECT {field} AS label, {group_field} AS series, {value_sql} AS value
+                        FROM {source}
+                        WHERE {field} IN ({label_marks}) AND {group_field} IN ({series_marks}){extra_filter}
+                        GROUP BY 1, 2
+                    """, [*values, *labels, *top]).fetchall()
+                    other = con.execute(f"""
+                        SELECT {field} AS label, {value_sql} AS value
+                        FROM {source}
+                        WHERE {field} IN ({label_marks}) AND {group_field} IS NOT NULL
+                          AND {group_field} NOT IN ({series_marks}){extra_filter}
+                        GROUP BY 1
+                    """, [*values, *labels, *top]).fetchall()
+                    series_labels = [str(item) for item in top]
+                    grid = {(label, str(series)): value for label, series, value in cells}
+                    other_by_label = {label: value for label, value in other}
+                    if other:
+                        series_labels.append("Other")
+                    for label in labels:
+                        cells_for_label = [safe(grid.get((label, str(series)), 0)) for series in top]
+                        if other:
+                            cells_for_label.append(safe(other_by_label.get(label, 0)))
+                        series_values[label] = cells_for_label
+            if spec.chart == "pie" and any(
+                value is not None and float(value) < 0 for _label, value, _n in rows
+            ):
+                raise HTTPException(422, "A pie chart cannot show negative values; use a bar chart instead")
             return {
-                "chart": "bar",
-                "rows": [{"label": safe(label), "value": safe(value), "n": safe(n)} for label, value, n in rows],
+                "chart": spec.chart,
+                "rows": [
+                    {"label": safe(label), "value": safe(value), "n": safe(n)}
+                    | ({"values": series_values[label]} if label in series_values else {})
+                    for label, value, n in rows
+                ],
+                "series": series_labels,
                 "other_count": safe(non_null - shown),
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
@@ -1481,11 +1590,71 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if profile_kind(columns[column]) not in {"numeric", "date"}:
                 raise HTTPException(422, "Histogram requires a numeric or date column")
             profile = profile_response(con, source, values, metadata_columns, column)
-            return {
+            bins = profile["histogram"]
+            response: dict[str, Any] = {
                 "chart": "histogram",
-                "bins": profile["histogram"],
+                "bins": bins,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
+            group_name = spec.encodings.group
+            if group_name and group_name not in columns:
+                raise HTTPException(422, "Histogram group column was not found")
+            # ponytail: grouped counts reuse the equal-width bucket formula, so they need
+            # equal-width bins. Date and huge-integer columns fall back to ntile bins, which are
+            # not, and those keep the single distribution. Widen by binning from the edge list
+            # if someone asks for grouped date histograms.
+            uniform = (
+                bool(group_name)
+                and profile_kind(columns[column]) == "numeric"
+                and len(bins) >= 2
+                and bins[0]["upper"] > bins[0]["lower"]
+                and max(
+                    abs((item["upper"] - item["lower"]) - (bins[0]["upper"] - bins[0]["lower"]))
+                    for item in bins
+                ) <= (bins[0]["upper"] - bins[0]["lower"]) * 1e-6
+            )
+            if uniform:
+                field = quote(column)
+                group_field = quote(group_name)
+                lower = bins[0]["lower"]
+                width = bins[0]["upper"] - bins[0]["lower"]
+                finite = f"{field} IS NOT NULL AND isfinite({field}::DOUBLE) AND {group_field} IS NOT NULL"
+                ranked = con.execute(f"""
+                    SELECT {group_field} AS series, count(*) AS n
+                    FROM {source} WHERE {finite}
+                    GROUP BY 1 ORDER BY n DESC, series
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                top = [row[0] for row in ranked]
+                if top:
+                    # The three bucket parameters sit in the SELECT, ahead of {source} in the
+                    # FROM, and DuckDB binds in statement order. The Other fold happens in
+                    # Python to keep every other placeholder out of the SELECT.
+                    counted = con.execute(f"""
+                        SELECT {group_field} AS series,
+                               least(?, floor(({field} - ?) / ?)::INTEGER) AS idx,
+                               count(*) AS n
+                        FROM {source} WHERE {finite}
+                        GROUP BY 1, 2
+                    """, [len(bins) - 1, lower, width, *values]).fetchall()
+                    kept = {str(item) for item in top}
+                    buckets: dict[str, dict[int, int]] = {}
+                    for series_label, index, n in counted:
+                        key = str(series_label) if str(series_label) in kept else "Other"
+                        slot = buckets.setdefault(key, {})
+                        slot[int(index)] = slot.get(int(index), 0) + n
+                    labels = [str(item) for item in top]
+                    if "Other" in buckets:
+                        labels.append("Other")
+                    response["series"] = [{
+                        "label": label,
+                        "bins": [{
+                            "lower": item["lower"],
+                            "upper": item["upper"],
+                            "count": safe(buckets.get(label, {}).get(index, 0)),
+                        } for index, item in enumerate(bins)],
+                    } for label in labels]
+            return response
         if spec.chart == "box":
             column = spec.encodings.value
             if not column or column not in columns:
@@ -1576,10 +1745,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if not x_name or not y_name or x_name not in columns or y_name not in columns:
                 raise HTTPException(422, "Scatter requires x and y encodings")
             color_name = spec.encodings.color
-            if color_name and color_name not in columns:
-                raise HTTPException(422, "Scatter color column was not found")
+            size_name = spec.encodings.size
+            shape_name = spec.encodings.pattern
+            for role, name in (("color", color_name), ("size", size_name), ("shape", shape_name)):
+                if name and name not in columns:
+                    raise HTTPException(422, f"Scatter {role} column was not found")
+            if size_name and profile_kind(columns[size_name]) != "numeric":
+                raise HTTPException(422, "Scatter size requires a numeric column")
             x_field, y_field = quote(x_name), quote(y_name)
-            color_field = quote(color_name) if color_name else None
             x_ok = f"{x_field} IS NOT NULL"
             y_ok = f"{y_field} IS NOT NULL"
             if profile_kind(columns[x_name]) == "numeric":
@@ -1588,22 +1761,156 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 y_ok += f" AND isfinite({y_field}::DOUBLE)"
             where = f"WHERE {x_ok} AND {y_ok}"
             total_points = con.execute(f"SELECT count(*) FROM {source} {where}", values).fetchone()[0]
-            color_select = f", {color_field} AS color" if color_field else ""
+
+            # Scales come from the whole filtered relation, never from the random sample below:
+            # a sample-derived domain would shift on every refetch and recolour the same point.
+            def scale_domain(name: str) -> list[Any]:
+                field_sql = quote(name)
+                low, high = con.execute(
+                    f"SELECT min({field_sql}), max({field_sql}) FROM {source} {where}"
+                    f" AND {field_sql} IS NOT NULL AND isfinite({field_sql}::DOUBLE)",
+                    values,
+                ).fetchone()
+                return [safe(low), safe(high)]
+
+            def top_labels(name: str) -> list[str]:
+                field_sql = quote(name)
+                ranked = con.execute(f"""
+                    SELECT {field_sql} AS label, count(*) AS n
+                    FROM {source} {where} AND {field_sql} IS NOT NULL
+                    GROUP BY 1 ORDER BY n DESC, label
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                return [str(row[0]) for row in ranked]
+
+            color_numeric = bool(color_name) and profile_kind(columns[color_name]) == "numeric"
+            extras = [(name, alias) for name, alias in (
+                (color_name, "color"), (size_name, "size"), (shape_name, "shape")
+            ) if name]
+            select_extra = "".join(f", {quote(name)} AS {alias}" for name, alias in extras)
             points = con.execute(f"""
-                SELECT {x_field} AS x, {y_field} AS y{color_select}
+                SELECT {x_field} AS x, {y_field} AS y{select_extra}
                 FROM {source} {where}
                 ORDER BY random()
                 LIMIT {SCATTER_LIMIT}
             """, values).fetchall()
-            point_rows = (
-                [{"x": safe(x), "y": safe(y), "color": safe(color)} for x, y, color in points]
-                if color_field else
-                [{"x": safe(x), "y": safe(y)} for x, y in points]
-            )
-            return {
+            color_labels = None if not color_name or color_numeric else top_labels(color_name)
+            shape_labels = top_labels(shape_name) if shape_name else None
+
+            def fold(value: Any, labels: list[str] | None) -> Any:
+                if labels is None or value is None:
+                    return safe(value)
+                return str(value) if str(value) in labels else "Other"
+
+            point_rows = []
+            for row in points:
+                record: dict[str, Any] = {"x": safe(row[0]), "y": safe(row[1])}
+                for offset, (_name, alias) in enumerate(extras, start=2):
+                    raw = row[offset]
+                    if alias == "color":
+                        record["color"] = safe(raw) if color_numeric else fold(raw, color_labels)
+                    elif alias == "shape":
+                        record["shape"] = fold(raw, shape_labels)
+                    else:
+                        record["size"] = safe(raw)
+                point_rows.append(record)
+            for labels in (color_labels, shape_labels):
+                if labels is not None and len(labels) == SERIES_LIMIT:
+                    labels.append("Other")
+            response: dict[str, Any] = {
                 "chart": "scatter",
                 "points": point_rows,
                 "total_points": safe(total_points),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+            if color_name:
+                response["color_kind"] = "numeric" if color_numeric else "categorical"
+                if color_numeric:
+                    response["color_domain"] = scale_domain(color_name)
+                else:
+                    response["color_labels"] = color_labels
+            if size_name:
+                response["size_domain"] = scale_domain(size_name)
+            if shape_name:
+                response["shape_labels"] = shape_labels
+            return response
+        if spec.chart == "line":
+            x_name = spec.encodings.x
+            if not x_name or x_name not in columns:
+                raise HTTPException(422, "Line requires an x encoding")
+            if profile_kind(columns[x_name]) != "date":
+                raise HTTPException(422, f"Line requires a date or timestamp x column; {x_name} is not one")
+            x_field = quote(x_name)
+            measure = spec.encodings.y
+            metric = spec.metric or ("avg" if measure else "count")
+            extra_filter = ""
+            if measure:
+                if measure not in columns:
+                    raise HTTPException(422, "Line measure column was not found")
+                if metric not in {"count", "distinct"} and profile_kind(columns[measure]) != "numeric":
+                    raise HTTPException(422, "Line measure requires a numeric column")
+                value_sql = METRIC_SQL.get(metric, METRIC_SQL["avg"]).format(column=quote(measure))
+                extra_filter = f" AND {quote(measure)} IS NOT NULL"
+                if metric not in {"count", "distinct"}:
+                    extra_filter += f" AND isfinite({quote(measure)}::DOUBLE)"
+            else:
+                value_sql = "count(*)"
+            where = f"WHERE {x_field} IS NOT NULL{extra_filter}"
+            grain = spec.grain
+            if grain is None:
+                low, high = con.execute(f"SELECT min({x_field}), max({x_field}) FROM {source} {where}", values).fetchone()
+                span = (high - low).total_seconds() if low is not None and high is not None else 0
+                grain = "year"
+                for candidate in ("hour", "day", "week", "month", "quarter", "year"):
+                    if span / GRAIN_SECONDS[candidate] <= LINE_POINT_LIMIT:
+                        grain = candidate
+                        break
+            # A Literal on the spec model has already restricted grain to these six names,
+            # so it is safe to interpolate rather than bind.
+            bucket = f"date_trunc('{grain}', {x_field})"
+
+            def series_points(clause: str, bound: list[Any]) -> list[dict[str, Any]]:
+                rows = con.execute(f"""
+                    SELECT bucket, value FROM (
+                        SELECT {bucket} AS bucket, {value_sql} AS value
+                        FROM {source} {where}{clause}
+                        GROUP BY 1 ORDER BY 1 DESC
+                        LIMIT {LINE_POINT_LIMIT}
+                    ) ORDER BY bucket
+                """, bound).fetchall()
+                return [{"x": safe(at), "y": safe(value)} for at, value in rows]
+
+            group_name = spec.encodings.group
+            if group_name and group_name not in columns:
+                raise HTTPException(422, "Line group column was not found")
+            if group_name:
+                group_field = quote(group_name)
+                ranked = con.execute(f"""
+                    SELECT {group_field} AS series, count(*) AS n
+                    FROM {source} {where} AND {group_field} IS NOT NULL
+                    GROUP BY 1 ORDER BY n DESC, series
+                    LIMIT {SERIES_LIMIT}
+                """, values).fetchall()
+                top = [row[0] for row in ranked]
+                series = []
+                for label in top:
+                    points = series_points(f" AND {group_field} = ?", [*values, label])
+                    if points:
+                        series.append({"label": str(label), "points": points})
+                if top:
+                    marks = ", ".join("?" for _ in top)
+                    other = series_points(
+                        f" AND {group_field} IS NOT NULL AND {group_field} NOT IN ({marks})",
+                        [*values, *top],
+                    )
+                    if other:
+                        series.append({"label": "Other", "points": other})
+            else:
+                series = [{"label": "", "points": series_points("", values)}]
+            return {
+                "chart": "line",
+                "grain": grain,
+                "series": series,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
         raise HTTPException(422, f"Chart type {spec.chart} is not available yet")

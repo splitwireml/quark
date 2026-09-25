@@ -1,12 +1,19 @@
 import type { IconName } from './icons';
 import type {
   AggregateMetric,
+  BarLayout,
+  ChartEncodings,
   ChartMark,
   ChartSpec,
   ChartSuggestion,
   ChartType,
   ColumnInfo,
+  EncodingRole,
   FilterCondition,
+  MetricAlign,
+  MetricFont,
+  MetricSize,
+  TimeGrain,
   VizKind
 } from './types';
 
@@ -37,12 +44,24 @@ function barCount(column: Classified): ChartSuggestion {
   return { chart: 'bar', encodings: { category: column.name }, metric: 'count' };
 }
 
+function pieCount(column: Classified): ChartSuggestion {
+  return { chart: 'pie', encodings: { category: column.name }, metric: 'count' };
+}
+
 function hist(column: Classified, group?: Classified): ChartSuggestion {
   return { chart: 'histogram', encodings: group ? { group: group.name, value: column.name } : { value: column.name } };
 }
 
 function box(column: Classified, group?: Classified): ChartSuggestion {
   return { chart: 'box', encodings: group ? { group: group.name, value: column.name } : { value: column.name } };
+}
+
+function single(column: Classified): ChartSuggestion {
+  return {
+    chart: 'metric',
+    encodings: { value: column.name },
+    metric: column.kind === 'continuous' || column.kind === 'discrete' ? 'sum' : 'count'
+  };
 }
 
 function barMeasure(category: Classified, value: Classified, group?: Classified): ChartSuggestion {
@@ -68,10 +87,10 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
 
   if (items.length === 1) {
     const [item] = items;
-    if (item.kind === 'categorical') return [barCount(item)];
-    if (item.kind === 'discrete') return [barCount(item), hist(item), box(item)];
-    if (item.kind === 'continuous') return [hist(item), box(item)];
-    return [hist(item), barCount(item)];
+    if (item.kind === 'categorical') return [barCount(item), pieCount(item), single(item)];
+    if (item.kind === 'discrete') return [barCount(item), hist(item), box(item), single(item)];
+    if (item.kind === 'continuous') return [hist(item), box(item), single(item)];
+    return [hist(item), barCount(item), single(item)];
   }
 
   if (dates.length === 1 && nums.length === 1 && items.length === 2) {
@@ -81,11 +100,16 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
 
   if (nums.length === 2 && items.length === 2) {
     const encodings = { x: nums[0].name, y: nums[1].name };
-    return [{ chart: 'scatter', encodings }, { chart: 'line', encodings }];
+    return [{ chart: 'scatter', encodings }];
   }
 
   if (cats.length === 1 && nums.length === 1 && items.length === 2) {
-    return [barMeasure(cats[0], nums[0]), box(nums[0], cats[0]), hist(nums[0], cats[0])];
+    return [
+      barMeasure(cats[0], nums[0]),
+      { chart: 'pie', encodings: { category: cats[0].name, value: nums[0].name }, metric: 'sum' },
+      box(nums[0], cats[0]),
+      hist(nums[0], cats[0])
+    ];
   }
 
   if (nums.length === 3 && items.length === 3) {
@@ -98,6 +122,29 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
 
   if (cats.length === 2 && nums.length === 1 && items.length === 3) {
     return [barMeasure(cats[0], nums[0], cats[1])];
+  }
+
+  /* Any remaining selection built on a date is a line over that date: the first number is the
+     measure (or a row count when there is none) and the first category splits it into series,
+     so the group encoding stays reachable for line charts. */
+  if (dates.length) {
+    const encodings: ChartEncodings = { x: dates[0].name };
+    if (nums.length) encodings.y = nums[0].name;
+    if (cats.length) encodings.group = cats[0].name;
+    if (nums.length || cats.length) return [{ chart: 'line', encodings }];
+  }
+
+  /* Anything else with two numbers is a scatter: the first two numbers are the axes and every
+     remaining column lands on a channel, so the size, color, and shape encodings stay reachable
+     instead of the whole selection falling through to no suggestion at all. */
+  if (nums.length >= 2) {
+    const [xColumn, yColumn, ...spareNums] = nums;
+    const encodings: ChartEncodings = { x: xColumn.name, y: yColumn.name };
+    if (spareNums.length) encodings.size = spareNums[0].name;
+    if (cats.length) encodings.color = cats[0].name;
+    else if (spareNums.length > 1) encodings.color = spareNums[1].name;
+    if (cats.length > 1) encodings.pattern = cats[1].name;
+    return [{ chart: 'scatter', encodings }];
   }
 
   return [];
@@ -118,7 +165,11 @@ export function filtersFromMark(spec: ChartSpec, mark: ChartMark, existingCount 
   if (mark.kind === 'category') {
     const column = spec.encodings.category ?? spec.encodings.group;
     if (!column) return [];
-    return [{ column, operator: '=', value: mark.value, ...and(0) }];
+    const filters: FilterCondition[] = [{ column, operator: '=', value: mark.value, ...and(0) }];
+    if (mark.series !== undefined && spec.encodings.group && spec.encodings.group !== column) {
+      filters.push({ column: spec.encodings.group, operator: '=', value: mark.series, ...and(1) });
+    }
+    return filters;
   }
   if (mark.kind === 'region') {
     const filters: FilterCondition[] = [];
@@ -215,6 +266,7 @@ export function formatTick(value: number): string {
 }
 
 export const visualizeMetrics: { value: AggregateMetric; label: string; tip: string }[] = [
+  { value: 'sum', label: 'Sum', tip: 'Total of the number in each category' },
   { value: 'avg', label: 'Avg', tip: 'Average of the number in each category' },
   { value: 'median', label: 'Median', tip: 'Median of the number in each category' },
   { value: 'stddev', label: 'Std', tip: 'Standard deviation in each category' },
@@ -222,6 +274,67 @@ export const visualizeMetrics: { value: AggregateMetric; label: string; tip: str
   { value: 'max', label: 'Max', tip: 'Maximum in each category' },
   { value: 'count', label: 'Count', tip: 'Row count in each category' }
 ];
+
+/* A metric card derives one number, so it offers only the operations that collapse a whole
+   column to a single value the column's type can actually produce. */
+const METRIC_CARD_OPS: Record<VizKind, AggregateMetric[]> = {
+  continuous: ['sum', 'avg', 'median', 'stddev', 'min', 'max', 'count', 'distinct'],
+  discrete: ['sum', 'avg', 'median', 'stddev', 'min', 'max', 'count', 'distinct'],
+  date: ['min', 'max', 'count', 'distinct'],
+  categorical: ['count', 'distinct']
+};
+
+export function metricCardMetrics(column: ColumnInfo | undefined): { value: AggregateMetric; label: string; tip: string }[] {
+  const kind = column ? classifyColumn(column) : null;
+  const allowed = kind ? METRIC_CARD_OPS[kind] : ['count' as AggregateMetric];
+  const labels: Record<AggregateMetric, string> = {
+    count: 'Values counted', distinct: 'Distinct values', min: 'Smallest value', max: 'Largest value',
+    sum: 'Total', avg: 'Average', median: 'Median', stddev: 'Standard deviation'
+  };
+  return allowed.map((value) => ({
+    value,
+    label: visualizeMetrics.find((metric) => metric.value === value)?.label ?? 'Distinct',
+    tip: labels[value]
+  }));
+}
+
+/* A column kept from an earlier chart can carry an operation its type cannot answer, so a metric
+   card falls back to an operation the column supports instead of asking for a 422. */
+export function metricCardOp(
+  columns: ColumnInfo[],
+  encodings: ChartEncodings,
+  chosen: AggregateMetric | null | undefined,
+  fallback: AggregateMetric = 'count'
+): AggregateMetric {
+  const allowed = metricCardMetrics(columns.find((column) => column.name === encodings.value)).map((item) => item.value);
+  if (chosen && allowed.includes(chosen)) return chosen;
+  return allowed.includes(fallback) ? fallback : allowed[0];
+}
+
+export const metricAligns: { value: MetricAlign; label: string; tip: string }[] = [
+  { value: 'start', label: 'Left', tip: 'Number and caption against the left edge' },
+  { value: 'center', label: 'Center', tip: 'Number and caption centred in the tile' },
+  { value: 'end', label: 'Right', tip: 'Number and caption against the right edge' }
+];
+
+export const metricFonts: { value: MetricFont; label: string; tip: string }[] = [
+  { value: 'sans', label: 'Sans', tip: 'The interface typeface' },
+  { value: 'mono', label: 'Mono', tip: 'Fixed-width digits that hold their place while values change' }
+];
+
+export const metricSizes: { value: MetricSize; label: string; tip: string }[] = [
+  { value: 'fit', label: 'Fit', tip: 'Scale the number to the tile' },
+  { value: 'sm', label: 'S', tip: 'Small fixed number' },
+  { value: 'md', label: 'M', tip: 'Medium fixed number' },
+  { value: 'lg', label: 'L', tip: 'Large fixed number' }
+];
+
+/* A metric card's caption is its label, its own formula, or the operation it ran on a column. */
+export function metricCardTitle(spec: ChartSpec): string {
+  const expression = spec.expression?.trim();
+  if (expression) return spec.label?.trim() || expression;
+  return metricTitle(spec.metric ?? 'count', spec.encodings.value ?? '');
+}
 
 export function metricTitle(metric: AggregateMetric | undefined, column: string): string {
   const labels: Record<AggregateMetric, string> = {
@@ -243,7 +356,9 @@ export const chartMeta: Record<ChartType, { label: string; tip: string; icon: Ic
   histogram: { label: 'Histogram', tip: 'Distribution of a number', icon: 'histogram' },
   box: { label: 'Box', tip: 'Median, quartiles, and outliers', icon: 'box' },
   scatter: { label: 'Scatter', tip: 'Two numbers against each other', icon: 'scatter' },
-  line: { label: 'Line', tip: 'A number over an ordered axis', icon: 'line' }
+  line: { label: 'Line', tip: 'A number over an ordered axis', icon: 'line' },
+  pie: { label: 'Pie', tip: 'Shares of a whole', icon: 'pie' },
+  metric: { label: 'Metric', tip: 'One number for the whole slice', icon: 'sigma' }
 };
 
 export function groupColumns(columns: ColumnInfo[]): { kind: VizKind; label: string; columns: ColumnInfo[] }[] {
@@ -259,4 +374,66 @@ export function groupColumns(columns: ColumnInfo[]): { kind: VizKind; label: str
     { kind: 'date', label: 'Dates', columns: buckets.date }
   ];
   return groups.filter((group) => group.columns.length > 0);
+}
+
+const CHART_ROLES: Record<ChartType, EncodingRole[]> = {
+  bar: ['category', 'value', 'group'],
+  pie: ['category', 'value'],
+  histogram: ['value', 'group'],
+  box: ['value', 'group'],
+  scatter: ['x', 'y', 'size', 'color', 'pattern'],
+  line: ['x', 'y', 'group'],
+  metric: ['value']
+};
+
+export function chartRoles(chart: ChartType): EncodingRole[] {
+  return CHART_ROLES[chart];
+}
+
+export function applyRoles(
+  encodings: ChartEncodings,
+  chart: ChartType,
+  overrides: Record<string, EncodingRole>,
+  selected: ColumnInfo[]
+): ChartEncodings {
+  const legal = new Set(chartRoles(chart));
+  const present = new Set(selected.map((column) => column.name));
+  const result: ChartEncodings = { ...encodings };
+  for (const [name, role] of Object.entries(overrides)) {
+    if (!present.has(name) || !legal.has(role)) continue;
+    for (const key of Object.keys(result) as EncodingRole[]) {
+      if (result[key] === name) delete result[key];
+    }
+    result[role] = name;
+  }
+  return result;
+}
+
+export const barLayouts: { value: BarLayout; label: string; tip: string }[] = [
+  { value: 'grouped', label: 'Grouped', tip: 'One bar per series, side by side' },
+  { value: 'stacked', label: 'Stacked', tip: 'Series stacked into one bar per category' },
+  { value: 'stacked100', label: '100%', tip: 'Each bar fills the height, showing shares' }
+];
+
+export const timeGrains: { value: TimeGrain; label: string; tip: string }[] = [
+  { value: 'hour', label: 'Hour', tip: 'One point per hour' },
+  { value: 'day', label: 'Day', tip: 'One point per day' },
+  { value: 'week', label: 'Week', tip: 'One point per week' },
+  { value: 'month', label: 'Month', tip: 'One point per month' },
+  { value: 'quarter', label: 'Quarter', tip: 'One point per quarter' },
+  { value: 'year', label: 'Year', tip: 'One point per year' }
+];
+
+const GRAIN_SECONDS: Record<TimeGrain, number> = {
+  hour: 3600, day: 86400, week: 604800,
+  month: 2629746, quarter: 7889238, year: 31556952
+};
+
+export const LINE_POINT_LIMIT = 400;
+
+export function autoGrain(spanSeconds: number): TimeGrain {
+  for (const grain of ['hour', 'day', 'week', 'month', 'quarter', 'year'] as TimeGrain[]) {
+    if (spanSeconds / GRAIN_SECONDS[grain] <= LINE_POINT_LIMIT) return grain;
+  }
+  return 'year';
 }
