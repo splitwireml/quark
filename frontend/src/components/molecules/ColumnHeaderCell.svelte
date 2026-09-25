@@ -9,6 +9,7 @@
   type Props = {
     column: ColumnInfo;
     selected: boolean;
+    generated: boolean;
     onselect: () => void;
     fitColumnsToContent: boolean;
     labelParts: LabelPart[];
@@ -43,7 +44,7 @@
   };
 
   let {
-    column, selected, onselect, fitColumnsToContent, labelParts, sort, sortRank, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, pinned, pinnedLeft, pinRefused, dropPlacement,
+    column, selected, generated, onselect, fitColumnsToContent, labelParts, sort, sortRank, filtered, canQuery, protectedColumn, canHide, canReorder, dragging, pinned, pinnedLeft, pinRefused, dropPlacement,
     renaming, renameValue, renameSaving, onsort, onfilter, onprofile, onhide, onpin, onstartrename, onrenamevalue,
     oncommitrename, oncancelrename, oncontextmenu, ondragstart, ondragover, ondragend
   }: Props = $props();
@@ -56,7 +57,7 @@
   let pressed = $state(false);
   let sortIcon = $derived(sort?.direction === 'asc' ? 'sort-asc' as const : sort?.direction === 'desc' ? 'sort-desc' as const : 'sort' as const);
   let title = $derived(
-    `${column.name} — double-click to rename${hideable ? ' · shift-double-click to hide' : ''} · shift-click to ${pinned ? 'unpin' : 'pin left'}`,
+    `${column.name}${generated ? ' — created column; shift-right-click to edit formula' : ''} — double-click to rename${hideable ? ' · shift-double-click to hide' : ''} · shift-click to ${pinned ? 'unpin' : 'pin left'}`,
   );
 
   function focusRename(node: HTMLInputElement) { queueMicrotask(() => { node.focus(); node.select(); }); }
@@ -100,6 +101,7 @@
   onclick={onHeaderClick}
   ondblclick={onHeaderDoubleClick}
   class:selected
+  class:generated
   class:dragging
   class:pinned
   class:refused={pinRefused}
@@ -155,6 +157,8 @@
 
 <style>
   th.selected { background: var(--action-tint); box-shadow: inset 0 -2px var(--action); }
+  th.generated { background: color-mix(in srgb, var(--action) 5%, var(--surface-3)); box-shadow: inset 2px 0 color-mix(in srgb, var(--action) 38%, transparent); }
+  th.selected.generated { background: var(--action-tint); box-shadow: inset 2px 0 color-mix(in srgb, var(--action) 38%, transparent), inset 0 -2px var(--action); }
   th {
     position: sticky;
     top: 0;

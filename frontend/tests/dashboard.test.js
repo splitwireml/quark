@@ -123,3 +123,16 @@ test('a chart title names the group, size, and color columns', () => {
 test('a chart title without the new channels is unchanged', () => {
   assert.equal(chartTitle({ chart: 'bar', encodings: { category: 'region' } }), 'Bar · region');
 });
+
+test('a metric card titles itself from its operation or its formula', () => {
+  assert.equal(chartTitle({ chart: 'metric', encodings: { value: 'price' }, metric: 'avg' }), 'Average of price');
+  assert.equal(chartTitle({ chart: 'metric', encodings: {}, expression: 'sum("price") / count(*)', label: 'Revenue per row' }), 'Revenue per row');
+});
+
+test('every chart type the app can draw survives a reload', () => {
+  const stored = (chart) => JSON.stringify([{ datasetId: 'd', activeTabId: 't', charts: [{ id: 'c', title: 'Card', spec: { chart, encodings: {} } }], tabs: [] }]);
+  for (const chart of ['bar', 'histogram', 'box', 'scatter', 'line', 'pie', 'metric']) {
+    assert.equal(readDashboards(stored(chart)).length, 1, `${chart} tiles are kept`);
+  }
+  assert.deepEqual(readDashboards(stored('treemap')), []);
+});

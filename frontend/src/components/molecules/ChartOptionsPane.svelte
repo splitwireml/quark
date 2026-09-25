@@ -8,8 +8,8 @@
   import ChartTypeToggle from './ChartTypeToggle.svelte';
   import ChipToggleGroup from './ChipToggleGroup.svelte';
   import RoleChip from './RoleChip.svelte';
-  import { barLayouts, groupColumns, timeGrains, visualizeMetrics } from '../../lib/visualize';
-  import type { AggregateMetric, BarLayout, ChartSpec, TimeGrain, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
+  import { barLayouts, groupColumns, metricAligns, metricCardMetrics, metricFonts, metricSizes, timeGrains, visualizeMetrics } from '../../lib/visualize';
+  import type { AggregateMetric, BarLayout, ChartSpec, MetricAlign, MetricFont, MetricSize, TimeGrain, ChartSuggestion, ChartType, ColumnInfo, EncodingRole } from '../../lib/types';
 
   type Props = {
     columnSearch: string;
@@ -24,6 +24,9 @@
     onSelectLayout: (layout: BarLayout) => void;
     onSelectGrain: (grain: TimeGrain) => void;
     activeGrain: TimeGrain | null;
+    onSelectCard: (patch: { align?: MetricAlign; font?: MetricFont; size?: MetricSize }) => void;
+    onOpenFormula: () => void;
+    onClearFormula: () => void;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -35,6 +38,7 @@
   let {
     columnSearch, setColumnSearch, columns, selected,
     onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout, onSelectGrain, activeGrain,
+    onSelectCard, onOpenFormula, onClearFormula,
     roles, roleOf, onSetRole,
     onAddToDashboard, editingTitle, onFinishEditing
   }: Props = $props();
@@ -53,10 +57,17 @@
     const visible = query ? columns.filter((column) => column.name.toLowerCase().includes(query)) : columns;
     return groupColumns(visible);
   });
+  let isMetric = $derived(spec?.chart === 'metric');
+  let formula = $derived(isMetric ? spec?.expression?.trim() ?? '' : '');
   let showAggregate = $derived(
     ((spec?.chart === 'bar' || spec?.chart === 'pie') && !!spec.encodings.value)
     || (spec?.chart === 'line' && !!spec.encodings.y)
+    || (isMetric && !formula)
   );
+  // A metric card collapses one column to one number, so it offers only the operations that can.
+  let aggregateOptions = $derived(spec?.chart === 'metric'
+    ? metricCardMetrics(selected.find((column) => column.name === spec.encodings.value))
+    : visualizeMetrics);
   function bounded(x: number, y: number) {
     const parent = pane.parentElement!;
     return {
@@ -180,10 +191,36 @@
           <Eyebrow>Aggregate</Eyebrow>
           <ChipToggleGroup
             label="Aggregation"
-            options={visualizeMetrics.map((metric) => ({ value: metric.value, label: metric.label, tip: metric.tip }))}
+            options={aggregateOptions.map((metric) => ({ value: metric.value, label: metric.label, tip: metric.tip }))}
             selected={spec?.metric ?? (spec?.chart === 'line' ? 'avg' : null)}
             onSelect={(value) => onSelectMetric(value as AggregateMetric)}
           />
+        </div>
+      {/if}
+      {#if isMetric || !spec}
+        <div class="pane-block">
+          <Eyebrow>Formula</Eyebrow>
+          {#if formula}
+            <code class="formula" title={formula}>{formula}</code>
+            <ChipToggleGroup label="Formula actions" selected={null}
+              options={[{ value: 'edit', label: 'Edit', tip: 'Change this formula' }, { value: 'clear', label: 'Clear', tip: 'Drop the formula and pick a column instead' }]}
+              onSelect={(value) => value === 'edit' ? onOpenFormula() : onClearFormula()} />
+          {:else}
+            <ChipToggleGroup label="Formula" selected={null}
+              options={[{ value: 'write', label: 'ƒx Write a formula', tip: 'Derive one value from any expression' }]}
+              onSelect={onOpenFormula} />
+          {/if}
+        </div>
+      {/if}
+      {#if isMetric}
+        <div class="pane-block">
+          <Eyebrow>Card</Eyebrow>
+          <ChipToggleGroup label="Alignment" options={metricAligns} selected={spec?.align ?? 'center'}
+            onSelect={(value) => onSelectCard({ align: value as MetricAlign })} />
+          <ChipToggleGroup label="Number font" options={metricFonts} selected={spec?.font ?? 'sans'}
+            onSelect={(value) => onSelectCard({ font: value as MetricFont })} />
+          <ChipToggleGroup label="Number size" options={metricSizes} selected={spec?.size ?? 'fit'}
+            onSelect={(value) => onSelectCard({ size: value as MetricSize })} />
         </div>
       {/if}
       {#if spec?.chart === 'bar' && spec.encodings.group}
@@ -271,6 +308,7 @@
     transform-origin: top left;
   }
   .pane-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .formula { min-width: 0; overflow: hidden; padding: 5px 7px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--ink); font: 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
   .pane-header { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); }
   .drag-handle { flex: 1; min-width: 0; height: 30px; padding: 0; border: 0; background: transparent; color: var(--muted); text-align: left; font: 500 12px var(--font-ui); cursor: grab; touch-action: none; }
   .dragging .drag-handle { cursor: grabbing; }

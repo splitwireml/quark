@@ -1,10 +1,10 @@
 import type { TableRows } from './table-rows';
 
-export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=';
+export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=' | 'between';
 export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
 export type VizKind = 'categorical' | 'discrete' | 'continuous' | 'date';
-export type ChartType = 'bar' | 'histogram' | 'box' | 'scatter' | 'line' | 'pie';
+export type ChartType = 'bar' | 'histogram' | 'box' | 'scatter' | 'line' | 'pie' | 'metric';
 export type BarLayout = 'grouped' | 'stacked' | 'stacked100';
 export type TimeGrain = 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
 export type AggregateCount = number | string;
@@ -212,6 +212,10 @@ export interface ChartEncodings {
 
 export type EncodingRole = keyof ChartEncodings;
 
+export type MetricAlign = 'start' | 'center' | 'end';
+export type MetricFont = 'sans' | 'mono';
+export type MetricSize = 'fit' | 'sm' | 'md' | 'lg';
+
 export interface ChartSpec {
   chart: ChartType;
   encodings: ChartEncodings;
@@ -219,7 +223,16 @@ export interface ChartSpec {
   density?: boolean;
   layout?: BarLayout;
   grain?: TimeGrain;
+  /* Metric cards only: an own aggregate expression with its caption, and how the card sets the number. */
+  expression?: string;
+  label?: string;
+  align?: MetricAlign;
+  font?: MetricFont;
+  size?: MetricSize;
 }
+
+export type MetricCardStyle = { align?: MetricAlign; font?: MetricFont; size?: MetricSize };
+export type MetricFormulaApply = (expression: string, label: string) => void;
 
 export interface DashboardChart {
   id: string;
@@ -337,13 +350,21 @@ export interface LineVisualizeResponse {
   elapsed_ms: number;
 }
 
+export interface MetricVisualizeResponse {
+  chart: 'metric';
+  value: string | number | boolean | null;
+  rows: AggregateCount;
+  elapsed_ms: number;
+}
+
 export type VisualizeResponse =
   | BarVisualizeResponse
   | PieVisualizeResponse
   | HistogramVisualizeResponse
   | BoxVisualizeResponse
   | ScatterVisualizeResponse
-  | LineVisualizeResponse;
+  | LineVisualizeResponse
+  | MetricVisualizeResponse;
 
 export interface ChartHover {
   title: string;

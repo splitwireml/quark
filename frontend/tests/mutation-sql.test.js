@@ -1,10 +1,44 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildCellEditSql, buildColumnReplacementSql, buildIfExpression, buildMutationSql, buildSwitchExpression, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier, quoteLiteral, stripTerminalSemicolon } from '../src/lib/mutation-sql.ts';
+import { buildCellEditSql, buildColumnReplacementSql, buildIfExpression, buildMutationSql, buildSwitchExpression, hasVolatileRowOrder, inferActiveFormulaKind, inferFormulaKind, nextDuplicateColumnName, quoteIdentifier, quoteLiteral, sqlValueFromInput, stripTerminalSemicolon } from '../src/lib/mutation-sql.ts';
+import { columnFormulas } from '../src/lib/column-formulas.ts';
 
 test('quotes SQL identifiers and literals', () => {
   assert.equal(quoteIdentifier('a"b'), '"a""b"');
   assert.equal(quoteLiteral("O'Brien"), "'O''Brien'");
+});
+
+test('watches the result type as a column formula changes', () => {
+  const columns = [{ name: 'title', type: 'VARCHAR', numeric: false }, { name: 'amount', type: 'DOUBLE', numeric: true }, { name: 'a + b', type: 'VARCHAR', numeric: false }];
+  assert.equal(inferFormulaKind('"title"', columns), 'text');
+  assert.equal(inferFormulaKind('length("title")', columns), 'number');
+  assert.equal(inferFormulaKind('round(length("title"))', columns), 'number');
+  assert.equal(inferFormulaKind('cast(length("title") AS VARCHAR)', columns), 'text');
+  assert.equal(inferFormulaKind('try_cast("title" AS DOUBLE)', columns), 'number');
+  assert.equal(inferFormulaKind('"amount"', columns), 'number');
+  assert.equal(inferFormulaKind('"amount" + 2', columns), 'number');
+  assert.equal(inferFormulaKind('("amount" + 2) / 100', columns), 'number');
+  assert.equal(inferFormulaKind('"amount" + ', columns), 'unknown');
+  assert.equal(inferFormulaKind('"amount" >= 2', columns), 'boolean');
+  assert.equal(inferFormulaKind('"amount" BETWEEN 1 AND 2', columns), 'boolean');
+  assert.equal(inferFormulaKind('"amount" BETWEEN 1 AND 2 AND "title" = \'ok\'', columns), 'boolean');
+  assert.equal(inferFormulaKind('"amount" BETWEEN 1 AND ', columns), 'unknown');
+  assert.equal(inferFormulaKind('("amount" >= 2) AND TRUE', columns), 'boolean');
+  assert.equal(inferFormulaKind('"title" = \'A AND B\'', columns), 'boolean');
+  assert.equal(inferFormulaKind('"title" IS NOT NULL', columns), 'boolean');
+  assert.equal(inferFormulaKind('"a + b"', columns), 'text');
+  assert.equal(inferFormulaKind('"title" || ","', columns), 'unknown');
+  assert.equal(inferFormulaKind('"title" || \',\'', columns), 'text');
+  assert.equal(inferFormulaKind('power("amount", 2)', columns), 'number');
+  assert.equal(inferFormulaKind('left("title", 1)', columns), 'text');
+  assert.equal(inferFormulaKind('regexp_extract("title", \'x\')', columns), 'text');
+  assert.equal(inferFormulaKind('length(', columns), 'unknown');
+  assert.equal(inferActiveFormulaKind('"amount" < 10 AND "amount"', columns), 'number');
+  assert.equal(inferActiveFormulaKind('"amount" < 10 AND "title"', columns), 'text');
+  assert.equal(inferActiveFormulaKind('"amount" BETWEEN  AND ', columns), 'number');
+  assert.equal(inferActiveFormulaKind('"amount" BETWEEN 1 AND ', columns), 'number');
+  assert.equal(inferActiveFormulaKind('"amount" BETWEEN 1 AND 2 AND "title"', columns), 'text');
+  assert.equal(inferActiveFormulaKind('"title" = \'A AND B\'', columns), 'boolean');
 });
 
 test('strips one terminal semicolon before trailing comments', () => {
@@ -61,8 +95,38 @@ test('chooses the next case-insensitive duplicate column suffix', () => {
 test('builds non-nested IF and switch expressions only when every operand is filled', () => {
   assert.equal(buildIfExpression('"active" = TRUE', "'yes'", "'no'"), `CASE WHEN "active" = TRUE THEN 'yes' ELSE 'no' END`);
   assert.equal(buildIfExpression('', "'yes'", "'no'"), '');
-  assert.equal(buildSwitchExpression('"status"', [{ match: "'open'", thenValue: '1' }, { match: "'closed'", thenValue: '2' }], '0'), `CASE "status" WHEN 'open' THEN 1 WHEN 'closed' THEN 2 ELSE 0 END`);
-  assert.equal(buildSwitchExpression('"status"', [{ match: '', thenValue: '1' }], '0'), '');
+  assert.equal(buildSwitchExpression([{ condition: '"status" = \'open\'', thenValue: '1' }, { condition: '"status" <> \'closed\'', thenValue: '2' }], '0'), `CASE WHEN "status" = 'open' THEN 1 WHEN "status" <> 'closed' THEN 2 ELSE 0 END`);
+  assert.equal(buildSwitchExpression([{ condition: '', thenValue: '1' }], '0'), '');
+});
+
+test('switch conditions compose comparisons, arithmetic, and logic', () => {
+  assert.equal(buildSwitchExpression([{ condition: '"amount" < 10 AND length("region") > 2', thenValue: sqlValueFromInput("O'Reilly") }, { condition: '"amount" >= 10', thenValue: sqlValueFromInput('2') }], sqlValueFromInput('NULL')),
+    `CASE WHEN "amount" < 10 AND length("region") > 2 THEN 'O''Reilly' WHEN "amount" >= 10 THEN 2 ELSE NULL END`);
+  assert.equal(sqlValueFromInput("'already quoted'"), "'already quoted'");
+  assert.equal(sqlValueFromInput('001', true), "'001'");
+});
+
+test('generated column formulas follow saved versions, rename, copy, and pending edits', () => {
+  const history = {
+    activeVersionId: 'v2',
+    versions: [
+      { id: 'v1', changes: [] },
+      { id: 'v2', parentId: 'v1', changes: [
+        { kind: 'add', details: { column: 'length', expression: 'length("name")' } },
+        { kind: 'rename', details: { from: 'length', to: 'name_length' } },
+        { kind: 'duplicate', details: { column: 'name_length', copy: 'name_length_2' } },
+      ] },
+    ],
+    pendingChanges: [{ kind: 'modify', details: { column: 'name_length_2', output: 'name_length_2', expression: 'abs("name_length_2")' } }],
+  };
+  assert.deepEqual({ ...columnFormulas(history) }, {
+    name_length: 'length("name")',
+    name_length_2: 'abs("name_length_2")',
+  });
+  assert.equal(
+    buildMutationSql('SELECT * FROM sample', ['name', 'name_length', 'name_length_2'], 2, columnFormulas(history).name_length, nextDuplicateColumnName('name_length', ['name', 'name_length', 'name_length_2'])),
+    'SELECT "name", "name_length", length("name") AS "name_length_3", "name_length_2" FROM (\nSELECT * FROM sample\n) AS mutation_source',
+  );
 });
 
 test('replaces one absolute row cell while preserving column order', () => {

@@ -10,6 +10,9 @@ import type {
   ColumnInfo,
   EncodingRole,
   FilterCondition,
+  MetricAlign,
+  MetricFont,
+  MetricSize,
   TimeGrain,
   VizKind
 } from './types';
@@ -53,6 +56,14 @@ function box(column: Classified, group?: Classified): ChartSuggestion {
   return { chart: 'box', encodings: group ? { group: group.name, value: column.name } : { value: column.name } };
 }
 
+function single(column: Classified): ChartSuggestion {
+  return {
+    chart: 'metric',
+    encodings: { value: column.name },
+    metric: column.kind === 'continuous' || column.kind === 'discrete' ? 'sum' : 'count'
+  };
+}
+
 function barMeasure(category: Classified, value: Classified, group?: Classified): ChartSuggestion {
   return {
     chart: 'bar',
@@ -76,10 +87,10 @@ export function suggestCharts(columns: ColumnInfo[]): ChartSuggestion[] {
 
   if (items.length === 1) {
     const [item] = items;
-    if (item.kind === 'categorical') return [barCount(item), pieCount(item)];
-    if (item.kind === 'discrete') return [barCount(item), hist(item), box(item)];
-    if (item.kind === 'continuous') return [hist(item), box(item)];
-    return [hist(item), barCount(item)];
+    if (item.kind === 'categorical') return [barCount(item), pieCount(item), single(item)];
+    if (item.kind === 'discrete') return [barCount(item), hist(item), box(item), single(item)];
+    if (item.kind === 'continuous') return [hist(item), box(item), single(item)];
+    return [hist(item), barCount(item), single(item)];
   }
 
   if (dates.length === 1 && nums.length === 1 && items.length === 2) {
@@ -264,6 +275,67 @@ export const visualizeMetrics: { value: AggregateMetric; label: string; tip: str
   { value: 'count', label: 'Count', tip: 'Row count in each category' }
 ];
 
+/* A metric card derives one number, so it offers only the operations that collapse a whole
+   column to a single value the column's type can actually produce. */
+const METRIC_CARD_OPS: Record<VizKind, AggregateMetric[]> = {
+  continuous: ['sum', 'avg', 'median', 'stddev', 'min', 'max', 'count', 'distinct'],
+  discrete: ['sum', 'avg', 'median', 'stddev', 'min', 'max', 'count', 'distinct'],
+  date: ['min', 'max', 'count', 'distinct'],
+  categorical: ['count', 'distinct']
+};
+
+export function metricCardMetrics(column: ColumnInfo | undefined): { value: AggregateMetric; label: string; tip: string }[] {
+  const kind = column ? classifyColumn(column) : null;
+  const allowed = kind ? METRIC_CARD_OPS[kind] : ['count' as AggregateMetric];
+  const labels: Record<AggregateMetric, string> = {
+    count: 'Values counted', distinct: 'Distinct values', min: 'Smallest value', max: 'Largest value',
+    sum: 'Total', avg: 'Average', median: 'Median', stddev: 'Standard deviation'
+  };
+  return allowed.map((value) => ({
+    value,
+    label: visualizeMetrics.find((metric) => metric.value === value)?.label ?? 'Distinct',
+    tip: labels[value]
+  }));
+}
+
+/* A column kept from an earlier chart can carry an operation its type cannot answer, so a metric
+   card falls back to an operation the column supports instead of asking for a 422. */
+export function metricCardOp(
+  columns: ColumnInfo[],
+  encodings: ChartEncodings,
+  chosen: AggregateMetric | null | undefined,
+  fallback: AggregateMetric = 'count'
+): AggregateMetric {
+  const allowed = metricCardMetrics(columns.find((column) => column.name === encodings.value)).map((item) => item.value);
+  if (chosen && allowed.includes(chosen)) return chosen;
+  return allowed.includes(fallback) ? fallback : allowed[0];
+}
+
+export const metricAligns: { value: MetricAlign; label: string; tip: string }[] = [
+  { value: 'start', label: 'Left', tip: 'Number and caption against the left edge' },
+  { value: 'center', label: 'Center', tip: 'Number and caption centred in the tile' },
+  { value: 'end', label: 'Right', tip: 'Number and caption against the right edge' }
+];
+
+export const metricFonts: { value: MetricFont; label: string; tip: string }[] = [
+  { value: 'sans', label: 'Sans', tip: 'The interface typeface' },
+  { value: 'mono', label: 'Mono', tip: 'Fixed-width digits that hold their place while values change' }
+];
+
+export const metricSizes: { value: MetricSize; label: string; tip: string }[] = [
+  { value: 'fit', label: 'Fit', tip: 'Scale the number to the tile' },
+  { value: 'sm', label: 'S', tip: 'Small fixed number' },
+  { value: 'md', label: 'M', tip: 'Medium fixed number' },
+  { value: 'lg', label: 'L', tip: 'Large fixed number' }
+];
+
+/* A metric card's caption is its label, its own formula, or the operation it ran on a column. */
+export function metricCardTitle(spec: ChartSpec): string {
+  const expression = spec.expression?.trim();
+  if (expression) return spec.label?.trim() || expression;
+  return metricTitle(spec.metric ?? 'count', spec.encodings.value ?? '');
+}
+
 export function metricTitle(metric: AggregateMetric | undefined, column: string): string {
   const labels: Record<AggregateMetric, string> = {
     count: 'Count',
@@ -285,7 +357,8 @@ export const chartMeta: Record<ChartType, { label: string; tip: string; icon: Ic
   box: { label: 'Box', tip: 'Median, quartiles, and outliers', icon: 'box' },
   scatter: { label: 'Scatter', tip: 'Two numbers against each other', icon: 'scatter' },
   line: { label: 'Line', tip: 'A number over an ordered axis', icon: 'line' },
-  pie: { label: 'Pie', tip: 'Shares of a whole', icon: 'pie' }
+  pie: { label: 'Pie', tip: 'Shares of a whole', icon: 'pie' },
+  metric: { label: 'Metric', tip: 'One number for the whole slice', icon: 'sigma' }
 };
 
 export function groupColumns(columns: ColumnInfo[]): { kind: VizKind; label: string; columns: ColumnInfo[] }[] {
@@ -309,7 +382,8 @@ const CHART_ROLES: Record<ChartType, EncodingRole[]> = {
   histogram: ['value', 'group'],
   box: ['value', 'group'],
   scatter: ['x', 'y', 'size', 'color', 'pattern'],
-  line: ['x', 'y', 'group']
+  line: ['x', 'y', 'group'],
+  metric: ['value']
 };
 
 export function chartRoles(chart: ChartType): EncodingRole[] {

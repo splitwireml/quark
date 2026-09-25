@@ -1,5 +1,5 @@
 {
   "extends": "@tsconfig/svelte/tsconfig.json",
-  "compilerOptions": { "allowJs": true, "checkJs": true, "strict": true },
+  "compilerOptions": { "allowJs": true, "checkJs": true, "strict": true, "allowImportingTsExtensions": true, "noEmit": true },
   "include": ["src/**/*.d.ts", "src/**/*.ts", "src/**/*.svelte", "vite.config.ts"]
 }

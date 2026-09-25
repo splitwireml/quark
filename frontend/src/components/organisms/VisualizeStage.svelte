@@ -12,6 +12,7 @@
     ColumnInfo,
     EncodingRole,
     HistogramBin,
+    MetricCardStyle,
     TimeGrain,
     VisualizeResponse
   } from '../../lib/types';
@@ -29,6 +30,9 @@
     onSelectLayout: (layout: BarLayout) => void;
     onSelectGrain: (grain: TimeGrain) => void;
     activeGrain: TimeGrain | null;
+    onSelectCard: (patch: MetricCardStyle) => void;
+    onOpenFormula: () => void;
+    onClearFormula: () => void;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -46,6 +50,7 @@
   let {
     columnSearch, setColumnSearch, columns, selected,
     onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout, onSelectGrain, activeGrain,
+    onSelectCard, onOpenFormula, onClearFormula,
     roles, roleOf, onSetRole,
     data, loading, error, count, compact, chartTheme = 'primary', binLabel,
     onAddToDashboard, onMark
@@ -72,6 +77,7 @@
       const sampled = Number(data.total_points) > data.points.length ? ` of ${count(data.total_points)}` : '';
       return `${count(data.points.length)} points${sampled} · ${data.elapsed_ms.toFixed(1)} ms`;
     }
+    if (data.chart === 'metric') return `${count(data.rows)} rows · ${data.elapsed_ms.toFixed(1)} ms`;
     return `${data.bins.length} ${data.bins.length === 1 ? 'bin' : 'bins'} · ${data.elapsed_ms.toFixed(1)} ms`;
   });
 </script>
@@ -80,6 +86,7 @@
   <ChartOptionsPane
     {columnSearch} {setColumnSearch} {columns} {selected} {onToggleColumn}
     {suggestions} {spec} {onSelectChart} {onSelectMetric} {onSelectLayout} {onSelectGrain} {activeGrain}
+    {onSelectCard} {onOpenFormula} {onClearFormula}
     {roles} {roleOf} {onSetRole}
     {onAddToDashboard}
   />
@@ -99,7 +106,7 @@
     {:else}
       <div class="state">
         <strong>This chart is not available yet</strong>
-        <span>Bar, line, pie, histogram, box, and scatter are ready for this column mix.</span>
+        <span>Bar, line, pie, histogram, box, scatter, and metric are ready for this column mix.</span>
       </div>
     {/if}
   </div>

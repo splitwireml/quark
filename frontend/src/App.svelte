@@ -9,13 +9,14 @@
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
+  import { columnFormulas } from './lib/column-formulas';
   import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import { applyRoles, chartRoles, classifyColumn, filtersFromMark, suggestCharts } from './lib/visualize';
-  import { chartTitle, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
+  import { applyRoles, chartRoles, classifyColumn, filtersFromMark, metricCardOp, suggestCharts } from './lib/visualize';
+  import { chartTitle, sameQuery, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, METRIC_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
-  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, BarLayout, DashboardSelection, DatasetVersionHistory, EncodingRole, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, TimeGrain, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
+  import type { AggregateCount, AggregateMetric, MetricCardStyle, MetricFormulaApply, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, BarLayout, DashboardSelection, DatasetVersionHistory, EncodingRole, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, TimeGrain, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
   import { editorHighlight, editorTheme } from './lib/editorTheme';
   import { readThemePreference, resolveScheme, themeStorageKey, type ColorScheme, type ThemePreference } from './lib/theme';
@@ -47,6 +48,7 @@
   import DashboardStage from './components/organisms/DashboardStage.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
   import FormulaMenu from './components/organisms/FormulaMenu.svelte';
+  import MetricFormulaMenu from './components/organisms/MetricFormulaMenu.svelte';
   import ExportMenu from './components/organisms/ExportMenu.svelte';
   import ProjectsScreen from './components/organisms/ProjectsScreen.svelte';
   import AppShell from './components/templates/AppShell.svelte';
@@ -55,7 +57,7 @@
 
   const baseOperators: { value: FilterOperator; label: string }[] = [{ value: '=', label: 'equals' }, { value: '!=', label: 'not equal' }, { value: 'is_null', label: 'is null' }, { value: 'not_null', label: 'is not null' }];
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
-  const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
+  const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }, { value: 'between', label: 'between (inclusive)' }];
   const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
   type CellMove = 'up' | 'down' | 'left' | 'right' | 'rowStart' | 'rowEnd' | 'pageUp' | 'pageDown' | 'gridStart' | 'gridEnd';
   type JoinStep = 0 | 1 | 2;
@@ -117,6 +119,7 @@
   let filterColumn = $state<ColumnInfo | null>(null);
   let filterOperator = $state<FilterOperator>('=');
   let filterValue = $state('');
+  let filterUpperValue = $state('');
   let columnSearch = $state('');
   let columnMenuSearch = $state('');
   let columnMenuRegex = $state(false);
@@ -216,6 +219,7 @@
   let mutationTarget = $state<{ kind: 'insert'; insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | { kind: 'modify'; column: ColumnInfo } | null>(null);
   let mutationApplying = $state(false);
   let mutationError = $state('');
+  let copiedColumn = $state<{ historyId: string; name: string; expression: string } | null>(null);
   let exportOpen = $state(false);
   let exportFormat = $state<ExportFormat>('csv');
   let exportJsonLayout = $state<JsonLayout>('rows');
@@ -235,6 +239,12 @@
   let visualizeRoles = $state<Record<string, EncodingRole>>({});
   let visualizeLayout = $state<BarLayout | null>(null);
   let visualizeGrain = $state<TimeGrain | null>(null);
+  let visualizeFormula = $state<{ expression: string; label: string } | null>(null);
+  let visualizeCard = $state<MetricCardStyle>({});
+  let metricFormulaDialog = $state<HTMLDialogElement | null>(null);
+  let metricFormulaTarget = $state.raw<{ expression: string; label: string; apply: MetricFormulaApply } | null>(null);
+  let metricFormulaApplying = $state(false);
+  let metricFormulaError = $state('');
   let visualizeSearch = $state('');
   let visualizeData = $state.raw<VisualizeResponse | null>(null);
   let visualizeLoading = $state(false);
@@ -244,7 +254,7 @@
   let dashboardSelections = $state.raw<DashboardSelection[]>([]);
   let dashboardChartStates = $state.raw<Record<string, { data: VisualizeResponse | null; loading: boolean; error: string }>>({});
   let dashboardRequestId = 0;
-  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter', 'line', 'pie']);
+  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter', 'line', 'pie', 'metric']);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -537,6 +547,8 @@
   }
 
   let currentHistory = $derived(versionHistories.find((history) => history.id === selectedDataset));
+  let generatedColumns = $derived(columnFormulas(currentHistory));
+  let canPasteColumn = $derived(!!copiedColumn && copiedColumn.historyId === currentHistory?.id && !!result?.columns.some((column) => column.name === copiedColumn?.name));
   let selectedNode = $derived(nodes.find((node) => node.id === currentHistory?.sourceId));
   let selectedSourceId = $derived(currentHistory?.sourceId ?? '');
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
@@ -594,19 +606,23 @@
   let visualizeFieldOptions = $derived((result?.columns ?? []).filter((column) => classifyColumn(column) !== null));
   let visualizeSuggestions = $derived(suggestCharts(visualizeColumns).filter((item) => implementedCharts.has(item.chart)));
   let visualizeSpec = $derived.by((): ChartSpec | null => {
+    // A formula names its own columns, so a formula card stands up with nothing selected.
+    if (visualizeFormula) return { chart: 'metric', encodings: {}, ...visualizeCard, ...visualizeFormula };
     const suggestions = visualizeSuggestions;
     if (!suggestions.length) return null;
     const pick = (visualizeChart && suggestions.find((item) => item.chart === visualizeChart)) || suggestions[0];
     const encodings = applyRoles(pick.encodings, pick.chart, visualizeRoles, visualizeColumns);
     const aggregates = ((pick.chart === 'bar' || pick.chart === 'pie') && encodings.value)
-      || (pick.chart === 'line' && encodings.y);
-    const metric = aggregates ? (visualizeMetric ?? pick.metric ?? 'avg') : pick.metric;
+      || (pick.chart === 'line' && encodings.y) || pick.chart === 'metric';
+    const metric = pick.chart === 'metric' ? metricCardOp(visualizeColumns, encodings, visualizeMetric, pick.metric)
+      : aggregates ? (visualizeMetric ?? pick.metric ?? 'avg') : pick.metric;
     const layout = pick.chart === 'bar' && encodings.group ? (visualizeLayout ?? 'grouped') : undefined;
     const grain = pick.chart === 'line' && visualizeGrain ? visualizeGrain : undefined;
     const base: ChartSpec = metric
       ? { chart: pick.chart, encodings, metric }
       : { chart: pick.chart, encodings };
-    return { ...base, ...(layout ? { layout } : {}), ...(grain ? { grain } : {}) };
+    const card = pick.chart === 'metric' ? { ...visualizeCard, ...(visualizeFormula ?? {}) } : {};
+    return { ...base, ...(layout ? { layout } : {}), ...(grain ? { grain } : {}), ...card };
   });
   let currentDashboard = $derived(dashboardDocuments.find((document) => document.datasetId === selectedDataset));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
@@ -645,6 +661,8 @@
     visualizeRoles = {};
     visualizeLayout = null;
     visualizeGrain = null;
+    visualizeFormula = null;
+    visualizeCard = {};
     visualizeSearch = '';
     visualizeData = null;
     visualizeError = '';
@@ -703,11 +721,59 @@
 
   function selectVisualizeChart(chart: ChartType) {
     visualizeChart = chart;
+    if (chart !== 'metric') visualizeFormula = null;
     void loadVisualize();
   }
 
   function selectVisualizeMetric(metric: AggregateMetric) {
     visualizeMetric = metric;
+    void loadVisualize();
+  }
+
+  function selectVisualizeCard(patch: MetricCardStyle) {
+    // Presentation only: the card restyles from the response it already has.
+    visualizeCard = { ...visualizeCard, ...patch };
+  }
+
+  function clearVisualizeFormula() {
+    visualizeFormula = null;
+    void loadVisualize();
+  }
+
+  /* A formula is the one metric input the UI cannot validate on its own, so the dialog holds the
+     spec open and asks the backend to run it before the card commits to it. */
+  async function openMetricFormula(spec: ChartSpec | null, apply: MetricFormulaApply) {
+    metricFormulaTarget = { expression: spec?.expression ?? '', label: spec?.label ?? '', apply };
+    metricFormulaError = '';
+    metricFormulaApplying = false;
+    await tick();
+    metricFormulaDialog?.showModal();
+    metricFormulaDialog?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+  }
+
+  async function applyMetricFormula(expression: string, label: string) {
+    const target = metricFormulaTarget;
+    if (!target || metricFormulaApplying) return;
+    metricFormulaApplying = true;
+    metricFormulaError = '';
+    try {
+      const probe: ChartSpec = { chart: 'metric', encodings: {}, expression, label };
+      const body = { spec: probe, page: 1, page_size: 1, filters, sorts, dedupe_columns: dedupeColumns };
+      if (queryMode === 'sql') await api.visualizeSql(activeSqlNodeId || selectedNodeId, { ...body, sql: sqlBase || activeSql });
+      else await api.visualizeDataset(selectedNodeId, selectedDataset, body);
+    } catch (reason) {
+      metricFormulaApplying = false;
+      metricFormulaError = message(reason);
+      return;
+    }
+    metricFormulaApplying = false;
+    target.apply(expression, label);
+    metricFormulaDialog?.close();
+  }
+
+  function selectVisualizeFormula(expression: string, label: string) {
+    visualizeFormula = { expression, label };
+    visualizeChart = 'metric';
     void loadVisualize();
   }
 
@@ -791,21 +857,32 @@
 
   function addChartToDashboard(): boolean {
     const tab = currentDashboard?.tabs.find((item) => item.id === currentDashboard.activeTabId);
+    const tile = visualizeSpec?.chart === 'metric' ? METRIC_TILE : DEFAULT_TILE;
     return placeCurrentChart({ x: 20,
       y: Math.max(20, ...(tab?.placements.map((item) => item.y + item.height + 20) ?? [0])),
-      ...DEFAULT_TILE
+      ...tile
     });
   }
 
   function placeCurrentChart(rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
-    const spec = visualizeSpec;
-    if (!spec || !selectedDataset) return false;
+    return !!placeChart(visualizeSpec, null, rect);
+  }
+
+  /* A pasted copy keeps its source's definition until one of the two tiles is edited, which is the
+     same sharing rule a chart reused across dashboard tabs already follows. */
+  function pasteDashboardChart(chart: { title: string; spec: ChartSpec }, rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
+    return placeChart(chart.spec, chart.title, rect);
+  }
+
+  function placeChart(spec: ChartSpec | null, title: string | null, rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>): string | null {
+    if (!spec || !selectedDataset) return null;
+    const placementId = crypto.randomUUID();
     const next = updateCurrentDashboard((document) => {
       let tab = document.tabs.find((item) => item.id === document.activeTabId);
       if (!tab) tab = { id: crypto.randomUUID(), name: nextDashboardName(document.tabs.map((tab) => tab.name)), scrollTop: 0, placements: [] };
-      const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec));
-      const chart = saved ?? { id: crypto.randomUUID(), title: chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
-      const placement = clampPlacement({ ...rect, id: crypto.randomUUID(), chartId: chart.id });
+      const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec) && (!title || chart.title === title));
+      const chart = saved ?? { id: crypto.randomUUID(), title: title ?? chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
+      const placement = clampPlacement({ ...rect, id: placementId, chartId: chart.id });
       return {
         ...document,
         activeTabId: tab.id,
@@ -815,8 +892,9 @@
           : [...document.tabs, { ...tab, placements: [placement] }]
       };
     });
-    if (next) void loadDashboardCharts();
-    return !!next;
+    if (!next) return null;
+    void loadDashboardCharts();
+    return placementId;
   }
 
   function renameDashboardTab(id: string, name: string) {
@@ -841,6 +919,8 @@
     if (!next || next === previous) return;
     const chartId = next.tabs.find((tab) => tab.id === next.activeTabId)?.placements.find((item) => item.id === placementId)?.chartId;
     if (!chartId) return;
+    const before = previous?.charts.find((chart) => chart.id === chartId)?.spec;
+    if (sameQuery(before, spec)) return;
     const selectionIndex = filters.findIndex((_, index) => selectionChartIdAtFilterIndex(filters, dashboardSelections, index) === chartId);
     if (selectionIndex >= 0) void removeFilter(selectionIndex).finally(() => loadDashboardCharts());
     else void loadDashboardCharts();
@@ -909,9 +989,10 @@
   }
 
   function filterSummary(filter: FilterCondition): string {
-    const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most' };
+    const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most', between: 'is between' };
     if (filter.operator === 'is_null' || filter.operator === 'not_null') return `${filter.column} ${labels[filter.operator]}`;
     const values = Array.isArray(filter.value) ? filter.value : [filter.value];
+    if (filter.operator === 'between') return `${filter.column} ${labels[filter.operator]} ${values.join(' and ')}`;
     const text = `${values.slice(0, 3).map(String).join(', ')}${values.length > 3 ? `, +${values.length - 3} more` : ''}`;
     return `${filter.column} ${labels[filter.operator]} ${text.length > 48 ? `${text.slice(0, 47)}…` : text}`;
   }
@@ -1197,6 +1278,29 @@
       buildMutationSql(current.sql, columns, index + 1, quoteIdentifier(column.name), name),
       false,
       { kind: 'duplicate', summary: `Duplicate ${column.name}`, details: { column: column.name, copy: name } }
+    );
+    await tick();
+    tableScroll?.focus();
+  }
+
+  function copyColumn(column: ColumnInfo) {
+    if (!currentHistory) return;
+    copiedColumn = { historyId: currentHistory.id, name: column.name, expression: generatedColumns[column.name] ?? quoteIdentifier(column.name) };
+    void navigator.clipboard?.writeText(column.name).catch(() => {});
+  }
+
+  async function pasteColumn(after: ColumnInfo) {
+    const copied = copiedColumn;
+    const current = result;
+    if (!copied || !current || !canPasteColumn || loadingData || mutationApplying) return;
+    const columns = current.columns.map((column) => column.name);
+    const index = columns.indexOf(after.name);
+    if (index < 0) return;
+    const name = nextDuplicateColumnName(copied.name, columns);
+    await applyColumnQuery(
+      buildMutationSql(current.sql, columns, index + 1, copied.expression, name),
+      false,
+      { kind: 'add', summary: `Paste ${copied.name} as ${name}`, details: { column: name, expression: copied.expression, after: after.name } }
     );
     await tick();
     tableScroll?.focus();
@@ -1812,6 +1916,7 @@
     filterColumn = null;
     filterOperator = '=';
     filterValue = '';
+    filterUpperValue = '';
     categoryValues = [];
     categorySearch = '';
     categoryTotal = 0;
@@ -2332,11 +2437,13 @@
     if (!filterColumn) return;
     const base = withoutSelections(filters, dashboardSelections);
     const noValue = filterOperator === 'is_null' || filterOperator === 'not_null';
-    if (!noValue && filterValue === '') return;
+    if (!noValue && (filterValue === '' || (filterOperator === 'between' && filterUpperValue === ''))) return;
     const numericValue = filterColumn.numeric ? normalizedNumber(filterValue) : filterValue;
-    if (!noValue && numericValue === null) return;
+    const numericUpperValue = filterColumn.numeric ? normalizedNumber(filterUpperValue) : filterUpperValue;
+    if (!noValue && (numericValue === null || (filterOperator === 'between' && numericUpperValue === null))) return;
     if (filterColumn.numeric && numericValue !== null) filterValue = formattedNumber(numericValue);
-    const value = noValue ? undefined : filterColumn.numeric ? numericValue! : isBooleanType(filterColumn.type) ? filterValue === 'true' : filterValue;
+    if (filterOperator === 'between' && filterColumn.numeric && numericUpperValue !== null) filterUpperValue = formattedNumber(numericUpperValue);
+    const value = noValue ? undefined : filterOperator === 'between' ? [numericValue!, numericUpperValue!] : filterColumn.numeric ? numericValue! : isBooleanType(filterColumn.type) ? filterValue === 'true' : filterValue;
     const filter: FilterCondition = { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }), ...(base.length ? { connector: 'and' as const } : {}) };
     closeInspector();
     await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
@@ -2678,6 +2785,7 @@
     return `${sign}${formattedInteger}${fraction === undefined ? '' : `${decimal}${formattedFraction}`}`;
   }
   function normalizeNumericFilter() { const value = normalizedNumber(filterValue); if (value !== null) filterValue = formattedNumber(value); }
+  function normalizeNumericFilterUpper() { const value = normalizedNumber(filterUpperValue); if (value !== null) filterUpperValue = formattedNumber(value); }
   async function scrollToColumn(name: string) {
     await tick();
     const header = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('th[data-column]') ?? [])].find((element) => element.dataset.column === name);
@@ -3063,6 +3171,9 @@
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric} onSelectLayout={selectVisualizeLayout}
                     onSelectGrain={selectVisualizeGrain}
                     activeGrain={visualizeData?.chart === 'line' ? visualizeData.grain : null}
+                    onSelectCard={selectVisualizeCard}
+                    onOpenFormula={() => void openMetricFormula(visualizeSpec, selectVisualizeFormula)}
+                    onClearFormula={clearVisualizeFormula}
                     roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
                     roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
                     data={visualizeData} loading={visualizeLoading} error={visualizeError}
@@ -3083,6 +3194,9 @@
                     suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric} onSelectLayout={selectVisualizeLayout}
                     onSelectGrain={selectVisualizeGrain}
                     activeGrain={visualizeData?.chart === 'line' ? visualizeData.grain : null}
+                    onSelectCard={selectVisualizeCard}
+                    onOpenFormula={(spec, apply) => void openMetricFormula(spec, apply ?? selectVisualizeFormula)}
+                    onClearFormula={clearVisualizeFormula}
                     roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
                     roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
                     onSelectTab={selectDashboardTab}
@@ -3093,6 +3207,7 @@
                     onPlaceCurrent={placeCurrentChart}
                     onMove={moveDashboardPlacement}
                     onRemove={removeDashboardPlacement}
+                    onPaste={pasteDashboardChart}
                     onMark={(chartId, mark) => void applyDashboardMark(chartId, mark)}
                     onRetryChart={(chartId) => void retryDashboardChart(chartId)}
                     onScroll={saveDashboardScroll}
@@ -3117,6 +3232,7 @@
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
                         {rowDensity} {fitColumnsToContent}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
+                        {generatedColumns} {canPasteColumn} onCopyColumn={copyColumn} onPasteColumn={(column) => void pasteColumn(column)}
                         onSort={cycleSort}
                         onFilter={(column, trigger) => openFilter(column, trigger)}
                         onProfile={(column, trigger) => openStats(column, trigger)}
@@ -3164,9 +3280,10 @@
                       {#if inspectorMode === 'filter' && filterColumn}
                         <FilterInspector
                           column={filterColumn} isText={isTextType(filterColumn.type)}
-                          {operators} operator={filterOperator} value={filterValue}
-                          setOperator={(value) => filterOperator = value} setValue={(value) => filterValue = value}
+                          {operators} operator={filterOperator} value={filterValue} upperValue={filterUpperValue}
+                          setOperator={(value) => filterOperator = value} setValue={(value) => filterValue = value} setUpperValue={(value) => filterUpperValue = value}
                           onblurValue={filterColumn.numeric ? normalizeNumericFilter : undefined}
+                          onblurUpperValue={filterColumn.numeric ? normalizeNumericFilterUpper : undefined}
                           bind:valueInput={filterInput}
                           onSubmitFilter={(event) => { event.preventDefault(); addFilter(); }}
                           {categorySearch} setCategorySearch={setCategorySearchLive}
@@ -3240,12 +3357,26 @@
   <FormulaMenu
     columns={result?.columns ?? []}
     targetColumn={mutationTarget.kind === 'modify' ? mutationTarget.column : null}
+    initialExpression={mutationTarget.kind === 'modify' ? generatedColumns[mutationTarget.column.name] : undefined}
     boundaryLabel={mutationTarget.kind === 'modify' ? mutationTarget.column.name : mutationTarget.right ? `Between ${mutationTarget.left} and ${mutationTarget.right}` : `After ${mutationTarget.left}`}
     applying={mutationApplying} error={mutationError}
     setDialog={(element) => mutationDialog = element}
     onClose={finishMutationClose}
     onCancelAttempt={(event) => { if (mutationApplying) event.preventDefault(); }}
     onApply={applyMutation}
+  />
+{/if}
+
+{#if metricFormulaTarget}
+  <MetricFormulaMenu
+    columns={result?.columns ?? []}
+    expression={metricFormulaTarget.expression}
+    label={metricFormulaTarget.label}
+    applying={metricFormulaApplying} error={metricFormulaError}
+    setDialog={(element) => metricFormulaDialog = element}
+    onClose={() => { metricFormulaTarget = null; metricFormulaError = ''; metricFormulaApplying = false; }}
+    onCancelAttempt={(event) => { if (metricFormulaApplying) event.preventDefault(); }}
+    onApply={(expression, label) => void applyMetricFormula(expression, label)}
   />
 {/if}
 

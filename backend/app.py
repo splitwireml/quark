@@ -41,7 +41,7 @@ ARROW_NATIVE = {
 INTEGER = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT")
 TEXT = ("VARCHAR", "CHAR", "TEXT")
 DATE = ("DATE", "TIME", "TIMESTAMP")
-OPERATORS = {"=", "!=", "in", "is_null", "not_null", "contains", "starts_with", "ends_with", ">", ">=", "<", "<="}
+OPERATORS = {"=", "!=", "in", "is_null", "not_null", "contains", "starts_with", "ends_with", ">", ">=", "<", "<=", "between"}
 ILLEGAL_XML = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 INVALID_SHEET_NAME = re.compile(r"[\\/*?:\[\]]")
 CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -130,12 +130,18 @@ class ChartEncodings(BaseModel):
 
 class ChartSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    chart: Literal["bar", "histogram", "box", "scatter", "line", "pie"]
+    chart: Literal["bar", "histogram", "box", "scatter", "line", "pie", "metric"]
     encodings: ChartEncodings = ChartEncodings()
     metric: Literal["count", "distinct", "min", "max", "sum", "avg", "median", "stddev"] | None = None
     density: bool = False
     layout: Literal["grouped", "stacked", "stacked100"] | None = None
     grain: Literal["hour", "day", "week", "month", "quarter", "year"] | None = None
+    # A metric card can carry its own aggregate expression, plus how the card presents the number.
+    expression: str | None = Field(None, max_length=2000)
+    label: str | None = Field(None, max_length=200)
+    align: Literal["start", "center", "end"] | None = None
+    font: Literal["sans", "mono"] | None = None
+    size: Literal["fit", "sm", "md", "lg"] | None = None
 
 
 class VisualizeRequest(Query):
@@ -693,6 +699,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise HTTPException(422, "Filter value is required")
             if condition.operator == "in" and (not isinstance(condition.value, list) or not condition.value):
                 raise HTTPException(422, "IN filter requires a non-empty list")
+            if condition.operator == "between" and (not isinstance(condition.value, list) or len(condition.value) != 2 or any(not isinstance(bound, (str, int, float)) for bound in condition.value)):
+                raise HTTPException(422, "BETWEEN filter requires two bounds")
             if condition.operator in {"contains", "starts_with", "ends_with"} and not column_types[condition.column].upper().startswith(TEXT):
                 raise HTTPException(422, "Text operator requires a text column")
             column = quote(condition.column)
@@ -702,6 +710,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             elif condition.operator == "in":
                 clauses.append(f"{column} IN ({', '.join('?' for _ in condition.value)})")
                 display_clauses.append(f"{column} IN ({', '.join(literal(value) for value in condition.value)})")
+                values.extend(condition.value)
+            elif condition.operator == "between":
+                clauses.append(f"{column} BETWEEN ? AND ?")
+                display_clauses.append(f"{column} BETWEEN {literal(condition.value[0])} AND {literal(condition.value[1])}")
                 values.extend(condition.value)
             elif condition.operator in {"contains", "starts_with", "ends_with"}:
                 clauses.append(f"{condition.operator}({column}, ?)")
@@ -1446,6 +1458,39 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         started = time.perf_counter()
         columns = dict(metadata_columns)
+        if spec.chart == "metric":
+            column = spec.encodings.value
+            metric = spec.metric or "count"
+            expression = (spec.expression or "").strip()
+            if expression:
+                # The expression is the user's own SQL, so it is held to the read-only single-SELECT
+                # rule the SQL editor uses, and it may not smuggle in placeholders for the bound filters.
+                if "?" in expression:
+                    raise HTTPException(422, "A metric formula cannot contain ? placeholders")
+                value_sql = expression
+                read_only_sql(con, f"SELECT {value_sql} AS value FROM {source}")
+            elif column is None:
+                value_sql = "count(*)"
+            else:
+                if column not in columns:
+                    raise HTTPException(422, "Metric column was not found")
+                if metric in {"sum", "avg", "median", "stddev"} and profile_kind(columns[column]) != "numeric":
+                    raise HTTPException(422, "This metric requires a numeric column")
+                value_sql = METRIC_SQL[metric].format(column=quote(column))
+            try:
+                value, rows = con.execute(
+                    f"SELECT {value_sql}, count(*) FROM {source}", values
+                ).fetchone()
+            except duckdb.Error as exc:
+                if not expression:
+                    raise
+                raise HTTPException(422, f"This metric formula did not run: {exc}") from exc
+            return {
+                "chart": "metric",
+                "value": safe(value),
+                "rows": safe(rows),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
         if spec.chart in {"bar", "pie"}:
             label = spec.chart.capitalize()
             limit = PIE_LIMIT if spec.chart == "pie" else BAR_LIMIT

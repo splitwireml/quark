@@ -41,6 +41,8 @@ try {
         ? { chart: 'scatter', points: [{ x: 1, y: 2 }, { x: 3, y: 5 }, { x: 6, y: 8 }], total_points: 3, elapsed_ms: 1 }
         : request.spec.chart === 'histogram'
           ? { chart: 'histogram', bins: [{ lower: 1, upper: 4, count: 2 }], elapsed_ms: 1 }
+        : request.spec.chart === 'metric'
+          ? { chart: 'metric', value: 42, rows: 3, elapsed_ms: 1 }
         : { chart: 'bar', rows: [{ label: 'East', value: 2 }, { label: 'West', value: 1 }], other_count: 0, elapsed_ms: 1 };
     } else throw new Error(`Unexpected API: ${path}`);
     await route.fulfill({ json: body });
@@ -166,6 +168,19 @@ try {
   await page.mouse.up();
   const afterResize = await tile.boundingBox();
   assert.ok(afterResize && afterResize.width > beforeResize.width && afterResize.height > beforeResize.height, 'tile resizes and its chart reflows');
+
+  // A selected tile copies, pastes as an offset twin that shares its definition, and clears.
+  await move.click();
+  await page.locator('article.tile.selected').waitFor();
+  await page.keyboard.press('ControlOrMeta+c');
+  await page.keyboard.press('ControlOrMeta+v');
+  await page.waitForFunction(() => document.querySelectorAll('article.tile').length === 2);
+  assert.equal(await page.locator('article.tile.selected').count(), 1, 'the pasted copy is the selected tile');
+  const pasted = await page.evaluate(() => JSON.parse(localStorage.getItem('quark.dashboards.v1'))[0].tabs.at(-1).placements);
+  assert.equal(pasted.at(-1).chartId, pasted.at(-2).chartId, 'a copy shares the chart definition until one tile is edited');
+  assert.ok(pasted.at(-1).x > pasted.at(-2).x && pasted.at(-1).y > pasted.at(-2).y, 'the copy lands offset from its source');
+  await page.keyboard.press('Delete');
+  await page.waitForFunction(() => document.querySelectorAll('article.tile').length === 1);
 
   await dashboardScroller.evaluate((node) => { node.scrollTop = 700; });
   const scrollerBounds = await dashboardScroller.boundingBox();

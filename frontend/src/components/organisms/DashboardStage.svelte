@@ -5,9 +5,9 @@
   import EditableName from '../atoms/EditableName.svelte';
   import ChartOptionsPane from '../molecules/ChartOptionsPane.svelte';
   import ChartView from '../molecules/ChartView.svelte';
-  import { clampPlacement, DEFAULT_TILE, snapMove, snapResize, type SnapGuide } from '../../lib/dashboard';
-  import { applyRoles, chartRoles, suggestCharts } from '../../lib/visualize';
-  import type { AggregateCount, AggregateMetric, BarLayout, ChartMark, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, DashboardChart, EncodingRole, DashboardPlacement, DashboardTab, HistogramBin, TimeGrain, VisualizeResponse } from '../../lib/types';
+  import { clampPlacement, DEFAULT_TILE, METRIC_TILE, snapMove, snapResize, type SnapGuide } from '../../lib/dashboard';
+  import { applyRoles, chartRoles, metricCardOp, suggestCharts } from '../../lib/visualize';
+  import type { AggregateCount, AggregateMetric, BarLayout, ChartMark, ChartSpec, ChartSuggestion, ChartType, ColumnInfo, DashboardChart, EncodingRole, DashboardPlacement, DashboardTab, HistogramBin, MetricCardStyle, MetricFormulaApply, TimeGrain, VisualizeResponse } from '../../lib/types';
 
   type ChartState = { data: VisualizeResponse | null; loading: boolean; error: string };
   type Rect = Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>;
@@ -32,6 +32,9 @@
     onSelectLayout: (layout: BarLayout) => void;
     onSelectGrain: (grain: TimeGrain) => void;
     activeGrain: TimeGrain | null;
+    onSelectCard: (patch: MetricCardStyle) => void;
+    onOpenFormula: (spec: ChartSpec | null, apply?: MetricFormulaApply) => void;
+    onClearFormula: () => void;
     roles: EncodingRole[];
     roleOf: (name: string) => EncodingRole | null;
     onSetRole: (name: string, role: EncodingRole) => void;
@@ -43,6 +46,7 @@
     onPlaceCurrent: (rect: Rect) => void;
     onMove: (placement: DashboardPlacement) => void;
     onRemove: (placementId: string) => void;
+    onPaste: (chart: { title: string; spec: ChartSpec }, rect: Rect) => string | null;
     onMark: (chartId: string, mark: ChartMark) => void;
     onRetryChart: (chartId: string) => void;
     onScroll: (top: number) => void;
@@ -51,8 +55,9 @@
   let {
     tabs, activeTabId, charts, chartStates, count, compact, chartTheme = 'primary', binLabel,
     columnSearch, setColumnSearch, columns, selected, onToggleColumn, suggestions, spec, onSelectChart, onSelectMetric, onSelectLayout, onSelectGrain, activeGrain,
+    onSelectCard, onOpenFormula, onClearFormula,
     roles, roleOf, onSetRole,
-    onSelectTab, onCreateTab, onRenameTab, onRenameChart, onEditChart, onPlaceCurrent, onMove, onRemove, onMark, onRetryChart, onScroll
+    onSelectTab, onCreateTab, onRenameTab, onRenameChart, onEditChart, onPlaceCurrent, onMove, onRemove, onPaste, onMark, onRetryChart, onScroll
   }: Props = $props();
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   let palette: ChartOptionsPane;
@@ -63,18 +68,26 @@
   let editRoles = $state<Record<string, EncodingRole>>({});
   let editLayout = $state<BarLayout | null>(null);
   let editGrain = $state<TimeGrain | null>(null);
+  let editCard = $state<MetricCardStyle>({});
+  let editFormula = $state.raw<{ expression: string; label: string } | null>(null);
+  let selectedId = $state('');
+  let clipboard = $state.raw<{ title: string; spec: ChartSpec } | null>(null);
   let editingPlacement = $derived(activeTab?.placements.find((item) => item.id === editingId));
   let editingChart = $derived(charts.find((item) => item.id === editingPlacement?.chartId));
   let editSuggestions = $derived(suggestCharts(editColumns));
   let editSpec = $derived.by((): ChartSpec | null => {
+    if (!editingChart) return null;
+    if (editFormula) return { chart: 'metric', encodings: {}, ...editCard, ...editFormula };
     const pick = editSuggestions.find((item) => item.chart === editType) ?? editSuggestions[0];
-    if (!pick || !editingChart) return null;
+    if (!pick) return null;
     const encodings = applyRoles(pick.encodings, pick.chart, editRoles, editColumns);
     return { ...editingChart.spec, ...pick, encodings,
-      metric: ((pick.chart === 'bar' || pick.chart === 'pie') && encodings.value) || (pick.chart === 'line' && encodings.y)
+      metric: pick.chart === 'metric' ? metricCardOp(editColumns, encodings, editMetric, pick.metric)
+        : ((pick.chart === 'bar' || pick.chart === 'pie') && encodings.value) || (pick.chart === 'line' && encodings.y)
         ? editMetric ?? pick.metric ?? 'avg' : pick.metric,
       layout: pick.chart === 'bar' && encodings.group ? editLayout ?? editingChart.spec.layout ?? 'grouped' : undefined,
-      grain: pick.chart === 'line' ? editGrain ?? editingChart.spec.grain : undefined };
+      grain: pick.chart === 'line' ? editGrain ?? editingChart.spec.grain : undefined,
+      ...(pick.chart === 'metric' ? editCard : {}) };
   });
 
   function editRoleOf(name: string): EncodingRole | null {
@@ -97,6 +110,33 @@
   function setEditRole(name: string, role: EncodingRole) {
     editRoles = { ...editRoles, [name]: role };
     saveEdit();
+  }
+
+  function pickCard(patch: MetricCardStyle) {
+    if (!editingChart) { onSelectCard(patch); return; }
+    editCard = { ...editCard, ...patch };
+    saveEdit();
+  }
+
+  function openFormula() {
+    if (!editingChart) { onOpenFormula(spec); return; }
+    onOpenFormula(editSpec, (expression, label) => { editFormula = { expression, label }; saveEdit(); });
+  }
+
+  function clearFormula() {
+    if (!editingChart) { onClearFormula(); return; }
+    editFormula = null;
+    editType = null;
+    saveEdit();
+  }
+
+  function finishEditing() {
+    editingId = '';
+    editRoles = {};
+    editLayout = null;
+    editGrain = null;
+    editCard = {};
+    editFormula = null;
   }
   let scroller = $state<HTMLDivElement | null>(null);
   let viewportHeight = $state(0);
@@ -177,11 +217,11 @@
     return { x: fitted.x, y: fitted.y, width: fitted.width, height: fitted.height };
   }
 
-  function nextSlot(): Rect {
+  function nextSlot(chart: ChartType | null = spec?.chart ?? null): Rect {
     return fitRect({
       x: 20,
       y: Math.max(20, ...(activeTab?.placements.map((placement) => placement.y + placement.height + 20) ?? [0])),
-      ...DEFAULT_TILE
+      ...(chart === 'metric' ? METRIC_TILE : DEFAULT_TILE)
     });
   }
 
@@ -206,6 +246,8 @@
     editMetric = chart.spec.metric ?? null;
     editLayout = chart.spec.layout ?? null;
     editGrain = chart.spec.grain ?? null;
+    editCard = { align: chart.spec.align, font: chart.spec.font, size: chart.spec.size };
+    editFormula = chart.spec.expression ? { expression: chart.spec.expression, label: chart.spec.label ?? '' } : null;
     editRoles = Object.fromEntries(
       (Object.entries(e) as [EncodingRole, string][])
         .filter(([, value]) => !!value)
@@ -233,7 +275,7 @@
       return;
     }
     onSelectChart(chart);
-    placeAt(pending ?? nextSlot());
+    placeAt(pending ?? nextSlot(chart));
   }
 
   function pickMetric(metric: AggregateMetric) {
@@ -281,6 +323,7 @@
     if (!start) return;
     pending = null;
     editingId = '';
+    selectedId = '';
     draw = { x0: start.x, y0: start.y, x1: start.x, y1: start.y };
     capturePointer(event);
   }
@@ -364,6 +407,7 @@
 
   async function selectTab(id: string) {
     cancelInteractions();
+    selectedId = '';
     extraHeight = 760;
     onSelectTab(id);
     await tick();
@@ -381,15 +425,59 @@
 
   function escape(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
+    // A modal owns the keyboard while it is open, including the Escape that closes it.
+    if (document.querySelector('dialog[open]')) return;
+    selectedId = '';
     if (!pending && !capture) { editingId = ''; return; }
     event.preventDefault();
     cancelInteractions();
   }
+
+  function typing(target: EventTarget | null): boolean {
+    return !!(target as Element | null)?.closest?.('input, textarea, select, [contenteditable="true"]');
+  }
+
+  async function selectPlacement(id: string, focus = false) {
+    selectedId = id;
+    if (!focus) return;
+    await tick();
+    document.getElementById(`tile-move-${id}`)?.focus({ preventScroll: true });
+  }
+
+  /* Copy and paste work on the tile, not the chart: the copy points at the same definition until
+     one of the two is edited, so duplicating a card costs nothing and editing either still forks. */
+  function boardKeys(event: KeyboardEvent) {
+    if (typing(event.target) || pending || document.querySelector('dialog[open]')) return;
+    const meta = event.metaKey || event.ctrlKey;
+    const key = event.key.toLowerCase();
+    const placement = activeTab?.placements.find((item) => item.id === selectedId);
+    if (meta && key === 'c' && placement) {
+      const chart = charts.find((item) => item.id === placement.chartId);
+      if (!chart) return;
+      event.preventDefault();
+      clipboard = { title: chart.title, spec: { ...chart.spec, encodings: { ...chart.spec.encodings } } };
+      return;
+    }
+    if (meta && key === 'v' && clipboard) {
+      event.preventDefault();
+      const rect = placement
+        ? fitRect({ x: placement.x + 24, y: placement.y + 24, width: placement.width, height: placement.height })
+        : nextSlot(clipboard.spec.chart);
+      const pasted = onPaste(clipboard, rect);
+      if (pasted) void selectPlacement(pasted, true);
+      return;
+    }
+    if ((event.key === 'Delete' || event.key === 'Backspace') && placement) {
+      event.preventDefault();
+      selectedId = '';
+      onRemove(placement.id);
+    }
+  }
 </script>
 
-<svelte:window onpointermove={movePointer} onpointerup={finishPointer} onpointercancel={cancelGestures} onblur={cancelGestures} onkeydown={escape} />
+<svelte:window onpointermove={movePointer} onpointerup={finishPointer} onpointercancel={cancelGestures} onblur={cancelGestures} onkeydown={(event) => { escape(event); boardKeys(event); }} />
 <section class="dashboard" aria-label="Dashboard">
-  <p id="dashboard-edit-hint" class="sr-only">Shift-click a chart or focus its title and press Shift+Enter to edit it.</p>
+  <p id="dashboard-edit-hint" class="sr-only">Shift-click a chart or focus its title and press Shift+Enter to edit it. A selected chart copies with Control or Command C, pastes with V, and clears with Delete.</p>
   <header class="dashboard-bar">
     <div class="tabs" role="tablist" aria-label="Dashboards">
       {#each tabs as tab, index (tab.id)}
@@ -409,8 +497,9 @@
       {columnSearch} {setColumnSearch} {columns} selected={editingChart ? editColumns : selected}
       onToggleColumn={toggleColumn}
       suggestions={editingChart ? editSuggestions : suggestions} spec={editingChart ? editSpec : spec}
-      editingTitle={editingChart?.title} onFinishEditing={() => { editingId = ''; editRoles = {}; editLayout = null; editGrain = null; }}
+      editingTitle={editingChart?.title} onFinishEditing={finishEditing}
       onSelectChart={pickChart} onSelectMetric={pickMetric}
+      onSelectCard={pickCard} onOpenFormula={openFormula} onClearFormula={clearFormula}
       onSelectLayout={editingChart ? setEditLayout : onSelectLayout}
       onSelectGrain={editingChart ? setEditGrain : onSelectGrain}
       activeGrain={editingChart ? (editSpec?.grain ?? null) : activeGrain}
@@ -432,17 +521,20 @@
           {@const shown = fitPlacement(draft?.id === placement.id ? draft : placement)}
           {@const chart = charts.find((item) => item.id === placement.chartId)}
           {#if chart}
-            <article class="tile" class:editing={editingPlacement?.id === placement.id}
-              onpointerdowncapture={(event) => shiftEdit(event, placement)} onclickcapture={(event) => shiftEdit(event, placement)}
+            <article class="tile" class:metric={chart.spec.chart === 'metric'} class:editing={editingPlacement?.id === placement.id}
+              class:selected={selectedId === placement.id}
+              onpointerdowncapture={(event) => { selectedId = placement.id; shiftEdit(event, placement); }}
+              onfocusin={() => selectedId = placement.id}
+              onclickcapture={(event) => shiftEdit(event, placement)}
               style:left={`${shown.x}px`} style:top={`${shown.y}px`} style:width={`${shown.width}px`} style:height={`${shown.height}px`}>
               <header>
-                <EditableName value={chart.title} label="Chart title" onSave={(title) => onRenameChart(chart.id, title)} onEdit={cancelGestures} class="move" aria-label={`Move ${chart.title}`} aria-describedby="dashboard-edit-hint" onpointerdown={(event) => startGesture(event, shown, 'move')} onlostpointercapture={lostCapture} onkeydown={(event) => {
+                <EditableName value={chart.title} label="Chart title" onSave={(title) => onRenameChart(chart.id, title)} onEdit={cancelGestures} class="move" id={`tile-move-${placement.id}`} aria-label={`Move ${chart.title}`} aria-describedby="dashboard-edit-hint" onpointerdown={(event) => startGesture(event, shown, 'move')} onlostpointercapture={lostCapture} onkeydown={(event) => {
                   if (event.shiftKey && event.key === 'Enter') { event.preventDefault(); startEditing(placement); }
                   else keyboardLayout(event, shown);
                 }} />
                 <IconButton type="button" glyph="×" label={`Remove ${chart.title}`} onclick={() => onRemove(placement.id)} />
               </header>
-              <div class="chart"><ChartView spec={chart.spec} data={chartStates[chart.id]?.data ?? null} loading={chartStates[chart.id]?.loading ?? false} error={chartStates[chart.id]?.error ?? ''} {count} {compact} {chartTheme} {binLabel} onMark={(mark) => onMark(chart.id, mark)} onRetry={() => onRetryChart(chart.id)} /></div>
+              <div class="chart"><ChartView spec={chart.spec} data={chartStates[chart.id]?.data ?? null} loading={chartStates[chart.id]?.loading ?? false} error={chartStates[chart.id]?.error ?? ''} {count} {compact} {chartTheme} {binLabel} frameTitle={chart.title} onMark={(mark) => onMark(chart.id, mark)} onRetry={() => onRetryChart(chart.id)} /></div>
               <button type="button" class="resize" aria-label={`Resize ${chart.title}`} title="Resize with arrow keys or drag" onpointerdown={(event) => startGesture(event, shown, 'resize')} onlostpointercapture={lostCapture} onkeydown={(event) => keyboardLayout(event, shown, true)}><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m5 13 8-8M10 13l3-3" fill="none" stroke="currentColor" stroke-width="1.5" /></svg></button>
             </article>
           {/if}
@@ -486,6 +578,9 @@
   .layout .canvas-surface { cursor: crosshair; touch-action: none; background-image: radial-gradient(var(--line-strong) 1px, transparent 1px); background-size: 24px 24px; }
   .tile { position: absolute; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface); }
   .tile.editing { border-color: var(--action); box-shadow: inset 0 0 0 1px var(--action); }
+  .tile.selected:not(.editing) { border-color: var(--action); box-shadow: 0 0 0 3px var(--action-tint); }
+  .tile.metric > header { background: transparent; border-bottom-color: transparent; }
+  .tile.metric .chart { padding: 0 10px 12px; }
   .tile > header { flex: none; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--surface-2); cursor: default; }
   .tile > header strong, .tile :global(.move) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12.5px var(--font-ui); color: var(--ink); }
   .tile :global(.move) { height: 100%; padding: 0; border: 0; background: transparent; text-align: left; cursor: move; touch-action: none; }

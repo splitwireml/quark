@@ -869,6 +869,9 @@ def test_filter_operators_and_bound_values(client):
         ({"column": "value", "operator": "is_null"}, 1),
         ({"column": "value", "operator": "not_null"}, 2),
         ({"column": "value", "operator": ">", "value": 1}, 1),
+        ({"column": "value", "operator": "between", "value": [1, 2]}, 2),
+        ({"column": "value", "operator": "between", "value": ["1", "2"]}, 2),
+        ({"column": "name", "operator": "between", "value": ["alpha", "alpine"]}, 2),
     ]
     for condition, expected in checks:
         response = client.post(url, json={"filters": [condition]})
@@ -880,6 +883,8 @@ def test_filter_operators_and_bound_values(client):
     assert client.post(url, json={"filters": [{"column": "value", "operator": "contains", "value": "1"}]}).status_code == 422
     assert client.post(url, json={"filters": [{"column": "name", "operator": "="}]}).status_code == 422
     assert client.post(url, json={"filters": [{"column": "value", "operator": ">", "value": "not-a-number"}]}).status_code == 422
+    for bounds in ([], [1], [1, 2, 3], [1, None], "1,2"):
+        assert client.post(url, json={"filters": [{"column": "value", "operator": "between", "value": bounds}]}).status_code == 422
     assert client.post(f"/api/nodes/{node['id']}/datasets/missing/query", json={}).status_code == 404
 
 
@@ -2025,6 +2030,55 @@ def test_visualize_bar_aggregates_numeric_measure(client):
     minimum = client.post(base + "/visualize", json={"spec": {"chart": "bar", "encodings": {"category": "region", "value": "amount"}, "metric": "min"}})
     mins = {row["label"]: row["value"] for row in minimum.json()["rows"]}
     assert mins == {"east": 10, "west": 40}
+
+
+def test_visualize_metric_card_reduces_a_column_to_one_value(client):
+    node = upload(client, "card.csv", b"region,amount\neast,10\neast,30\nwest,40\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'card')['id']}"
+
+    def metric(spec):
+        response = client.post(base + "/visualize", json={"spec": spec})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    total = metric({"chart": "metric", "encodings": {"value": "amount"}, "metric": "sum"})
+    assert total == {"chart": "metric", "value": 80, "rows": 3, "elapsed_ms": total["elapsed_ms"]}
+    assert metric({"chart": "metric", "encodings": {"value": "amount"}, "metric": "avg"})["value"] == 80 / 3
+    assert metric({"chart": "metric", "encodings": {"value": "region"}, "metric": "distinct"})["value"] == 2
+    assert metric({"chart": "metric", "encodings": {}})["value"] == 3
+    filtered = client.post(base + "/visualize", json={
+        "spec": {"chart": "metric", "encodings": {"value": "amount"}, "metric": "sum"},
+        "filters": [{"column": "region", "operator": "=", "value": "east"}],
+    })
+    assert filtered.json()["value"] == 40
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "metric", "encodings": {"value": "region"}, "metric": "sum"}}).status_code == 422
+    assert client.post(base + "/visualize", json={
+        "spec": {"chart": "metric", "encodings": {"value": "missing"}, "metric": "count"}}).status_code == 422
+
+
+def test_visualize_metric_formula_runs_read_only_aggregates(client):
+    node = upload(client, "formula.csv", b"region,amount\neast,10\neast,30\nwest,40\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'formula')['id']}"
+
+    def post(spec, **extra):
+        return client.post(base + "/visualize", json={"spec": spec, **extra})
+
+    card = post({"chart": "metric", "expression": 'sum("amount") / count(*)'})
+    assert card.status_code == 200, card.text
+    assert card.json()["value"] == 80 / 3
+    east = post({"chart": "metric", "expression": "count(*) FILTER (WHERE \"region\" = 'east')"})
+    assert east.json()["value"] == 2
+    # The expression wins over the operation chips, and the filters still bind around it.
+    filtered = post(
+        {"chart": "metric", "expression": 'max("amount")', "encodings": {"value": "amount"}, "metric": "sum"},
+        filters=[{"column": "region", "operator": "=", "value": "east"}],
+    )
+    assert filtered.json()["value"] == 30
+    assert post({"chart": "metric", "expression": "sum(?)"}).status_code == 422
+    assert post({"chart": "metric", "expression": "1); DROP TABLE formula; SELECT (1"}).status_code == 422
+    assert post({"chart": "metric", "expression": 'sum("missing")'}).status_code == 422
+    assert post({"chart": "metric", "expression": '"amount"'}).status_code == 422
 
 
 def test_visualize_box_tukey_whiskers_outliers_and_groups(client):

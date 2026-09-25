@@ -7,7 +7,8 @@
   import ChartLegend from './ChartLegend.svelte';
   import LineChart from './LineChart.svelte';
   import PieChart from './PieChart.svelte';
-  import { metricTitle } from '../../lib/visualize';
+  import MetricCard from './MetricCard.svelte';
+  import { metricCardTitle, metricTitle } from '../../lib/visualize';
   import type { AggregateCount, BoxGroup, ChartMark, ChartSpec, HistogramBin, VisualizeResponse } from '../../lib/types';
 
   type Props = {
@@ -21,9 +22,10 @@
     binLabel: (bin: HistogramBin) => string;
     onMark: (mark: ChartMark) => void;
     onRetry?: () => void;
+    frameTitle?: string;
   };
 
-  let { spec, data, loading = false, error = '', count, compact, chartTheme = 'primary', binLabel, onMark, onRetry }: Props = $props();
+  let { spec, data, loading = false, error = '', count, compact, chartTheme = 'primary', binLabel, onMark, onRetry, frameTitle }: Props = $props();
   let xTitle = $derived(
     spec.chart === 'box' ? (spec.encodings.group ?? '')
       : spec.chart === 'scatter' || spec.chart === 'line' ? (spec.encodings.x ?? '')
@@ -105,8 +107,11 @@
           items={data.series.map((line, index) => ({ label: line.label, color: `var(--chart-group-${(index % 6) + 1})` }))} />
       {/if}
     </div>
+  {:else if data?.chart === 'metric'}
+    <MetricCard value={data.value} rows={data.rows} title={metricCardTitle(spec)} {count} {compact} {frameTitle}
+      align={spec.align} font={spec.font} size={spec.size} />
   {:else}
-    <div class="state"><strong>This chart is not available yet</strong><span>Bar, line, pie, histogram, box, and scatter are ready for this column mix.</span></div>
+    <div class="state"><strong>This chart is not available yet</strong><span>Bar, line, pie, histogram, box, scatter, and metric are ready for this column mix.</span></div>
   {/if}
   {#if loading && data}<span class="refreshing" role="status">Refreshing chart…</span>{/if}
 </div>

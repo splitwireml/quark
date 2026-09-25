@@ -6,6 +6,9 @@ import {
   chartRoles,
   classifyColumn,
   filtersFromMark,
+  metricCardMetrics,
+  metricCardOp,
+  metricCardTitle,
   niceTicks,
   specFromColumns,
   suggestCharts,
@@ -47,7 +50,7 @@ test('classifies columns by profile kind and integer vs float', () => {
 
 test('one categorical column suggests a count bar, then a pie', () => {
   const suggestion = defaultOf([region]);
-  assert.deepEqual(charts([region]), ['bar', 'pie']);
+  assert.deepEqual(charts([region]), ['bar', 'pie', 'metric']);
   assert.deepEqual(suggestCharts([region])[1].encodings, { category: 'region' });
   assert.equal(suggestion.chart, 'bar');
   assert.deepEqual(suggestion.encodings, { category: 'region' });
@@ -55,21 +58,42 @@ test('one categorical column suggests a count bar, then a pie', () => {
 });
 
 test('one discrete column prefers a count bar and offers histogram and box', () => {
-  assert.deepEqual(charts([rating]), ['bar', 'histogram', 'box']);
+  assert.deepEqual(charts([rating]), ['bar', 'histogram', 'box', 'metric']);
   assert.deepEqual(defaultOf([rating]).encodings, { category: 'rating' });
   assert.deepEqual(suggestCharts([rating])[1].encodings, { value: 'rating' });
   assert.deepEqual(suggestCharts([rating])[2].encodings, { value: 'rating' });
 });
 
 test('one continuous column prefers histogram then box', () => {
-  assert.deepEqual(charts([price]), ['histogram', 'box']);
+  assert.deepEqual(charts([price]), ['histogram', 'box', 'metric']);
   assert.deepEqual(defaultOf([price]).encodings, { value: 'price' });
 });
 
 test('one date column prefers a time histogram then a year bar', () => {
-  assert.deepEqual(charts([day]), ['histogram', 'bar']);
+  assert.deepEqual(charts([day]), ['histogram', 'bar', 'metric']);
   assert.deepEqual(defaultOf([day]).encodings, { value: 'day' });
   assert.deepEqual(suggestCharts([day])[1].encodings, { category: 'day' });
+});
+
+test('a single column also offers a metric card with operations its type can produce', () => {
+  const [metric] = suggestCharts([price]).filter((item) => item.chart === 'metric');
+  assert.deepEqual(metric, { chart: 'metric', encodings: { value: 'price' }, metric: 'sum' });
+  assert.equal(suggestCharts([region]).at(-1).metric, 'count');
+  assert.deepEqual(chartRoles('metric'), ['value']);
+  assert.deepEqual(metricCardMetrics(price).map((item) => item.value), ['sum', 'avg', 'median', 'stddev', 'min', 'max', 'count', 'distinct']);
+  assert.deepEqual(metricCardMetrics(day).map((item) => item.value), ['min', 'max', 'count', 'distinct']);
+  assert.deepEqual(metricCardMetrics(region).map((item) => item.value), ['count', 'distinct']);
+  assert.deepEqual(metricCardMetrics(undefined).map((item) => item.value), ['count']);
+});
+
+test('a metric card names itself from its label, its formula, or its operation', () => {
+  assert.equal(metricCardTitle({ chart: 'metric', encodings: { value: 'price' }, metric: 'sum' }), 'Sum of price');
+  assert.equal(metricCardTitle({ chart: 'metric', encodings: {}, expression: 'count(*) / 2' }), 'count(*) / 2');
+  assert.equal(metricCardTitle({ chart: 'metric', encodings: {}, expression: 'count(*) / 2', label: 'Half the rows' }), 'Half the rows');
+  assert.equal(metricCardTitle({ chart: 'metric', encodings: {}, metric: 'count' }), 'Rows');
+  // An operation kept from an earlier column falls back rather than asking the backend for a 422.
+  assert.equal(metricCardOp([region], { value: 'region' }, 'median', 'count'), 'count');
+  assert.equal(metricCardOp([price], { value: 'price' }, 'median', 'count'), 'median');
 });
 
 test('categorical plus continuous defaults to an aggregated bar', () => {

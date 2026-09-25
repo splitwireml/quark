@@ -1,19 +1,33 @@
+import { chartMeta, metricCardTitle } from './visualize.ts';
 import type { ChartSpec, DashboardDataset, DashboardPlacement, DashboardSelection, DashboardTab, FilterCondition } from './types';
 
 export const DASHBOARD_STORAGE_KEY = 'quark.dashboards.v1';
 export const MIN_TILE = { width: 64, height: 48 } as const;
 export const DEFAULT_TILE = { width: 560, height: 360 } as const;
+export const METRIC_TILE = { width: 260, height: 160 } as const;
 
 export function emptyDashboardDataset(datasetId: string): DashboardDataset {
   return { datasetId, activeTabId: '', charts: [], tabs: [] };
 }
 
 export function chartTitle(spec: ChartSpec): string {
+  if (spec.chart === 'metric') return metricCardTitle(spec);
   const fields = [
     spec.encodings.category, spec.encodings.x, spec.encodings.value, spec.encodings.y,
     spec.encodings.group, spec.encodings.size, spec.encodings.color, spec.encodings.pattern
   ].filter(Boolean);
   return `${spec.chart[0].toUpperCase()}${spec.chart.slice(1)} · ${fields.join(' × ') || 'Chart'}`;
+}
+
+/* Alignment, font and number size change how a metric card is set, not what it asks the backend,
+   so a card restyled mid-dashboard must not refetch every tile. */
+export function sameQuery(left: ChartSpec | undefined, right: ChartSpec | undefined): boolean {
+  const query = (spec: ChartSpec | undefined) => {
+    if (!spec) return null;
+    const { align: _align, font: _font, size: _size, ...rest } = spec;
+    return JSON.stringify(rest);
+  };
+  return query(left) === query(right);
 }
 
 export function normalizeFilters(filters: FilterCondition[]): FilterCondition[] {
@@ -169,7 +183,7 @@ export function readDashboards(value: string | null): DashboardDataset[] {
           const value = chart as unknown as Record<string, unknown>;
           const spec = value.spec as Record<string, unknown> | undefined;
           return typeof value.id === 'string' && typeof value.title === 'string' && !!spec
-            && ['bar', 'histogram', 'box', 'scatter', 'line'].includes(String(spec.chart))
+            && String(spec.chart) in chartMeta
             && !!spec.encodings && typeof spec.encodings === 'object';
         })
         && Array.isArray(dataset.tabs) && dataset.tabs.every((tab) => {
