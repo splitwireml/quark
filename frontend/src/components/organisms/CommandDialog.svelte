@@ -71,7 +71,7 @@
   .simple h2 { font-size: 13px; }
   .simple-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; padding: 12px; }
   .simple-grid button { grid-column: span 2; }
-  .simple-grid button[data-choice]:not(.utility) { min-height: 84px; padding: 10px 6px; gap: 5px; flex-direction: column; justify-content: center; text-align: center; background: rgb(255 255 255 / 24%); border-color: rgb(255 255 255 / 40%); }
+  .simple-grid button[data-choice]:not(.utility) { min-height: 84px; padding: 10px 6px; gap: 5px; flex-direction: column; justify-content: center; text-align: center; background: var(--glass-tile); border-color: var(--glass-line); }
   .simple-grid button[data-operation='aggregate'] { grid-column: 3 / span 2; grid-row: 1; }
   .simple-grid button[data-operation='joins'], .simple-grid button[data-operation='columns'], .simple-grid button[data-operation='dedupe'] { grid-row: 2; }
   .simple-grid kbd { font-size: 10px; }
@@ -96,18 +96,18 @@
   .compact .list small { flex: none; font: 9px var(--font-mono); align-self: center; }
   .compact .list p { padding: 6px 8px; margin: 0; color: var(--muted); font-size: 12px; }
   dialog.wheel {
-    background: linear-gradient(135deg, rgb(255 255 255 / 52%), rgb(233 240 252 / 24%) 60%, rgb(255 255 255 / 40%));
+    background: linear-gradient(135deg, var(--glass-fill), var(--glass-fill-soft) 60%, var(--glass-fill));
     backdrop-filter: blur(14px) saturate(1.6);
     -webkit-backdrop-filter: blur(14px) saturate(1.6);
-    border-color: rgb(255 255 255 / 76%);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), 0 24px 64px -20px rgb(24 42 72 / 38%);
+    border-color: var(--glass-line-strong);
+    box-shadow: inset 0 1px 0 var(--glass-line-strong), 0 24px 64px -20px rgb(24 42 72 / 38%);
   }
-  dialog.wheel::backdrop { background: rgb(28 42 65 / 10%); }
-  .wheel header, .wheel footer { border-color: rgb(255 255 255 / 48%); }
-  .wheel button[data-choice].active { background: rgb(255 255 255 / 65%); border-color: rgb(255 255 255 / 90%); box-shadow: 0 5px 14px -6px rgb(26 48 85 / 28%); color: var(--action-dark); }
+  dialog.wheel::backdrop { background: var(--glass-scrim); }
+  .wheel header, .wheel footer { border-color: var(--glass-line); }
+  .wheel button[data-choice].active { background: var(--glass-active); border-color: var(--glass-line-strong); box-shadow: 0 5px 14px -6px rgb(26 48 85 / 28%); color: var(--action-dark); }
   .wheel .center span { font-weight: 600; }
   .wheel small, .wheel kbd, .wheel footer { color: var(--ink-2); }
-  @supports not (backdrop-filter: blur(1px)) { dialog.wheel { background: rgb(243 247 253 / 96%); } }
+  @supports not (backdrop-filter: blur(1px)) { dialog.wheel { background: var(--glass-fallback); } }
   @media (prefers-reduced-transparency: reduce) { dialog.wheel { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; } }
   header, footer { padding: 16px 20px; }
   header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }

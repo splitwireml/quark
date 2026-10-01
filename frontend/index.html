@@ -3,9 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#EDF0F4" />
+    <meta name="theme-color" content="#EDF0F4" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101319" media="(prefers-color-scheme: dark)" />
     <meta name="description" content="Quark local data explorer" />
     <title>Quark</title>
+    <!-- The scheme is resolved before first paint: waiting for the app to mount would show
+         a white window to someone who chose dark. Kept inline and tiny for that reason. -->
+    <script>
+      try {
+        var stored = localStorage.getItem('quark.color-scheme');
+        var pref = stored === 'light' || stored === 'dark' ? stored : 'system';
+        document.documentElement.dataset.theme =
+          pref === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : pref;
+      } catch (e) { document.documentElement.dataset.theme = 'light'; }
+    </script>
   </head>
   <body>
     <div id="app"></div>

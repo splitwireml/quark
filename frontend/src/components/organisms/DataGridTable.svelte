@@ -32,6 +32,10 @@
     filters: FilterCondition[];
     columnLabelParts: (name: string) => LabelPart[];
     isColumnProtected: (name: string) => boolean;
+    generatedColumns: Record<string, string>;
+    canPasteColumn: boolean;
+    onCopyColumn: (column: ColumnInfo) => void;
+    onPasteColumn: (column: ColumnInfo) => void;
     onSort: (column: ColumnInfo) => void;
     onFilter: (column: ColumnInfo, trigger?: HTMLButtonElement) => void;
     onProfile: (column: ColumnInfo, trigger?: HTMLButtonElement) => void;
@@ -85,6 +89,7 @@
 
   let {
     columns, bodyColumns, rows, rowOffset, pinnedColumns, onTogglePin, caption, rowDensity, fitColumnsToContent, canQuery, canInsert, canEdit, sorts, filters, columnLabelParts, isColumnProtected,
+    generatedColumns, canPasteColumn, onCopyColumn, onPasteColumn,
     onSort, onFilter, onProfile, onHide, display, cellTitle,
     selectedColumn, onSelectColumn, selectedCell, editingCell, editSaving, onSelectCell, onExpandCell, onFilterCategoricalCell, onCellKeydown, onCollapseCell,
     onEditValue, onCommitEdit, onCancelEdit, aggregateRowTones, setTableScroll, onInsert, onModify, onDuplicate, onRename,
@@ -175,6 +180,10 @@
 
   async function openContextMenu(event: MouseEvent, column: ColumnInfo) {
     event.preventDefault();
+    if (event.shiftKey && event.button === 2 && canInsert && generatedColumns[column.name] !== undefined) {
+      onModify(column);
+      return;
+    }
     contextMenu = { column, x: event.clientX, y: event.clientY };
     await tick();
     if (!contextMenu || !contextMenuElement) return;
@@ -429,9 +438,19 @@
   // The grid keeps its selection in state, not in a DOM range, so the browser has nothing to
   // copy and never fires a copy event. The shortcut writes to the clipboard itself instead.
   async function copyKeydown(event: KeyboardEvent) {
-    if (event.key !== 'c' || !(event.metaKey || event.ctrlKey) || editingCell) return;
+    if (!(event.metaKey || event.ctrlKey) || editingCell || (event.target as HTMLElement).closest('input, textarea')) return;
+    const selected = columns.find((column) => column.name === selectedColumn);
+    if (event.key.toLowerCase() === 'v' && selected && canPasteColumn && canInsert) {
+      event.preventDefault();
+      onPasteColumn(selected);
+      return;
+    }
+    if (event.key.toLowerCase() !== 'c') return;
     const matrix = rangeMatrix();
-    if (!matrix) return;
+    if (!matrix) {
+      if (selected) { event.preventDefault(); onCopyColumn(selected); }
+      return;
+    }
     event.preventDefault();
     const text = rangeToText(matrix);
     try {
@@ -530,7 +549,8 @@
           <ColumnHeaderCell
             {column}
             selected={column.name === selectedColumn}
-            onselect={() => onSelectColumn(column.name)}
+            generated={generatedColumns[column.name] !== undefined}
+            onselect={() => { anchor = null; head = null; onSelectColumn(column.name); }}
             {fitColumnsToContent}
             labelParts={columnLabelParts(column.name)}
             sort={sortFor(column.name)}
@@ -600,6 +620,7 @@
               class:expanded-cell={expanded}
               class:editing-cell={editing}
               class:in-range={inRange}
+              class:generated={generatedColumns[column.name] !== undefined}
               class:pinned={pinLefts.has(column.name)}
               style:left={pinLefts.get(column.name) === undefined ? undefined : `${pinLefts.get(column.name)}px`}
               onpointerdown={(event) => { if (inCurrent) startSelect(event, index, columnIndex); }}
@@ -666,7 +687,9 @@
       <button role="menuitem" onclick={() => runContextAction(() => onFilter(contextMenu!.column))}>Filter</button>
       {#if contextMenu.column.profile_kind}<button role="menuitem" onclick={() => runContextAction(() => onProfile(contextMenu!.column))}>Profile</button>{/if}
     {/if}
-    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onModify(contextMenu!.column))}>Modify</button>
+    <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onModify(contextMenu!.column))}>{generatedColumns[contextMenu.column.name] !== undefined ? 'Edit formula' : 'Modify'}{#if generatedColumns[contextMenu.column.name] !== undefined}<kbd>⇧ right-click</kbd>{/if}</button>
+    <button role="menuitem" onclick={() => runContextAction(() => onCopyColumn(contextMenu!.column))}>Copy column<kbd>⌘ C</kbd></button>
+    <button role="menuitem" disabled={!canInsert || !canPasteColumn} onclick={() => runContextAction(() => onPasteColumn(contextMenu!.column))}>Paste column after<kbd>⌘ V</kbd></button>
     <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onDuplicate(contextMenu!.column))}>Duplicate</button>
     <button role="menuitem" disabled={!canInsert} onclick={() => runContextAction(() => onRename(contextMenu!.column))}>Rename<kbd>dbl-click</kbd></button>
     <button role="menuitem" disabled={isColumnProtected(contextMenu.column.name) || columns.length <= 1} onclick={() => runContextAction(() => onHide(contextMenu!.column.name))}>Hide<kbd>⇧ dbl-click</kbd></button>
@@ -771,8 +794,10 @@
   tbody tr.pending { pointer-events: none; }
   tbody tr.aggregate-row td, tbody tr.aggregate-row .gutter { background: var(--surface); }
   tbody tr.aggregate-row.aggregate-row-alt td, tbody tr.aggregate-row.aggregate-row-alt .gutter { background: var(--surface-inset); }
+  tbody tr td.generated, tbody tr.striped td.generated, tbody tr.aggregate-row td.generated { background: color-mix(in srgb, var(--action) 3%, var(--surface)); }
   /* Hover shades the cell under the pointer; holding shift widens it to the whole row. */
   tbody td[data-column]:hover { background: var(--action-tint); }
+  tbody td.generated[data-column]:hover { background: var(--action-tint); }
   table.row-hover tbody tr:hover td[data-column],
   tbody tr:has(> .gutter:hover) td[data-column] { background: var(--action-tint); }
   tbody td[data-column].in-range { background: color-mix(in srgb, var(--action) 12%, var(--surface)); }

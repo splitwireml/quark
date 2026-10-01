@@ -1,8 +1,12 @@
 import type { TableRows } from './table-rows';
 
-export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=';
+export type FilterOperator = '=' | '!=' | 'in' | 'is_null' | 'not_null' | 'contains' | 'starts_with' | 'ends_with' | '>' | '>=' | '<' | '<=' | 'between';
 export type SortDirection = 'asc' | 'desc';
 export type ProfileKind = 'numeric' | 'categorical' | 'date';
+export type VizKind = 'categorical' | 'discrete' | 'continuous' | 'date';
+export type ChartType = 'bar' | 'histogram' | 'box' | 'scatter' | 'line' | 'pie' | 'metric';
+export type BarLayout = 'grouped' | 'stacked' | 'stacked100';
+export type TimeGrain = 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
 export type AggregateCount = number | string;
 
 export interface SourceSummary {
@@ -194,6 +198,188 @@ export type ColumnStats = NumericColumnStats | CategoricalColumnStats | DateColu
 
 export type AggregateMetric = 'count' | 'distinct' | 'min' | 'max' | 'sum' | 'avg' | 'median' | 'stddev';
 export type AggregateRecipeItem = { id: number; column: string; metrics: AggregateMetric[] | null };
+
+export interface ChartEncodings {
+  x?: string;
+  y?: string;
+  category?: string;
+  value?: string;
+  group?: string;
+  size?: string;
+  color?: string;
+  pattern?: string;
+}
+
+export type EncodingRole = keyof ChartEncodings;
+
+export type MetricAlign = 'start' | 'center' | 'end';
+export type MetricFont = 'sans' | 'mono';
+export type MetricSize = 'fit' | 'sm' | 'md' | 'lg';
+
+export interface ChartSpec {
+  chart: ChartType;
+  encodings: ChartEncodings;
+  metric?: AggregateMetric;
+  density?: boolean;
+  layout?: BarLayout;
+  grain?: TimeGrain;
+  /* Metric cards only: an own aggregate expression with its caption, and how the card sets the number. */
+  expression?: string;
+  label?: string;
+  align?: MetricAlign;
+  font?: MetricFont;
+  size?: MetricSize;
+}
+
+export type MetricCardStyle = { align?: MetricAlign; font?: MetricFont; size?: MetricSize };
+export type MetricFormulaApply = (expression: string, label: string) => void;
+
+export interface DashboardChart {
+  id: string;
+  title: string;
+  spec: ChartSpec;
+}
+
+export interface DashboardPlacement {
+  id: string;
+  chartId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DashboardTab {
+  id: string;
+  name: string;
+  scrollTop: number;
+  placements: DashboardPlacement[];
+}
+
+export interface DashboardDataset {
+  datasetId: string;
+  activeTabId: string;
+  charts: DashboardChart[];
+  tabs: DashboardTab[];
+}
+
+export interface DashboardSelection {
+  chartId: string;
+  filters: FilterCondition[];
+}
+
+export interface ChartSuggestion {
+  chart: ChartType;
+  encodings: ChartEncodings;
+  metric?: AggregateMetric;
+}
+
+export type ChartMark =
+  | { kind: 'category'; value: string | boolean | number; series?: string | boolean | number }
+  | { kind: 'bin'; lower: NumericValue; upper: NumericValue; last?: boolean }
+  | { kind: 'region'; xMin: NumericValue; xMax: NumericValue; yMin: NumericValue; yMax: NumericValue };
+
+export interface BarVisualizeRow {
+  label: string | boolean | number;
+  value: AggregateCount;
+  n?: AggregateCount;
+  values?: AggregateCount[];
+}
+
+export interface BarVisualizeResponse {
+  chart: 'bar';
+  rows: BarVisualizeRow[];
+  series: string[] | null;
+  other_count: AggregateCount;
+  elapsed_ms: number;
+}
+
+export interface PieVisualizeResponse extends Omit<BarVisualizeResponse, 'chart'> { chart: 'pie' }
+
+export interface HistogramVisualizeResponse {
+  chart: 'histogram';
+  bins: HistogramBin[];
+  series?: { label: string; bins: HistogramBin[] }[];
+  elapsed_ms: number;
+}
+
+export interface BoxGroup {
+  label: string | boolean | number;
+  p25: NumericValue;
+  median: NumericValue;
+  p75: NumericValue;
+  whisker_low: NumericValue;
+  whisker_high: NumericValue;
+  outliers: NumericValue[];
+  count: AggregateCount;
+}
+
+export interface BoxVisualizeResponse {
+  chart: 'box';
+  groups: BoxGroup[];
+  elapsed_ms: number;
+}
+
+export interface ScatterPoint {
+  x: NumericValue;
+  y: NumericValue;
+  color?: string | number | boolean | null;
+  size?: NumericValue;
+  shape?: string | number | boolean | null;
+}
+
+export interface ScatterVisualizeResponse {
+  chart: 'scatter';
+  points: ScatterPoint[];
+  total_points: AggregateCount;
+  color_kind?: 'categorical' | 'numeric';
+  color_domain?: [NumericValue, NumericValue];
+  color_labels?: string[];
+  shape_labels?: string[];
+  size_domain?: [NumericValue, NumericValue];
+  elapsed_ms: number;
+}
+
+export interface LinePoint { x: string; y: NumericValue }
+export interface LineSeries { label: string; points: LinePoint[] }
+
+export interface LineVisualizeResponse {
+  chart: 'line';
+  grain: TimeGrain;
+  series: LineSeries[];
+  elapsed_ms: number;
+}
+
+export interface MetricVisualizeResponse {
+  chart: 'metric';
+  value: string | number | boolean | null;
+  rows: AggregateCount;
+  elapsed_ms: number;
+}
+
+export type VisualizeResponse =
+  | BarVisualizeResponse
+  | PieVisualizeResponse
+  | HistogramVisualizeResponse
+  | BoxVisualizeResponse
+  | ScatterVisualizeResponse
+  | LineVisualizeResponse
+  | MetricVisualizeResponse;
+
+export interface ChartHover {
+  title: string;
+  lines: string[];
+  hint?: string;
+}
+
+export interface VisualizeRequest extends QueryRequest {
+  spec: ChartSpec;
+}
+
+export interface SqlVisualizeRequest extends SqlQueryRequest {
+  spec: ChartSpec;
+}
+
 export type RowDensity = 'compact' | 'default' | 'comfortable';
 export type DistributionMode = 'count' | 'percent';
 

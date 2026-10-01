@@ -38,9 +38,9 @@
   .btn.primary {
     border-color: var(--ink-fill);
     background: var(--ink-fill);
-    color: #FFFFFF;
+    color: var(--on-fill);
   }
-  .btn.primary:hover:not(:disabled) { background: #2B3444; border-color: #2B3444; }
+  .btn.primary:hover:not(:disabled) { background: var(--ink-fill-hover); border-color: var(--ink-fill-hover); }
 
   .btn.ghost {
     border-color: transparent;

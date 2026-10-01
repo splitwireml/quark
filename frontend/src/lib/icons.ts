@@ -28,4 +28,9 @@ export type IconName =
   | 'sort-desc'
   | 'filter'
   | 'histogram'
+  | 'bar'
+  | 'box'
+  | 'scatter'
+  | 'line'
+  | 'pie'
   | 'pin';

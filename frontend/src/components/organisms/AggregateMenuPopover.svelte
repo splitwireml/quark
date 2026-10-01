@@ -153,7 +153,7 @@
     font-size: 11px;
     color: var(--muted);
   }
-  .metric-chip.on { border-color: var(--ink-fill); background: var(--ink-fill); color: #fff; }
+  .metric-chip.on { border-color: var(--ink-fill); background: var(--ink-fill); color: var(--on-fill); }
   @keyframes recipe-in { from { opacity: 0; transform: translateY(-3px) scale(0.96); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .column-role { animation: none; } }
 </style>

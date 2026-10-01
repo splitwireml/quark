@@ -111,7 +111,7 @@
   .option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 7px; border: 0; border-radius: var(--radius-md); background: transparent; text-align: left; }
   .option:hover, .option:focus-visible { background: var(--surface-hover); }
   .option.on { background: var(--action-tint); color: var(--action-dark); }
-  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border: 1px solid var(--glyph); border-radius: 2px; color: #FFFFFF; font-size: 8px; }
+  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border: 1px solid var(--glyph); border-radius: 2px; color: var(--on-fill); font-size: 8px; }
   .option.on .box { border-color: var(--action); background: var(--action); }
   .option-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--font-mono); }
   .option small { flex: none; min-width: 16px; text-align: center; font: 9px var(--font-mono); color: var(--action-dark); }

@@ -9,9 +9,12 @@
     operators: { value: FilterOperator; label: string }[];
     operator: FilterOperator;
     value: string;
+    upperValue: string;
     setOperator: (v: FilterOperator) => void;
     setValue: (v: string) => void;
+    setUpperValue: (v: string) => void;
     onblurValue?: () => void;
+    onblurUpperValue?: () => void;
     valueInput?: HTMLInputElement | HTMLSelectElement | null;
     onSubmitFilter: (event: SubmitEvent) => void;
     categorySearch: string;
@@ -33,7 +36,7 @@
   };
 
   let {
-    column, isText, operators, operator, value, setOperator, setValue, onblurValue, valueInput = $bindable(null), onSubmitFilter,
+    column, isText, operators, operator, value, upperValue, setOperator, setValue, setUpperValue, onblurValue, onblurUpperValue, valueInput = $bindable(null), onSubmitFilter,
     categorySearch, setCategorySearch, setCategoryInputRef, onSearchCategories,
     categoryValues, categoriesLoading, categoriesError, categoryTotal, categoryHasMore, onLoadMore,
     selectedCategories, onToggleCategory, onSelectVisible, onClearSelected, onAddNullFilter, count
@@ -85,10 +88,10 @@
   </section>
   <details class="advanced">
     <summary>Advanced condition</summary>
-    <FilterOperatorForm {column} {operators} {operator} {value} {setOperator} {setValue} {onblurValue} bind:valueInput onsubmit={onSubmitFilter} />
+    <FilterOperatorForm {column} {operators} {operator} {value} {upperValue} {setOperator} {setValue} {setUpperValue} {onblurValue} {onblurUpperValue} bind:valueInput onsubmit={onSubmitFilter} />
   </details>
 {:else}
-  <FilterOperatorForm {column} {operators} {operator} {value} {setOperator} {setValue} {onblurValue} bind:valueInput onsubmit={onSubmitFilter} />
+  <FilterOperatorForm {column} {operators} {operator} {value} {upperValue} {setOperator} {setValue} {setUpperValue} {onblurValue} {onblurUpperValue} bind:valueInput onsubmit={onSubmitFilter} />
 {/if}
 
 <style>
@@ -105,7 +108,7 @@
   .row { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 6px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; }
   .row:hover { background: var(--surface-hover); }
   .row input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph); color: #fff; font-size: 8px; }
+  .box { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--glyph); color: var(--on-fill); font-size: 8px; }
   input:checked + .box { background: var(--action); border-color: var(--action); }
   .row span:not(.box) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row small { color: var(--faint); font-family: var(--font-mono); }

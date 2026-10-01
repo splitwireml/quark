@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "frontend/src/components/organisms/DashboardStage.svelte"
+        ],
+        "createdAt": "2026-09-20T19:44:01.295Z",
+        "reason": "Agent: arrange-mode board is a placement canvas; 24px dotted grid only while layoutMode is on"
+      }
+    ]
+  }
+}

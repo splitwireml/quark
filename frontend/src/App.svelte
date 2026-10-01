@@ -9,12 +9,18 @@
   import { buildAggregateSql } from './lib/aggregate-sql';
   import { buildJoinSql } from './lib/join-sql';
   import { buildCellEditSql, buildColumnReplacementSql, buildMutationSql, hasVolatileRowOrder, nextDuplicateColumnName, quoteIdentifier } from './lib/mutation-sql';
+  import { columnFormulas } from './lib/column-formulas';
   import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
   import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
-  import type { AggregateCount, AggregateMetric, AggregateRecipeItem, BaseViewInfo, CategoryValue, ColumnInfo, ColumnStats, DatasetVersionHistory, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, Version, VersionChange, VersionDiff, ViewHistory, WorkbookPreview } from './lib/types';
+  import { applyRoles, chartRoles, classifyColumn, filtersFromMark, metricCardOp, suggestCharts } from './lib/visualize';
+  import { chartTitle, sameQuery, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, METRIC_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
+  import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
+  import type { AggregateCount, AggregateMetric, MetricCardStyle, MetricFormulaApply, AggregateRecipeItem, BaseViewInfo, CategoryValue, ChartMark, ChartSpec, ChartType, ColumnInfo, ColumnStats, DashboardDataset, DashboardPlacement, BarLayout, DashboardSelection, DatasetVersionHistory, EncodingRole, DistributionMode, ExportFormat, ExportOption, FilterCondition, FilterOperator, JoinWorkspaceRequest, JoinWorkspaceResponse, JsonLayout, NodeInfo, ProjectInfo, QueryResponse, RowDensity, SerializableValue, SortCondition, SourceSummary, TimeGrain, Version, VersionChange, VersionDiff, ViewHistory, VisualizeResponse, WorkbookPreview } from './lib/types';
 
-  import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, type ActionMenuMode, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
+  import { editorHighlight, editorTheme } from './lib/editorTheme';
+  import { readThemePreference, resolveScheme, themeStorageKey, type ColorScheme, type ThemePreference } from './lib/theme';
+  import { commandFor, combinationTimeoutMs, operationsFor, shortcuts, toolbarStorageKey, actionMenuStorageKey, chartThemeStorageKey, type ActionMenuMode, type ChartTheme, type CommandPrefix, type ToolbarVisibility } from './lib/commands';
   import CommandHint from './components/molecules/CommandHint.svelte';
   import CommandDialog from './components/organisms/CommandDialog.svelte';
   import SettingsPage from './components/organisms/SettingsPage.svelte';
@@ -38,8 +44,11 @@
   import InspectorPanel from './components/organisms/InspectorPanel.svelte';
   import FilterInspector from './components/organisms/FilterInspector.svelte';
   import ProfileInspector from './components/organisms/ProfileInspector.svelte';
+  import VisualizeStage from './components/organisms/VisualizeStage.svelte';
+  import DashboardStage from './components/organisms/DashboardStage.svelte';
   import WorkbookDialog from './components/organisms/WorkbookDialog.svelte';
   import FormulaMenu from './components/organisms/FormulaMenu.svelte';
+  import MetricFormulaMenu from './components/organisms/MetricFormulaMenu.svelte';
   import ExportMenu from './components/organisms/ExportMenu.svelte';
   import ProjectsScreen from './components/organisms/ProjectsScreen.svelte';
   import AppShell from './components/templates/AppShell.svelte';
@@ -48,7 +57,7 @@
 
   const baseOperators: { value: FilterOperator; label: string }[] = [{ value: '=', label: 'equals' }, { value: '!=', label: 'not equal' }, { value: 'is_null', label: 'is null' }, { value: 'not_null', label: 'is not null' }];
   const textOperators: { value: FilterOperator; label: string }[] = [{ value: 'contains', label: 'contains' }, { value: 'starts_with', label: 'starts with' }, { value: 'ends_with', label: 'ends with' }];
-  const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }];
+  const orderedOperators: { value: FilterOperator; label: string }[] = [{ value: '>', label: 'greater than' }, { value: '>=', label: 'at least' }, { value: '<', label: 'less than' }, { value: '<=', label: 'at most' }, { value: 'between', label: 'between (inclusive)' }];
   const aggregateMetricOptions: { value: AggregateMetric; label: string; numeric?: true; ordered?: true }[] = [{ value: 'count', label: 'Count' }, { value: 'distinct', label: 'Distinct' }, { value: 'min', label: 'Min', ordered: true }, { value: 'max', label: 'Max', ordered: true }, { value: 'sum', label: 'Sum', numeric: true }, { value: 'avg', label: 'Average', numeric: true }, { value: 'median', label: 'Median', numeric: true }, { value: 'stddev', label: 'Std. dev.', numeric: true }];
   type CellMove = 'up' | 'down' | 'left' | 'right' | 'rowStart' | 'rowEnd' | 'pageUp' | 'pageDown' | 'gridStart' | 'gridEnd';
   type JoinStep = 0 | 1 | 2;
@@ -110,6 +119,7 @@
   let filterColumn = $state<ColumnInfo | null>(null);
   let filterOperator = $state<FilterOperator>('=');
   let filterValue = $state('');
+  let filterUpperValue = $state('');
   let columnSearch = $state('');
   let columnMenuSearch = $state('');
   let columnMenuRegex = $state(false);
@@ -209,6 +219,7 @@
   let mutationTarget = $state<{ kind: 'insert'; insertIndex: number; left: string; right: string | null; trigger: HTMLButtonElement } | { kind: 'modify'; column: ColumnInfo } | null>(null);
   let mutationApplying = $state(false);
   let mutationError = $state('');
+  let copiedColumn = $state<{ historyId: string; name: string; expression: string } | null>(null);
   let exportOpen = $state(false);
   let exportFormat = $state<ExportFormat>('csv');
   let exportJsonLayout = $state<JsonLayout>('rows');
@@ -220,6 +231,30 @@
   let exportTrigger = $state<HTMLButtonElement | null>(null);
   let exportRequestId = 0;
   let versionsOpen = $state(false);
+
+  let canvasMode = $state<'rows' | 'chart' | 'dashboard'>('rows');
+  let visualizeColumns = $state.raw<ColumnInfo[]>([]);
+  let visualizeChart = $state<ChartType | null>(null);
+  let visualizeMetric = $state<AggregateMetric | null>(null);
+  let visualizeRoles = $state<Record<string, EncodingRole>>({});
+  let visualizeLayout = $state<BarLayout | null>(null);
+  let visualizeGrain = $state<TimeGrain | null>(null);
+  let visualizeFormula = $state<{ expression: string; label: string } | null>(null);
+  let visualizeCard = $state<MetricCardStyle>({});
+  let metricFormulaDialog = $state<HTMLDialogElement | null>(null);
+  let metricFormulaTarget = $state.raw<{ expression: string; label: string; apply: MetricFormulaApply } | null>(null);
+  let metricFormulaApplying = $state(false);
+  let metricFormulaError = $state('');
+  let visualizeSearch = $state('');
+  let visualizeData = $state.raw<VisualizeResponse | null>(null);
+  let visualizeLoading = $state(false);
+  let visualizeError = $state('');
+  let visualizeRequestId = 0;
+  let dashboardDocuments = $state.raw<DashboardDataset[]>([]);
+  let dashboardSelections = $state.raw<DashboardSelection[]>([]);
+  let dashboardChartStates = $state.raw<Record<string, { data: VisualizeResponse | null; loading: boolean; error: string }>>({});
+  let dashboardRequestId = 0;
+  const implementedCharts = new Set<ChartType>(['bar', 'histogram', 'box', 'scatter', 'line', 'pie', 'metric']);
 
   let queryMode = $state<'builder' | 'sql'>('builder');
   let sqlOpen = $state(false);
@@ -237,6 +272,7 @@
     sqlBase: string; activeSql: string; activeSqlNodeId: string; sqlText: string;
     columnOrder: string[]; hiddenColumns: string[];
     filters: FilterCondition[]; sorts: SortCondition[]; dedupeColumns: string[];
+    dashboardSelections: DashboardSelection[];
     join: JoinWorkspaceRequest | undefined; page: number;
   };
   // One entry per staged pending change, kept aligned by index with pendingChanges.
@@ -248,8 +284,15 @@
   let editorView: EditorView | null = null;
   let queryMenuOpen = $state<'columns' | 'joins' | 'aggregate' | 'dedupe' | null>(null);
 
+  let themePreference = $state<ThemePreference>('system');
+  let colorScheme = $state<ColorScheme>('light');
+  let darkQuery: MediaQueryList | undefined;
   let toolbarVisibility = $state<ToolbarVisibility>('show');
   let actionMenuMode = $state<ActionMenuMode>('simple');
+  let chartTheme = $state(defaultChartThemePreferences.mode);
+  let chartPalettes = $state<ChartThemePreferences['palettes']>({ ...defaultChartThemePreferences.palettes });
+  let chartPalette = $derived(chartPalettes[chartTheme]);
+  let chartThemeKey = $derived(`${chartTheme}:${chartPalette}`);
   let settingsOpen = $state(false);
   let densityMenuOpen = $state(false);
   let settingsError = $state('');
@@ -276,6 +319,24 @@
   let historyBusy = $state(false);
 
 
+  /* The scheme is applied by the resolved preference rather than by a bare media query, so
+     an explicit Light or Dark keeps winning when the operating system changes under it. */
+  function applyColorScheme() {
+    colorScheme = resolveScheme(themePreference, darkQuery?.matches ?? false);
+    document.documentElement.dataset.theme = colorScheme;
+    applyChartThemeColors();
+  }
+  function setThemePreference(value: ThemePreference) {
+    themePreference = value;
+    /* One authored moment: the workspace already on screen crossfades into the other
+       scheme instead of blinking. Browsers without view transitions, and anyone who asked
+       for less motion, get the switch immediately. */
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!reduced && typeof document.startViewTransition === 'function') document.startViewTransition(() => applyColorScheme());
+    else applyColorScheme();
+    try { localStorage.setItem(themeStorageKey, value); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
   function setToolbarVisibility(value: ToolbarVisibility) {
     toolbarVisibility = value;
     try { localStorage.setItem(toolbarStorageKey, value); settingsError = ''; }
@@ -285,6 +346,31 @@
     actionMenuMode = value;
     try { localStorage.setItem(actionMenuStorageKey, value); settingsError = ''; }
     catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function applyChartThemeColors() {
+    const root = document.documentElement;
+    const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
+    const legacyTheme = chartTheme === 'single' ? 'primary' : chartTheme === 'multicolor' ? 'rich' : 'monotone';
+    root.dataset.chartTheme = legacyTheme;
+    root.dataset.chartMode = chartTheme;
+    root.dataset.chartPalette = chartPalettes[chartTheme];
+    for (const [name, value] of Object.entries(chartThemeCssVariables(preferences, colorScheme))) root.style.setProperty(name, value);
+  }
+  function persistChartThemePreferences() {
+    const preferences: ChartThemePreferences = { mode: chartTheme, palettes: { ...chartPalettes } };
+    try { localStorage.setItem(chartThemeStorageKey, serializeChartThemePreferences(preferences)); settingsError = ''; }
+    catch { settingsError = 'This preference could not be saved. It will last until you close Quark.'; }
+  }
+  function setChartTheme(value: ChartTheme) {
+    chartTheme = value;
+    applyChartThemeColors();
+    persistChartThemePreferences();
+  }
+  function setChartPalette(value: ChartPalette) {
+    if (!isChartPalette(chartTheme, value)) return;
+    chartPalettes = { ...chartPalettes, [chartTheme]: value };
+    applyChartThemeColors();
+    persistChartThemePreferences();
   }
   function clearCommandSequence() {
     commandPrefix = null; sourcePicking = false; sourceDigits = '';
@@ -414,15 +500,22 @@
   function clearSequenceOnEdit(event: FocusEvent) { if (isEditableElement(event.target as Element)) clearCommandSequence(); }
   onMount(() => {
     try {
+      themePreference = readThemePreference(localStorage.getItem(themeStorageKey));
       const value = localStorage.getItem(toolbarStorageKey); if (value === 'show' || value === 'hover' || value === 'hide') toolbarVisibility = value;
       const menu = localStorage.getItem(actionMenuStorageKey); if (menu === 'simple' || menu === 'comprehensive') actionMenuMode = menu;
+      const chartPreferences = readChartThemePreferences(localStorage.getItem(chartThemeStorageKey));
+      chartTheme = chartPreferences.mode;
+      chartPalettes = { ...chartPreferences.palettes };
     }
     catch { settingsError = 'Preferences are unavailable in this browser.'; }
+    darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    darkQuery.addEventListener('change', applyColorScheme);
+    applyColorScheme();
     window.addEventListener('keydown', captureCommands, true);
     window.addEventListener('blur', clearCommandSequence);
     window.addEventListener('focusin', clearSequenceOnEdit);
     window.addEventListener('pointerdown', clearCommandSequence);
-    return () => { window.removeEventListener('keydown', captureCommands, true); window.removeEventListener('blur', clearCommandSequence); window.removeEventListener('focusin', clearSequenceOnEdit); window.removeEventListener('pointerdown', clearCommandSequence); clearCommandSequence(); cellSearchRequest?.abort(); };
+    return () => { darkQuery?.removeEventListener('change', applyColorScheme); window.removeEventListener('keydown', captureCommands, true); window.removeEventListener('blur', clearCommandSequence); window.removeEventListener('focusin', clearSequenceOnEdit); window.removeEventListener('pointerdown', clearCommandSequence); clearCommandSequence(); cellSearchRequest?.abort(); };
   });
   function resetCellSearch() { cellSearchRequest?.abort(); cellSearching = false; cellMatch = null; cellSearchNotice = ''; }
   async function findCellValue(direction: 'next' | 'previous') {
@@ -454,6 +547,8 @@
   }
 
   let currentHistory = $derived(versionHistories.find((history) => history.id === selectedDataset));
+  let generatedColumns = $derived(columnFormulas(currentHistory));
+  let canPasteColumn = $derived(!!copiedColumn && copiedColumn.historyId === currentHistory?.id && !!result?.columns.some((column) => column.name === copiedColumn?.name));
   let selectedNode = $derived(nodes.find((node) => node.id === currentHistory?.sourceId));
   let selectedSourceId = $derived(currentHistory?.sourceId ?? '');
   let currentDataset = $derived(datasets.find((dataset) => dataset.id === selectedDataset));
@@ -508,6 +603,28 @@
   let selectedAggregateColumn = $derived(aggregateFieldOptions.find((column) => column.name === focusedAggregateItem?.column));
   let availableAggregateMetrics = $derived(aggregateMetricOptions.filter((metric) => (!metric.numeric || selectedAggregateColumn?.numeric) && (!metric.ordered || selectedAggregateColumn?.numeric || selectedAggregateColumn?.profile_kind === 'date')));
   let canCreateAggregate = $derived(aggregateRecipe.length > 0 && aggregateFields.some((item) => (item.metrics?.length ?? 0) > 0));
+  let visualizeFieldOptions = $derived((result?.columns ?? []).filter((column) => classifyColumn(column) !== null));
+  let visualizeSuggestions = $derived(suggestCharts(visualizeColumns).filter((item) => implementedCharts.has(item.chart)));
+  let visualizeSpec = $derived.by((): ChartSpec | null => {
+    // A formula names its own columns, so a formula card stands up with nothing selected.
+    if (visualizeFormula) return { chart: 'metric', encodings: {}, ...visualizeCard, ...visualizeFormula };
+    const suggestions = visualizeSuggestions;
+    if (!suggestions.length) return null;
+    const pick = (visualizeChart && suggestions.find((item) => item.chart === visualizeChart)) || suggestions[0];
+    const encodings = applyRoles(pick.encodings, pick.chart, visualizeRoles, visualizeColumns);
+    const aggregates = ((pick.chart === 'bar' || pick.chart === 'pie') && encodings.value)
+      || (pick.chart === 'line' && encodings.y) || pick.chart === 'metric';
+    const metric = pick.chart === 'metric' ? metricCardOp(visualizeColumns, encodings, visualizeMetric, pick.metric)
+      : aggregates ? (visualizeMetric ?? pick.metric ?? 'avg') : pick.metric;
+    const layout = pick.chart === 'bar' && encodings.group ? (visualizeLayout ?? 'grouped') : undefined;
+    const grain = pick.chart === 'line' && visualizeGrain ? visualizeGrain : undefined;
+    const base: ChartSpec = metric
+      ? { chart: pick.chart, encodings, metric }
+      : { chart: pick.chart, encodings };
+    const card = pick.chart === 'metric' ? { ...visualizeCard, ...(visualizeFormula ?? {}) } : {};
+    return { ...base, ...(layout ? { layout } : {}), ...(grain ? { grain } : {}), ...card };
+  });
+  let currentDashboard = $derived(dashboardDocuments.find((document) => document.datasetId === selectedDataset));
   let columnMatches = $derived.by(() => { const query = columnSearch.trim().toLowerCase(); return query ? visibleColumns.filter((column) => column.name.toLowerCase().includes(query)) : []; });
   let columnMenuRegexResult = $derived(matchColumnsByRegex(columnOrder, columnMenuSearch.trim()));
   let columnMenuItems = $derived.by(() => {
@@ -531,16 +648,351 @@
   let maxBin = $derived(stats && stats.kind !== 'categorical' && stats.histogram.length ? Math.max(...stats.histogram.map((bin) => Number(bin.count)), 1) : 1);
   let querySummary = $derived(result ? queryMode === 'sql' ? `${count(result.total_rows)} SQL result rows, page ${result.page} of ${count(result.total_pages)}.` : `${count(result.total_rows)} rows, page ${result.page} of ${count(result.total_pages)}, ${filters.length} filters, ${sorts.length} sorts, and ${dedupeColumns.length} dedupe keys.` : '');
 
-  onMount(() => { loadVersioning(); void loadProjects(); return () => editorView?.destroy(); });
+  onMount(() => { loadVersioning(); loadDashboards(); void loadProjects(); return () => editorView?.destroy(); });
 
   function message(reason: unknown): string { return reason instanceof Error ? reason.message : 'Something went wrong'; }
   function isOrderedType(type: string): boolean { return /VARCHAR|CHAR|TEXT|DATE|TIME|INT|DECIMAL|NUMERIC|REAL|FLOAT|DOUBLE/i.test(type); }
   function isTextType(type: string): boolean { return /VARCHAR|CHAR|TEXT/i.test(type); }
   function isBooleanType(type: string): boolean { return type.toLowerCase() === 'boolean'; }
+  function resetVisualizeDraft() {
+    visualizeColumns = [];
+    visualizeChart = null;
+    visualizeMetric = null;
+    visualizeRoles = {};
+    visualizeLayout = null;
+    visualizeGrain = null;
+    visualizeFormula = null;
+    visualizeCard = {};
+    visualizeSearch = '';
+    visualizeData = null;
+    visualizeError = '';
+    dashboardRequestId++;
+    dashboardSelections = [];
+    dashboardChartStates = {};
+    canvasMode = 'rows';
+  }
+
+  function setCanvasMode(mode: 'rows' | 'chart' | 'dashboard') {
+    canvasMode = mode;
+    if (mode === 'chart') void loadVisualize();
+    if (mode === 'dashboard') void loadDashboardCharts();
+  }
+
+  function toggleVisualizeColumn(name: string) {
+    if (visualizeColumns.some((column) => column.name === name)) {
+      visualizeColumns = visualizeColumns.filter((column) => column.name !== name);
+    } else {
+      const column = result?.columns.find((item) => item.name === name);
+      if (!column) return;
+      visualizeColumns = [...visualizeColumns, column];
+    }
+    if (visualizeRoles[name] && !visualizeColumns.some((column) => column.name === name)) {
+      const { [name]: _dropped, ...rest } = visualizeRoles;
+      visualizeRoles = rest;
+    }
+    visualizeSearch = '';
+    if (visualizeChart && !suggestCharts(visualizeColumns).some((item) => item.chart === visualizeChart && implementedCharts.has(item.chart))) {
+      visualizeChart = null;
+    }
+    void loadVisualize();
+  }
+
+  function selectVisualizeLayout(layout: BarLayout) {
+    visualizeLayout = layout;
+    void loadVisualize();
+  }
+
+  function selectVisualizeGrain(grain: TimeGrain) {
+    visualizeGrain = grain;
+    void loadVisualize();
+  }
+
+  function setVisualizeRole(name: string, role: EncodingRole) {
+    visualizeRoles = { ...visualizeRoles, [name]: role };
+    void loadVisualize();
+  }
+
+  function visualizeRoleOf(name: string): EncodingRole | null {
+    const encodings = visualizeSpec?.encodings;
+    if (!encodings) return null;
+    const entry = (Object.entries(encodings) as [EncodingRole, string][]).find(([, value]) => value === name);
+    return entry ? entry[0] : null;
+  }
+
+  function selectVisualizeChart(chart: ChartType) {
+    visualizeChart = chart;
+    if (chart !== 'metric') visualizeFormula = null;
+    void loadVisualize();
+  }
+
+  function selectVisualizeMetric(metric: AggregateMetric) {
+    visualizeMetric = metric;
+    void loadVisualize();
+  }
+
+  function selectVisualizeCard(patch: MetricCardStyle) {
+    // Presentation only: the card restyles from the response it already has.
+    visualizeCard = { ...visualizeCard, ...patch };
+  }
+
+  function clearVisualizeFormula() {
+    visualizeFormula = null;
+    void loadVisualize();
+  }
+
+  /* A formula is the one metric input the UI cannot validate on its own, so the dialog holds the
+     spec open and asks the backend to run it before the card commits to it. */
+  async function openMetricFormula(spec: ChartSpec | null, apply: MetricFormulaApply) {
+    metricFormulaTarget = { expression: spec?.expression ?? '', label: spec?.label ?? '', apply };
+    metricFormulaError = '';
+    metricFormulaApplying = false;
+    await tick();
+    metricFormulaDialog?.showModal();
+    metricFormulaDialog?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+  }
+
+  async function applyMetricFormula(expression: string, label: string) {
+    const target = metricFormulaTarget;
+    if (!target || metricFormulaApplying) return;
+    metricFormulaApplying = true;
+    metricFormulaError = '';
+    try {
+      const probe: ChartSpec = { chart: 'metric', encodings: {}, expression, label };
+      const body = { spec: probe, page: 1, page_size: 1, filters, sorts, dedupe_columns: dedupeColumns };
+      if (queryMode === 'sql') await api.visualizeSql(activeSqlNodeId || selectedNodeId, { ...body, sql: sqlBase || activeSql });
+      else await api.visualizeDataset(selectedNodeId, selectedDataset, body);
+    } catch (reason) {
+      metricFormulaApplying = false;
+      metricFormulaError = message(reason);
+      return;
+    }
+    metricFormulaApplying = false;
+    target.apply(expression, label);
+    metricFormulaDialog?.close();
+  }
+
+  function selectVisualizeFormula(expression: string, label: string) {
+    visualizeFormula = { expression, label };
+    visualizeChart = 'metric';
+    void loadVisualize();
+  }
+
+  async function loadVisualize() {
+    const spec = visualizeSpec;
+    if (canvasMode !== 'chart') return;
+    if (!spec || !implementedCharts.has(spec.chart)) {
+      visualizeData = null;
+      visualizeError = '';
+      visualizeLoading = false;
+      return;
+    }
+    const id = ++visualizeRequestId;
+    visualizeLoading = true;
+    visualizeError = '';
+    try {
+      const body = { spec, page, page_size: pageSize, filters, sorts, dedupe_columns: dedupeColumns };
+      const next = queryMode === 'sql'
+        ? await api.visualizeSql(activeSqlNodeId || selectedNodeId, { ...body, sql: sqlBase || activeSql })
+        : await api.visualizeDataset(selectedNodeId, selectedDataset, body);
+      if (id !== visualizeRequestId) return;
+      visualizeData = next;
+    } catch (reason) {
+      if (id === visualizeRequestId) {
+        visualizeError = message(reason);
+        visualizeData = null;
+      }
+    } finally {
+      if (id === visualizeRequestId) visualizeLoading = false;
+    }
+  }
+
+  async function applyChartMark(mark: Parameters<typeof filtersFromMark>[1]) {
+    if (!visualizeSpec) return;
+    const base = withoutSelections(filters, dashboardSelections);
+    const added = filtersFromMark(visualizeSpec, mark, base.length);
+    if (!added.length) return;
+    const summary = added.map(filterSummary).join(' and ');
+    await applyFilterChange(composeFilters([...base, ...added], dashboardSelections), { kind: 'filter', summary: `Filter ${summary}`, details: { source: 'chart' } });
+  }
+
+  function loadDashboards() {
+    try { dashboardDocuments = readDashboards(localStorage.getItem(DASHBOARD_STORAGE_KEY)); }
+    catch { dashboardDocuments = []; }
+  }
+
+  function persistDashboards(next: DashboardDataset[]): boolean {
+    try {
+      localStorage.setItem(DASHBOARD_STORAGE_KEY, JSON.stringify(next));
+      dashboardDocuments = next;
+      storageError = '';
+      return true;
+    } catch {
+      storageError = 'Dashboards could not be stored in this browser.';
+      return false;
+    }
+  }
+
+  function updateCurrentDashboard(update: (document: DashboardDataset) => DashboardDataset): DashboardDataset | null {
+    if (!selectedDataset) return null;
+    const document = currentDashboard ?? emptyDashboardDataset(selectedDataset);
+    const next = update(document);
+    const documents = currentDashboard
+      ? dashboardDocuments.map((item) => item.datasetId === selectedDataset ? next : item)
+      : [...dashboardDocuments, next];
+    return persistDashboards(documents) ? next : null;
+  }
+
+  function createDashboardTab(): string | null {
+    const id = crypto.randomUUID();
+    return updateCurrentDashboard((document) => ({
+      ...document,
+      activeTabId: id,
+      tabs: [...document.tabs, { id, name: nextDashboardName(document.tabs.map((tab) => tab.name)), scrollTop: 0, placements: [] }]
+    })) ? id : null;
+  }
+
+  function selectDashboardTab(id: string) {
+    updateCurrentDashboard((document) => document.tabs.some((tab) => tab.id === id) ? { ...document, activeTabId: id } : document);
+  }
+
+  function addChartToDashboard(): boolean {
+    const tab = currentDashboard?.tabs.find((item) => item.id === currentDashboard.activeTabId);
+    const tile = visualizeSpec?.chart === 'metric' ? METRIC_TILE : DEFAULT_TILE;
+    return placeCurrentChart({ x: 20,
+      y: Math.max(20, ...(tab?.placements.map((item) => item.y + item.height + 20) ?? [0])),
+      ...tile
+    });
+  }
+
+  function placeCurrentChart(rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
+    return !!placeChart(visualizeSpec, null, rect);
+  }
+
+  /* A pasted copy keeps its source's definition until one of the two tiles is edited, which is the
+     same sharing rule a chart reused across dashboard tabs already follows. */
+  function pasteDashboardChart(chart: { title: string; spec: ChartSpec }, rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>) {
+    return placeChart(chart.spec, chart.title, rect);
+  }
+
+  function placeChart(spec: ChartSpec | null, title: string | null, rect: Pick<DashboardPlacement, 'x' | 'y' | 'width' | 'height'>): string | null {
+    if (!spec || !selectedDataset) return null;
+    const placementId = crypto.randomUUID();
+    const next = updateCurrentDashboard((document) => {
+      let tab = document.tabs.find((item) => item.id === document.activeTabId);
+      if (!tab) tab = { id: crypto.randomUUID(), name: nextDashboardName(document.tabs.map((tab) => tab.name)), scrollTop: 0, placements: [] };
+      const saved = document.charts.find((chart) => JSON.stringify(chart.spec) === JSON.stringify(spec) && (!title || chart.title === title));
+      const chart = saved ?? { id: crypto.randomUUID(), title: title ?? chartTitle(spec), spec: { ...spec, encodings: { ...spec.encodings } } };
+      const placement = clampPlacement({ ...rect, id: placementId, chartId: chart.id });
+      return {
+        ...document,
+        activeTabId: tab.id,
+        charts: saved ? document.charts : [...document.charts, chart],
+        tabs: document.tabs.some((item) => item.id === tab!.id)
+          ? document.tabs.map((item) => item.id === tab!.id ? { ...item, placements: [...item.placements, placement] } : item)
+          : [...document.tabs, { ...tab, placements: [placement] }]
+      };
+    });
+    if (!next) return null;
+    void loadDashboardCharts();
+    return placementId;
+  }
+
+  function renameDashboardTab(id: string, name: string) {
+    const clean = name.trim().slice(0, 40);
+    if (!clean) return;
+    updateCurrentDashboard((document) => ({ ...document,
+      tabs: document.tabs.map((tab) => tab.id === id ? { ...tab, name: clean } : tab)
+    }));
+  }
+
+  function renameDashboardChart(id: string, title: string) {
+    const clean = title.trim().slice(0, 120);
+    if (!clean) return;
+    updateCurrentDashboard((document) => ({ ...document,
+      charts: document.charts.map((chart) => chart.id === id ? { ...chart, title: clean } : chart)
+    }));
+  }
+
+  function editDashboardChart(placementId: string, spec: ChartSpec) {
+    const previous = currentDashboard;
+    const next = updateCurrentDashboard((document) => updatePlacedChart(document, placementId, spec));
+    if (!next || next === previous) return;
+    const chartId = next.tabs.find((tab) => tab.id === next.activeTabId)?.placements.find((item) => item.id === placementId)?.chartId;
+    if (!chartId) return;
+    const before = previous?.charts.find((chart) => chart.id === chartId)?.spec;
+    if (sameQuery(before, spec)) return;
+    const selectionIndex = filters.findIndex((_, index) => selectionChartIdAtFilterIndex(filters, dashboardSelections, index) === chartId);
+    if (selectionIndex >= 0) void removeFilter(selectionIndex).finally(() => loadDashboardCharts());
+    else void loadDashboardCharts();
+  }
+
+  function moveDashboardPlacement(placement: DashboardPlacement) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({
+      ...tab, placements: tab.placements.map((item) => item.id === placement.id ? clampPlacement(placement) : item)
+    })));
+  }
+
+  function removeDashboardPlacement(id: string) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({
+      ...tab, placements: tab.placements.filter((item) => item.id !== id)
+    })));
+  }
+
+  function saveDashboardScroll(scrollTop: number) {
+    updateCurrentDashboard((document) => updateActiveDashboardTab(document, (tab) => ({ ...tab, scrollTop })));
+  }
+
+  async function fetchDashboardChart(chart: DashboardDataset['charts'][number], id: number) {
+    try {
+      const body = { spec: chart.spec, page, page_size: pageSize, filters: filtersForChart(filters, dashboardSelections, chart.id), sorts, dedupe_columns: dedupeColumns };
+      const data = queryMode === 'sql'
+        ? await api.visualizeSql(activeSqlNodeId || selectedNodeId, { ...body, sql: sqlBase || activeSql })
+        : await api.visualizeDataset(selectedNodeId, selectedDataset, body);
+      if (id === dashboardRequestId) dashboardChartStates = { ...dashboardChartStates, [chart.id]: { data, loading: false, error: '' } };
+    } catch (reason) {
+      if (id === dashboardRequestId) dashboardChartStates = { ...dashboardChartStates, [chart.id]: { data: dashboardChartStates[chart.id]?.data ?? null, loading: false, error: message(reason) } };
+    }
+  }
+
+  async function loadDashboardCharts() {
+    const document = currentDashboard;
+    if (canvasMode !== 'dashboard' || !document) return;
+    const id = ++dashboardRequestId;
+    dashboardChartStates = Object.fromEntries(document.charts.map((chart) => [chart.id, {
+      data: dashboardChartStates[chart.id]?.data ?? null, loading: true, error: ''
+    }]));
+    await Promise.all(document.charts.map((chart) => fetchDashboardChart(chart, id)));
+  }
+
+  async function retryDashboardChart(chartId: string) {
+    const chart = currentDashboard?.charts.find((item) => item.id === chartId);
+    if (!chart) return;
+    const id = dashboardRequestId;
+    dashboardChartStates = { ...dashboardChartStates, [chart.id]: { data: dashboardChartStates[chart.id]?.data ?? null, loading: true, error: '' } };
+    await fetchDashboardChart(chart, id);
+  }
+
+  async function applyDashboardMark(chartId: string, mark: ChartMark) {
+    const chart = currentDashboard?.charts.find((item) => item.id === chartId);
+    if (!chart) return;
+    const before = undoPoint();
+    const beforeSelections = dashboardSelections;
+    const base = withoutSelections(filters, beforeSelections);
+    const selected = filtersFromMark(chart.spec, mark, base.length);
+    if (!selected.length) return;
+    const nextSelections = [...beforeSelections.filter((item) => item.chartId !== chartId), { chartId, filters: selected }];
+    dashboardSelections = nextSelections;
+    const summary = selected.map(filterSummary).join(' and ');
+    if (!await applyFilterChange(composeFilters(base, nextSelections), { kind: 'filter', summary: `Filter ${summary}`, details: { source: 'dashboard', chartId } }, before) && dashboardSelections === nextSelections) {
+      dashboardSelections = beforeSelections;
+    }
+  }
+
   function filterSummary(filter: FilterCondition): string {
-    const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most' };
+    const labels: Record<FilterOperator, string> = { '=': 'equals', '!=': 'does not equal', in: 'is one of', is_null: 'is null', not_null: "isn't null", contains: 'contains', starts_with: 'starts with', ends_with: 'ends with', '>': 'is greater than', '>=': 'is at least', '<': 'is less than', '<=': 'is at most', between: 'is between' };
     if (filter.operator === 'is_null' || filter.operator === 'not_null') return `${filter.column} ${labels[filter.operator]}`;
     const values = Array.isArray(filter.value) ? filter.value : [filter.value];
+    if (filter.operator === 'between') return `${filter.column} ${labels[filter.operator]} ${values.join(' and ')}`;
     const text = `${values.slice(0, 3).map(String).join(', ')}${values.length > 3 ? `, +${values.length - 3} more` : ''}`;
     return `${filter.column} ${labels[filter.operator]} ${text.length > 48 ? `${text.slice(0, 47)}…` : text}`;
   }
@@ -766,6 +1218,7 @@
       if (id !== requestId) return false;
       closeSql(false);
       clearAggregateDraft();
+      dashboardSelections = [];
       filters = [];
       sorts = [];
       dedupeColumns = [];
@@ -825,6 +1278,29 @@
       buildMutationSql(current.sql, columns, index + 1, quoteIdentifier(column.name), name),
       false,
       { kind: 'duplicate', summary: `Duplicate ${column.name}`, details: { column: column.name, copy: name } }
+    );
+    await tick();
+    tableScroll?.focus();
+  }
+
+  function copyColumn(column: ColumnInfo) {
+    if (!currentHistory) return;
+    copiedColumn = { historyId: currentHistory.id, name: column.name, expression: generatedColumns[column.name] ?? quoteIdentifier(column.name) };
+    void navigator.clipboard?.writeText(column.name).catch(() => {});
+  }
+
+  async function pasteColumn(after: ColumnInfo) {
+    const copied = copiedColumn;
+    const current = result;
+    if (!copied || !current || !canPasteColumn || loadingData || mutationApplying) return;
+    const columns = current.columns.map((column) => column.name);
+    const index = columns.indexOf(after.name);
+    if (index < 0) return;
+    const name = nextDuplicateColumnName(copied.name, columns);
+    await applyColumnQuery(
+      buildMutationSql(current.sql, columns, index + 1, copied.expression, name),
+      false,
+      { kind: 'add', summary: `Paste ${copied.name} as ${name}`, details: { column: name, expression: copied.expression, after: after.name } }
     );
     await tick();
     tableScroll?.focus();
@@ -1124,6 +1600,7 @@
       filters: filters.map((filter) => ({ ...filter, ...(Array.isArray(filter.value) ? { value: [...filter.value] } : {}) })),
       sorts: sorts.map((sort) => ({ ...sort })),
       dedupeColumns: [...dedupeColumns],
+      dashboardSelections: dashboardSelections.map((selection) => ({ ...selection, filters: selection.filters.map((filter) => ({ ...filter })) })),
       join: activeJoin, page
     };
   }
@@ -1154,6 +1631,7 @@
       if (!replaceHistory(history)) return false;
       closeSql(false); clearAggregateDraft(); resetBackground();
       filters = point.filters; sorts = point.sorts;
+      dashboardSelections = point.dashboardSelections;
       dedupeColumns = [...point.dedupeColumns]; dedupeDraft = [...point.dedupeColumns];
       columnOrder = [...point.columnOrder]; hiddenColumns = [...point.hiddenColumns];
       activeJoin = point.join; sqlText = point.sqlText; sqlBase = point.sqlBase;
@@ -1161,6 +1639,7 @@
       result = next; page = next.page; pageInput = String(next.page);
       reorderOrigin = null; selectedCell = null; editingCell = null; recordingNotice = '';
       await tick(); gridApi?.scrollToAbsoluteRow((page - 1) * pageSize);
+      if (canvasMode === 'dashboard') void loadDashboardCharts();
       return true;
     } catch (reason) { recordingNotice = `Could not restore change: ${message(reason)}`; return false; }
     finally { historyBusy = false; }
@@ -1227,6 +1706,8 @@
     });
     if (replaceHistory(history)) {
       selectedDataset = history.id;
+      dashboardSelections = [];
+      dashboardChartStates = {};
       joinLeftViewId = history.id;
       joinRightViewId = '';
       joinLeftSourceId = '';
@@ -1279,6 +1760,8 @@
           return true;
         } }]),
         basicSetup,
+        editorTheme,
+        editorHighlight,
         sql(sqlConfig),
         autocompletion({ override: [guardCompletion(schemaCompletionSource(sqlConfig)), guardCompletion(keywordCompletionSource(StandardSQL, true))] }),
         EditorView.lineWrapping,
@@ -1341,6 +1824,8 @@
   }
 
   async function replayVersionSnapshot(version: Version): Promise<boolean> {
+    dashboardSelections = [];
+    dashboardChartStates = {};
     filters = [];
     sorts = [];
     dedupeColumns = [];
@@ -1355,6 +1840,7 @@
     const before = undoPoint();
     if (!await replayVersionSnapshot(version)) {
       filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns;
+      dashboardSelections = before.dashboardSelections;
       dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page);
       recordingNotice = sqlError || 'Could not open this Version.';
       return;
@@ -1430,6 +1916,7 @@
     filterColumn = null;
     filterOperator = '=';
     filterValue = '';
+    filterUpperValue = '';
     categoryValues = [];
     categorySearch = '';
     categoryTotal = 0;
@@ -1511,6 +1998,7 @@
     activeJoin = undefined;
     lastHiddenColumn = null;
     shownColumnTypes = [];
+    resetVisualizeDraft();
     error = '';
     recordingNotice = '';
     queryMenuOpen = null;
@@ -1700,6 +2188,7 @@
     page = 1;
     pageInput = '1';
     railOpen = false;
+    resetVisualizeDraft();
     const version = history.versions.find((item) => item.id === history.activeVersionId) ?? history.versions[history.versions.length - 1];
     if (version) await replayVersionSnapshot(version);
   }
@@ -1804,6 +2293,7 @@
     if (!targetNodeId || !query) { sqlError = 'Enter SQL to run.'; return false; }
     const source = keepSqlBase ? sqlBase || query : query;
     if (!keepSqlBase) {
+      dashboardSelections = [];
       filters = [];
       sorts = [];
       dedupeColumns = [];
@@ -1837,6 +2327,8 @@
       await tick();
       gridApi?.scrollToAbsoluteRow((next.page - 1) * next.page_size);
       if (sqlOpen) createSqlEditor();
+      if (canvasMode === 'chart') void loadVisualize();
+      if (canvasMode === 'dashboard') void loadDashboardCharts();
       return true;
     } catch (reason) { if (id === requestId) sqlError = message(reason); return false; }
     finally { if (id === requestId) loadingData = false; }
@@ -1921,49 +2413,70 @@
   function toggleCategory(value: string, checked: boolean) { selectedCategories = checked ? [...selectedCategories, value] : selectedCategories.filter((item) => item !== value); }
   function selectVisibleCategories() { selectedCategories = [...new Set([...selectedCategories, ...categoryValues.map((item) => item.value)])]; }
 
-  async function applyFilterChange(next: FilterCondition[], change: VersionChange, before = undoPoint()) {
+  async function applyFilterChange(next: FilterCondition[], change: VersionChange, before = undoPoint()): Promise<boolean> {
+    const previousRequestId = requestId;
     filters = next;
     page = 1;
     pageInput = '1';
-    if (await loadData()) stageChange(change, before);
-    else { filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; page = before.page; pageInput = String(page); }
+    if (await loadData()) { stageChange(change, before); return true; }
+    if (requestId > previousRequestId + 1) return false;
+    filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; page = before.page; pageInput = String(page);
+    return false;
   }
 
   async function addCategoryFilter() {
     if (!filterColumn || selectedCategories.length === 0) return;
+    const base = withoutSelections(filters, dashboardSelections);
     const values = [...selectedCategories];
-    const filter: FilterCondition = { column: filterColumn.name, operator: 'in', value: values, ...(filters.length ? { connector: 'and' as const } : {}) };
+    const filter: FilterCondition = { column: filterColumn.name, operator: 'in', value: values, ...(base.length ? { connector: 'and' as const } : {}) };
     closeInspector();
-    await applyFilterChange([...filters, filter], { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value: values } });
+    await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value: values } });
   }
 
   async function addFilter() {
     if (!filterColumn) return;
+    const base = withoutSelections(filters, dashboardSelections);
     const noValue = filterOperator === 'is_null' || filterOperator === 'not_null';
-    if (!noValue && filterValue === '') return;
+    if (!noValue && (filterValue === '' || (filterOperator === 'between' && filterUpperValue === ''))) return;
     const numericValue = filterColumn.numeric ? normalizedNumber(filterValue) : filterValue;
-    if (!noValue && numericValue === null) return;
+    const numericUpperValue = filterColumn.numeric ? normalizedNumber(filterUpperValue) : filterUpperValue;
+    if (!noValue && (numericValue === null || (filterOperator === 'between' && numericUpperValue === null))) return;
     if (filterColumn.numeric && numericValue !== null) filterValue = formattedNumber(numericValue);
-    const value = noValue ? undefined : filterColumn.numeric ? numericValue! : isBooleanType(filterColumn.type) ? filterValue === 'true' : filterValue;
-    const filter: FilterCondition = { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }), ...(filters.length ? { connector: 'and' as const } : {}) };
+    if (filterOperator === 'between' && filterColumn.numeric && numericUpperValue !== null) filterUpperValue = formattedNumber(numericUpperValue);
+    const value = noValue ? undefined : filterOperator === 'between' ? [numericValue!, numericUpperValue!] : filterColumn.numeric ? numericValue! : isBooleanType(filterColumn.type) ? filterValue === 'true' : filterValue;
+    const filter: FilterCondition = { column: filterColumn.name, operator: filterOperator, ...(value === undefined ? {} : { value }), ...(base.length ? { connector: 'and' as const } : {}) };
     closeInspector();
-    await applyFilterChange([...filters, filter], { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
+    await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
   }
 
   function addNullFilter(operator: 'is_null' | 'not_null') { filterOperator = operator; void addFilter(); }
 
   async function toggleFilterConnector(index: number) {
-    const filter = filters[index];
+    if (selectionChartIdAtFilterIndex(filters, dashboardSelections, index)) return;
+    const base = withoutSelections(filters, dashboardSelections);
+    const filter = base[index];
     if (!filter || index === 0) return;
     const connector = filter.connector === 'or' ? 'and' : 'or';
-    await applyFilterChange(filters.map((item, itemIndex) => itemIndex === index ? { ...item, connector } : item), { kind: 'filter-connector', summary: `Use ${connector.toUpperCase()} before ${filter.column}`, details: { index, column: filter.column, connector } });
+    await applyFilterChange(composeFilters(base.map((item, itemIndex) => itemIndex === index ? { ...item, connector } : item), dashboardSelections), { kind: 'filter-connector', summary: `Use ${connector.toUpperCase()} before ${filter.column}`, details: { index, column: filter.column, connector } });
   }
 
   async function removeFilter(index: number) {
     const filter = filters[index];
     if (!filter) return;
+    const chartId = selectionChartIdAtFilterIndex(filters, dashboardSelections, index);
+    if (chartId) {
+      const before = undoPoint();
+      const beforeSelections = dashboardSelections;
+      const nextSelections = dashboardSelections.filter((selection) => selection.chartId !== chartId);
+      dashboardSelections = nextSelections;
+      if (!await applyFilterChange(composeFilters(withoutSelections(filters, beforeSelections), nextSelections), { kind: 'filter-remove', summary: `Clear ${currentDashboard?.charts.find((chart) => chart.id === chartId)?.title ?? 'chart'} selection`, details: { source: 'dashboard', chartId } }, before) && dashboardSelections === nextSelections) {
+        dashboardSelections = beforeSelections;
+      }
+      return;
+    }
+    const base = withoutSelections(filters, dashboardSelections);
     const value = Array.isArray(filter.value) ? [...filter.value] : filter.value;
-    await applyFilterChange(filters.filter((_, itemIndex) => itemIndex !== index), { kind: 'filter-remove', summary: `Remove filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
+    await applyFilterChange(composeFilters(base.filter((_, itemIndex) => itemIndex !== index), dashboardSelections), { kind: 'filter-remove', summary: `Remove filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, ...(value === undefined ? {} : { value }) } });
   }
   async function setColumnSort(column: ColumnInfo, direction: 'asc' | 'desc' | 'none') {
     const before = undoPoint();
@@ -1983,10 +2496,12 @@
   async function clearQuery() {
     const before = undoPoint();
     const count = filters.length;
+    const beforeSelections = dashboardSelections;
+    dashboardSelections = [];
     sorts = [];
     dedupeColumns = [];
     dedupeDraft = [];
-    await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } }, before);
+    if (!await applyFilterChange([], { kind: 'filter-clear', summary: 'Clear conditions', details: { count } }, before) && !dashboardSelections.length) dashboardSelections = beforeSelections;
   }
   async function backToBuilder() {
     if (!discardPending()) return;
@@ -2270,6 +2785,7 @@
     return `${sign}${formattedInteger}${fraction === undefined ? '' : `${decimal}${formattedFraction}`}`;
   }
   function normalizeNumericFilter() { const value = normalizedNumber(filterValue); if (value !== null) filterValue = formattedNumber(value); }
+  function normalizeNumericFilterUpper() { const value = normalizedNumber(filterUpperValue); if (value !== null) filterUpperValue = formattedNumber(value); }
   async function scrollToColumn(name: string) {
     await tick();
     const header = [...(tableScroll?.querySelectorAll<HTMLTableCellElement>('th[data-column]') ?? [])].find((element) => element.dataset.column === name);
@@ -2296,8 +2812,9 @@
   }
   async function filterCategoricalCell(column: ColumnInfo, value: unknown) {
     if (column.profile_kind !== 'categorical' || (typeof value !== 'string' && typeof value !== 'boolean') || filters.some((filter) => filter.column === column.name && filter.operator === '=' && filter.value === value)) return;
-    const filter: FilterCondition = { column: column.name, operator: '=', value, ...(filters.length ? { connector: 'and' as const } : {}) };
-    await applyFilterChange([...filters, filter], { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value } });
+    const base = withoutSelections(filters, dashboardSelections);
+    const filter: FilterCondition = { column: column.name, operator: '=', value, ...(base.length ? { connector: 'and' as const } : {}) };
+    await applyFilterChange(composeFilters([...base, filter], dashboardSelections), { kind: 'filter', summary: `Filter ${filterSummary(filter)}`, details: { column: filter.column, operator: filter.operator, value } });
   }
   function cellTitle(column: ColumnInfo, value: unknown): string { const text = display(value); return column.profile_kind === 'categorical' && (typeof value === 'string' || typeof value === 'boolean') ? `${text} — Double-click to filter by this value` : text; }
   function cellEditText(value: unknown): string { return value == null ? '' : display(value); }
@@ -2389,6 +2906,7 @@
       if (id !== requestId) return;
       closeSql(false);
       clearAggregateDraft();
+      dashboardSelections = [];
       filters = [];
       sorts = [];
       dedupeColumns = [];
@@ -2553,7 +3071,7 @@
 
   {#snippet main()}
     <main>
-      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
+      {#if settingsOpen}<SettingsPage visibility={toolbarVisibility} {actionMenuMode} {chartTheme} {themePreference} {colorScheme} onThemePreference={setThemePreference} chartPalette={chartPalette} onActionMenuMode={setActionMenuMode} error={settingsError} onVisibility={setToolbarVisibility} onChartTheme={setChartTheme} onChartPalette={setChartPalette} onClose={() => { settingsOpen = false; void tick().then(() => tableScroll?.focus()); }} />{/if}
       <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
         <WelcomeScreen
@@ -2586,6 +3104,7 @@
             onUndo={() => void undoLastChange()}
             {exportOpen}
             inert={!!inspectorMode}
+            {canvasMode} onCanvasMode={setCanvasMode} canChart={!!result}
           >
             {#snippet versionMenu()}
               <VersionMenu
@@ -2644,6 +3163,56 @@
                 />
               {/if}
               <div class="data-stage">
+                {#if canvasMode === 'chart'}
+                  <VisualizeStage
+                    columnSearch={visualizeSearch} setColumnSearch={(value) => visualizeSearch = value}
+                    columns={visualizeFieldOptions} selected={visualizeColumns}
+                    onToggleColumn={toggleVisualizeColumn}
+                    suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric} onSelectLayout={selectVisualizeLayout}
+                    onSelectGrain={selectVisualizeGrain}
+                    activeGrain={visualizeData?.chart === 'line' ? visualizeData.grain : null}
+                    onSelectCard={selectVisualizeCard}
+                    onOpenFormula={() => void openMetricFormula(visualizeSpec, selectVisualizeFormula)}
+                    onClearFormula={clearVisualizeFormula}
+                    roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
+                    roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
+                    data={visualizeData} loading={visualizeLoading} error={visualizeError}
+                    {count} {compact} chartTheme={chartThemeKey} {binLabel}
+                    onAddToDashboard={addChartToDashboard}
+                    onMark={(mark) => void applyChartMark(mark)}
+                  />
+                {:else if canvasMode === 'dashboard'}
+                  <DashboardStage
+                    tabs={currentDashboard?.tabs ?? []}
+                    activeTabId={currentDashboard?.activeTabId ?? ''}
+                    charts={currentDashboard?.charts ?? []}
+                    chartStates={dashboardChartStates}
+                    {count} {compact} chartTheme={chartThemeKey} {binLabel}
+                    columnSearch={visualizeSearch} setColumnSearch={(value) => visualizeSearch = value}
+                    columns={visualizeFieldOptions} selected={visualizeColumns}
+                    onToggleColumn={toggleVisualizeColumn}
+                    suggestions={visualizeSuggestions} spec={visualizeSpec} onSelectChart={selectVisualizeChart} onSelectMetric={selectVisualizeMetric} onSelectLayout={selectVisualizeLayout}
+                    onSelectGrain={selectVisualizeGrain}
+                    activeGrain={visualizeData?.chart === 'line' ? visualizeData.grain : null}
+                    onSelectCard={selectVisualizeCard}
+                    onOpenFormula={(spec, apply) => void openMetricFormula(spec, apply ?? selectVisualizeFormula)}
+                    onClearFormula={clearVisualizeFormula}
+                    roles={visualizeSpec ? chartRoles(visualizeSpec.chart) : []}
+                    roleOf={visualizeRoleOf} onSetRole={setVisualizeRole}
+                    onSelectTab={selectDashboardTab}
+                    onCreateTab={createDashboardTab}
+                    onRenameTab={renameDashboardTab}
+                    onRenameChart={renameDashboardChart}
+                    onEditChart={editDashboardChart}
+                    onPlaceCurrent={placeCurrentChart}
+                    onMove={moveDashboardPlacement}
+                    onRemove={removeDashboardPlacement}
+                    onPaste={pasteDashboardChart}
+                    onMark={(chartId, mark) => void applyDashboardMark(chartId, mark)}
+                    onRetryChart={(chartId) => void retryDashboardChart(chartId)}
+                    onScroll={saveDashboardScroll}
+                  />
+                {:else}
                 <section class="table-pane {rowDensity}" aria-label="View rows" inert={!!inspectorMode}>
                   <div class="table-card" class:recording={!!currentHistory?.pendingChanges.length} aria-busy={loadingData}>
                     {#if loadingData && !result}
@@ -2663,6 +3232,7 @@
                         caption={`Rows from ${currentHistory?.name ?? selectedDataset}`}
                         {rowDensity} {fitColumnsToContent}
                         {canQuery} canInsert={!loadingData} canEdit={!loadingData} {sorts} {filters} {columnLabelParts} {isColumnProtected}
+                        {generatedColumns} {canPasteColumn} onCopyColumn={copyColumn} onPasteColumn={(column) => void pasteColumn(column)}
                         onSort={cycleSort}
                         onFilter={(column, trigger) => openFilter(column, trigger)}
                         onProfile={(column, trigger) => openStats(column, trigger)}
@@ -2697,6 +3267,7 @@
                     />
                   {/if}
                 </section>
+                {/if}
                 {#if inspectorMode}
                   <InspectorPanel
                     title={filterColumn?.name ?? statsColumn?.name ?? ''}
@@ -2709,9 +3280,10 @@
                       {#if inspectorMode === 'filter' && filterColumn}
                         <FilterInspector
                           column={filterColumn} isText={isTextType(filterColumn.type)}
-                          {operators} operator={filterOperator} value={filterValue}
-                          setOperator={(value) => filterOperator = value} setValue={(value) => filterValue = value}
+                          {operators} operator={filterOperator} value={filterValue} upperValue={filterUpperValue}
+                          setOperator={(value) => filterOperator = value} setValue={(value) => filterValue = value} setUpperValue={(value) => filterUpperValue = value}
                           onblurValue={filterColumn.numeric ? normalizeNumericFilter : undefined}
+                          onblurUpperValue={filterColumn.numeric ? normalizeNumericFilterUpper : undefined}
                           bind:valueInput={filterInput}
                           onSubmitFilter={(event) => { event.preventDefault(); addFilter(); }}
                           {categorySearch} setCategorySearch={setCategorySearchLive}
@@ -2785,12 +3357,27 @@
   <FormulaMenu
     columns={result?.columns ?? []}
     targetColumn={mutationTarget.kind === 'modify' ? mutationTarget.column : null}
+    origin={mutationTarget.kind === 'insert' ? mutationTarget.trigger : null}
+    initialExpression={mutationTarget.kind === 'modify' ? generatedColumns[mutationTarget.column.name] : undefined}
     boundaryLabel={mutationTarget.kind === 'modify' ? mutationTarget.column.name : mutationTarget.right ? `Between ${mutationTarget.left} and ${mutationTarget.right}` : `After ${mutationTarget.left}`}
     applying={mutationApplying} error={mutationError}
     setDialog={(element) => mutationDialog = element}
     onClose={finishMutationClose}
     onCancelAttempt={(event) => { if (mutationApplying) event.preventDefault(); }}
     onApply={applyMutation}
+  />
+{/if}
+
+{#if metricFormulaTarget}
+  <MetricFormulaMenu
+    columns={result?.columns ?? []}
+    expression={metricFormulaTarget.expression}
+    label={metricFormulaTarget.label}
+    applying={metricFormulaApplying} error={metricFormulaError}
+    setDialog={(element) => metricFormulaDialog = element}
+    onClose={() => { metricFormulaTarget = null; metricFormulaError = ''; metricFormulaApplying = false; }}
+    onCancelAttempt={(event) => { if (metricFormulaApplying) event.preventDefault(); }}
+    onApply={(expression, label) => void applyMetricFormula(expression, label)}
   />
 {/if}
 
@@ -2812,7 +3399,7 @@
   .table-card.recording::before { left: 0; }
   .table-card.recording::after { right: 0; }
   .table-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; padding: 40px; text-align: center; color: var(--muted); font-family: var(--font-ui); font-size: 13px; }
-  .loading-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255, 255, 255, 0.7); font-size: 12.5px; color: var(--muted); }
+  .loading-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; background: color-mix(in srgb, var(--surface) 72%, transparent); font-size: 12.5px; color: var(--muted); }
   .cell-edit-error { position: absolute; right: 10px; bottom: 10px; z-index: 7; max-width: min(460px, calc(100% - 20px)); padding: 8px 10px; border: 1px solid var(--error); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-popover); color: var(--error); font-size: 12px; }
   .banner { margin: 14px 20px; padding: 12px 14px; border-radius: var(--radius-lg); border: 1px solid var(--line); background: var(--surface-inset); font-size: 12.5px; color: var(--muted); }
   .banner strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 13px; }

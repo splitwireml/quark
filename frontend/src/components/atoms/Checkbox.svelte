@@ -34,7 +34,7 @@
     border-radius: 2px;
     border: 1px solid var(--glyph);
     background: var(--surface);
-    color: #FFFFFF;
+    color: var(--on-fill);
     font-size: 8px;
   }
   input:checked + .box { border-color: var(--action); background: var(--action); }

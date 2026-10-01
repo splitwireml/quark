@@ -7,14 +7,17 @@
     operators: { value: FilterOperator; label: string }[];
     operator: FilterOperator;
     value: string;
+    upperValue: string;
     setOperator: (value: FilterOperator) => void;
     setValue: (value: string) => void;
+    setUpperValue: (value: string) => void;
     onblurValue?: () => void;
+    onblurUpperValue?: () => void;
     valueInput?: HTMLInputElement | HTMLSelectElement | null;
     onsubmit: (event: SubmitEvent) => void;
   };
 
-  let { column, operators, operator, value, setOperator, setValue, onblurValue, valueInput = $bindable(null), onsubmit }: Props = $props();
+  let { column, operators, operator, value, upperValue, setOperator, setValue, setUpperValue, onblurValue, onblurUpperValue, valueInput = $bindable(null), onsubmit }: Props = $props();
   let noValue = $derived(operator === 'is_null' || operator === 'not_null');
   let isBoolean = $derived(column.type.toLowerCase() === 'boolean');
 </script>
@@ -26,7 +29,7 @@
     </select>
   </label>
   {#if !noValue}
-    <label>Value
+    <label>{operator === 'between' ? 'From' : 'Value'}
       {#if isBoolean}
         <select bind:this={valueInput} value={value} onchange={(event) => setValue((event.currentTarget as HTMLSelectElement).value)}>
           <option value="" disabled>Select value</option>
@@ -44,8 +47,13 @@
         />
       {/if}
     </label>
+    {#if operator === 'between'}
+      <label>To
+        <input type="text" inputmode={column.numeric ? 'decimal' : undefined} value={upperValue} oninput={(event) => setUpperValue(event.currentTarget.value)} onblur={onblurUpperValue} />
+      </label>
+    {/if}
   {/if}
-  <Button variant="primary" type="submit" disabled={!noValue && value === ''}>Apply filter</Button>
+  <Button variant="primary" type="submit" disabled={!noValue && (value === '' || (operator === 'between' && upperValue === ''))}>Apply filter</Button>
 </form>
 
 <style>

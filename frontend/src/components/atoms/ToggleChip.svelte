@@ -47,6 +47,6 @@
     border-radius: 2px;
     font-size: 7.5px;
   }
-  .chip.on .check { background: var(--action); color: #FFFFFF; }
+  .chip.on .check { background: var(--action); color: var(--on-fill); }
   .check.empty { border: 1px solid var(--control-border); }
 </style>
