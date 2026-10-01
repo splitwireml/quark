@@ -1,12 +1,15 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { fly } from 'svelte/transition';
   import Button from '../atoms/Button.svelte';
+  import ColumnKindOption from '../molecules/ColumnKindOption.svelte';
+  import StepRail from '../molecules/StepRail.svelte';
   import FormulaButtonGroup from '../molecules/FormulaButtonGroup.svelte';
   import FormulaHelpers from '../molecules/FormulaHelpers.svelte';
   import { buildIfExpression, buildSwitchExpression, inferActiveFormulaKind, inferFormulaKind, quoteIdentifier, quoteLiteral, sqlValueFromInput } from '../../lib/mutation-sql';
   import type { ColumnInfo } from '../../lib/types';
 
-  type Mode = 'blank' | 'text' | 'formula';
+  type Mode = 'blank' | 'text' | 'formula' | 'conditional';
   type IfBuilder = { kind: 'if'; active: 'condition' | 'thenValue' | 'elseValue'; condition: string; thenValue: string; elseValue: string };
   type SwitchCase = { id: number; condition: string; thenValue: string };
   type SwitchActive = 'elseValue' | `condition-${number}` | `then-${number}`;
@@ -16,6 +19,7 @@
     columns: ColumnInfo[];
     boundaryLabel: string;
     targetColumn?: ColumnInfo | null;
+    origin?: HTMLElement | null;
     initialExpression?: string;
     applying: boolean;
     error: string;
@@ -25,11 +29,18 @@
     onApply: (name: string, expression: string) => void;
   };
 
-  let { columns, boundaryLabel, targetColumn = null, initialExpression, applying, error, setDialog, onClose, onCancelAttempt, onApply }: Props = $props();
+  let { columns, boundaryLabel, targetColumn = null, origin = null, initialExpression, applying, error, setDialog, onClose, onCancelAttempt, onApply }: Props = $props();
   // ponytail: this dialog is remounted per operation, so its editable draft only needs the opening target.
   const initialTarget = untrack(() => targetColumn);
   let mode = $state<Mode>(initialTarget ? 'formula' : 'blank');
   let name = $state(initialTarget?.name ?? '');
+  let step = $state(initialTarget ? 1 : 0);
+  let direction = $state<-1 | 1>(1);
+  let wroteSql = $state(false);
+  let settled = $state(false);
+  let closing = false;
+  let contentElement = $state<HTMLElement | null>(null);
+  let contentHeight = $state<number | null>(null);
   let repeatingText = $state('');
   let formula = $state(untrack(() => initialExpression) ?? (initialTarget ? quoteIdentifier(initialTarget.name) : ''));
   let kind = $derived(inferFormulaKind(formula, columns));
@@ -61,10 +72,76 @@
       : buildSwitchExpression(conditionalBuilder.cases.map((item) => ({ condition: item.condition, thenValue: sqlValueFromInput(item.thenValue) })), sqlValueFromInput(conditionalBuilder.elseValue));
   });
 
+  let expression = $derived(mode === 'blank' ? 'NULL' : mode === 'text' ? quoteLiteral(repeatingText) : conditionalBuilder ? structuredSql : formula.trim());
+  let steps = $derived(mode === 'blank' ? ['Name'] : mode === 'text' ? ['Name', 'Value'] : ['Name', 'Value', 'Review']);
+  let last = $derived(step >= steps.length - 1);
+  let usesFormula = $derived(mode === 'formula' || mode === 'conditional');
+  let wide = $derived(step === 1 && usesFormula);
+  let switching = $derived(wide && conditionalBuilder?.kind === 'switch');
+  let choosingConditional = $derived(mode === 'conditional' && !conditionalBuilder && !wroteSql && !formula.trim());
+  let primaryLabel = $derived(applying ? 'Checking…' : !last ? (step === 0 ? 'Continue' : 'Review') : targetColumn ? 'Apply change' : 'Insert column');
+  let resultType = $derived(mode === 'text' ? 'text' : conditionalBuilder ? 'conditional' : kind === 'unknown' ? 'unknown' : kind);
+
+  const EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
+  const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // The window grows out of the control that opened it and folds back into it; content is never scaled.
+  function morph(node: HTMLDialogElement, opening: boolean): Animation | null {
+    if (reducedMotion()) return null;
+    const box = node.getBoundingClientRect();
+    const from = origin?.isConnected ? origin.getBoundingClientRect() : null;
+    const dx = from ? from.left + from.width / 2 - (box.left + box.width / 2) : 0;
+    const dy = from ? from.top + from.height / 2 - (box.top + box.height / 2) : 12;
+    const folded = { transform: `translate(${dx}px, ${dy}px)`, clipPath: from ? 'inset(46% 49.5% 46% 49.5% round 3px)' : 'inset(4% round 8px)', opacity: 0.4 };
+    const open = { transform: 'translate(0, 0)', clipPath: 'inset(0% round 8px)', opacity: 1 };
+    return node.animate(opening ? [folded, open] : [open, folded], { duration: opening ? 300 : 200, easing: EASE, fill: opening ? 'none' : 'forwards' });
+  }
+
   function dialogRef(node: HTMLDialogElement) {
     dialog = node;
     setDialog(node);
+    const nativeShow = node.showModal.bind(node);
+    const nativeClose = node.close.bind(node);
+    node.showModal = () => {
+      nativeShow();
+      const animation = morph(node, true);
+      if (animation) animation.finished.then(() => settled = true, () => {}); else settled = true;
+    };
+    node.close = (value?: string) => {
+      if (closing) return;
+      closing = true;
+      const animation = node.open ? morph(node, false) : null;
+      if (animation) animation.finished.then(() => nativeClose(value), () => nativeClose(value)); else nativeClose(value);
+    };
     return { destroy: () => { dialog = null; setDialog(null); } };
+  }
+
+  $effect(() => {
+    const element = contentElement;
+    if (!element) return;
+    const observer = new ResizeObserver(() => { if (element.offsetHeight) contentHeight = element.offsetHeight; });
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+
+  function cancel(event: Event) {
+    onCancelAttempt(event);
+    if (!event.defaultPrevented) { event.preventDefault(); dialog?.close(); }
+  }
+
+  function selectMode(next: Mode) {
+    if (next === mode) return;
+    mode = next;
+    conditionalBuilder = null;
+    wroteSql = false;
+    localError = '';
+  }
+
+  function go(next: number) {
+    direction = next > step ? 1 : -1;
+    step = next;
+    localError = '';
+    void tick().then(() => dialog?.querySelector<HTMLElement>('[data-focus]')?.focus({ preventScroll: true }));
   }
 
   function setIfOperand(key: IfBuilder['active'], value: string) { if (conditionalBuilder?.kind === 'if') { conditionalBuilder.active = key; conditionalBuilder[key] = value; } }
@@ -151,6 +228,14 @@
       return;
     }
     selectedSource = column.name;
+    if (conditionalBuilder?.kind === 'if') {
+      if (conditionalBuilder.active === 'condition') {
+        const current = conditionalBuilder.condition;
+        setIfOperand('condition', current && !/\s$/.test(current) ? `${current} ${value}` : `${current}${value}`);
+      }
+      void focusActiveOperand();
+      return;
+    }
     const start = textarea?.selectionStart ?? formula.length;
     const end = textarea?.selectionEnd ?? start;
     if (!conditionalBuilder && (awaitsOperand() || (start > 0 && start < formula.length) || end > start)) {
@@ -213,7 +298,7 @@
     if (conditionalBuilder) return;
     const seed = formula.trim();
     conditionalBuilder = builderKind === 'if'
-      ? { kind: 'if', active: 'condition', condition: kind === 'boolean' ? seed : `${seed} = `, thenValue: '', elseValue: '' }
+      ? { kind: 'if', active: 'condition', condition: !seed || kind === 'boolean' ? seed : `${seed} = `, thenValue: '', elseValue: '' }
       : { kind: 'switch', active: 'condition-1', cases: [{ id: 1, condition: seed, thenValue: '' }], elseValue: 'NULL' };
     void tick().then(() => {
       dialog?.querySelector('.editor-pane')?.scrollTo(0, 0);
@@ -239,63 +324,88 @@
   function useFreeform() {
     if (structuredSql) formula = structuredSql;
     conditionalBuilder = null;
+    wroteSql = true;
     void tick().then(() => textarea?.focus());
   }
 
-  function submit() {
+  function checkName(): boolean {
     const trimmedName = name.trim();
-    if (!trimmedName) { localError = 'Enter a column name.'; return; }
-    if (columns.some((column) => column.name !== targetColumn?.name && column.name.toLocaleLowerCase() === trimmedName.toLocaleLowerCase())) { localError = 'Column names must be unique.'; return; }
-    if (conditionalBuilder?.kind === 'switch' && conditionalBuilder.cases.some((item) => ['text', 'number', 'date'].includes(inferFormulaKind(item.condition, columns)))) { localError = 'Each When condition needs a comparison that returns true or false.'; return; }
-    const expression = mode === 'blank' ? 'NULL' : mode === 'text' ? quoteLiteral(repeatingText) : conditionalBuilder ? structuredSql : formula.trim();
-    if (!expression) { localError = conditionalBuilder?.kind === 'switch' ? 'Enter a condition and a result for each case, plus an otherwise result.' : conditionalBuilder ? 'Fill every IF operand.' : 'Enter a formula.'; return; }
+    if (!trimmedName) { localError = 'Enter a column name.'; return false; }
+    if (columns.some((column) => column.name !== targetColumn?.name && column.name.toLocaleLowerCase() === trimmedName.toLocaleLowerCase())) { localError = 'Column names must be unique.'; return false; }
+    return true;
+  }
+
+  function checkValue(): boolean {
+    if (conditionalBuilder?.kind === 'switch' && conditionalBuilder.cases.some((item) => ['text', 'number', 'date'].includes(inferFormulaKind(item.condition, columns)))) { localError = 'Each When condition needs a comparison that returns true or false.'; return false; }
+    if (!expression) { localError = conditionalBuilder?.kind === 'switch' ? 'Enter a condition and a result for each case, plus an otherwise result.' : conditionalBuilder ? 'Fill every IF operand.' : mode === 'conditional' ? 'Choose IF or Switch, or write SQL.' : 'Enter a formula.'; return false; }
+    return true;
+  }
+
+  function advance() {
     localError = '';
-    onApply(trimmedName, expression);
+    if (step === 0 && !checkName()) return;
+    if (step === 1 && !checkValue()) return;
+    if (!last) { go(step + 1); return; }
+    if (!checkName() || !checkValue()) return;
+    onApply(name.trim(), expression);
+  }
+
+  function keydown(event: KeyboardEvent) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); advance(); }
   }
 </script>
 
-<dialog use:dialogRef aria-labelledby="formula-title" onclose={onClose} oncancel={onCancelAttempt}>
-  <form class="formula-menu" class:switching={conditionalBuilder?.kind === 'switch'} inert={applying} aria-busy={applying} onsubmit={(event) => { event.preventDefault(); submit(); }}>
-    <header>
-      <div><h2 id="formula-title">{targetColumn ? 'Modify column' : 'Insert column'}</h2><p>{boundaryLabel}</p></div>
-      <button type="button" class="close" onclick={() => dialog?.close()} disabled={applying} aria-label="Close">×</button>
-    </header>
+<dialog use:dialogRef aria-labelledby="formula-title" onclose={onClose} oncancel={cancel}>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <form class="sheet" class:settled class:wide class:switching style:height={contentHeight === null ? undefined : `${contentHeight}px`} inert={applying} aria-busy={applying} onsubmit={(event) => { event.preventDefault(); advance(); }} onkeydown={keydown}>
+    <div class="content" bind:this={contentElement}>
+      <header>
+        <div><h2 id="formula-title">{targetColumn ? 'Modify column' : 'Insert column'}</h2><p>{boundaryLabel}</p></div>
+        <button type="button" class="close" onclick={() => dialog?.close()} disabled={applying} aria-label="Close">×</button>
+      </header>
 
-    <label class="field">{targetColumn ? 'Column name' : 'New column name'}
-      <input value={name} oninput={(event) => name = event.currentTarget.value} maxlength="128" autocomplete="off" />
-    </label>
+      {#if steps.length > 1}<StepRail {steps} current={step} onSelect={go} />{/if}
 
-    {#if !targetColumn}
-      <div class="modes" role="group" aria-label="Column value type">
-        <Button type="button" active={mode === 'blank'} aria-pressed={mode === 'blank'} onclick={() => mode = 'blank'}>Blank</Button>
-        <Button type="button" active={mode === 'text'} aria-pressed={mode === 'text'} onclick={() => mode = 'text'}>Repeating text</Button>
-        <Button type="button" active={mode === 'formula'} aria-pressed={mode === 'formula'} onclick={() => mode = 'formula'}>Formula</Button>
-      </div>
-    {/if}
-
-    {#if mode === 'blank'}
-      <p class="note">Every row will contain <code>NULL</code>.</p>
-    {:else if mode === 'text'}
-      <label class="field">Text repeated for every row
-        <input value={repeatingText} oninput={(event) => repeatingText = event.currentTarget.value} />
-      </label>
-    {:else}
-      <div class="formula-workspace" class:switching={conditionalBuilder?.kind === 'switch'}>
-        <aside class="source-pane" aria-label="Source columns">
-          <div class="source-heading"><strong>Columns</strong><small>{matches.length} of {columns.length}</small></div>
-          <label class="field">Find a column
-            <input type="search" value={columnSearch} oninput={(event) => columnSearch = event.currentTarget.value} placeholder="Search columns" autocomplete="off" />
-          </label>
-          <div class="column-results" role="group" aria-label="Source columns">
-            {#each matches as column (column.name)}
-              <button type="button" class:selected={selectedSource === column.name} aria-pressed={selectedSource === column.name} onclick={() => insertColumn(column)} title={column.type}><span>{column.name}</span><small>{column.type}</small></button>
+      {#key step}
+        <div class="step" in:fly={{ x: direction * 14, duration: reducedMotion() ? 0 : 180 }}>
+          {#if step === 0}
+            <label class="field">{targetColumn ? 'Column name' : 'New column name'}
+              <input data-focus value={name} oninput={(event) => name = event.currentTarget.value} maxlength="128" autocomplete="off" placeholder="e.g. total_price" />
+            </label>
+            {#if !targetColumn}
+              <fieldset class="kinds">
+                <legend>What goes in it?</legend>
+                <div class="kind-grid">
+                  <ColumnKindOption glyph="∅" title="Blank" detail="Empty for every row" selected={mode === 'blank'} onselect={() => selectMode('blank')} />
+                  <ColumnKindOption glyph="Aa" title="Repeating text" detail="The same text in every row" selected={mode === 'text'} onselect={() => selectMode('text')} />
+                  <ColumnKindOption glyph="ƒ" title="Formula" detail="Calculate from other columns" selected={mode === 'formula'} onselect={() => selectMode('formula')} />
+                  <ColumnKindOption glyph="?:" title="Conditional" detail="Different values by rule" selected={mode === 'conditional'} onselect={() => selectMode('conditional')} />
+                </div>
+              </fieldset>
+            {/if}
+            {#if mode === 'blank'}<p class="note">Every row will contain <code>NULL</code>.</p>{/if}
+          {:else if step === 1}
+            {#if mode === 'text'}
+              <label class="field">Text repeated for every row
+                <input data-focus value={repeatingText} oninput={(event) => repeatingText = event.currentTarget.value} autocomplete="off" />
+              </label>
             {:else}
-              <p>No matching columns</p>
-            {/each}
-          </div>
-          <p class="source-hint">{conditionalBuilder?.kind === 'switch' ? 'Click a column to insert it into the selected When condition.' : 'Choose a column to start or fill the next operand.'}</p>
-        </aside>
-        <div class="editor-pane">
+              <div class="formula-workspace" class:switching>
+                <aside class="source-pane" aria-label="Source columns">
+                  <div class="source-heading"><strong>Columns</strong><small>{matches.length} of {columns.length}</small></div>
+                  <label class="field">Find a column
+                    <input type="search" value={columnSearch} oninput={(event) => columnSearch = event.currentTarget.value} placeholder="Search columns" autocomplete="off" />
+                  </label>
+                  <div class="column-results" role="group" aria-label="Source columns">
+                    {#each matches as column (column.name)}
+                      <button type="button" class:selected={selectedSource === column.name} aria-pressed={selectedSource === column.name} onclick={() => insertColumn(column)} title={column.type}><span>{column.name}</span><small>{column.type}</small></button>
+                    {:else}
+                      <p>No matching columns</p>
+                    {/each}
+                  </div>
+                  <p class="source-hint">{conditionalBuilder ? 'Click a column to add it to the active condition.' : 'Choose a column to start or fill the next operand.'}</p>
+                </aside>
+                <div class="editor-pane">
 
       {#if conditionalBuilder?.kind === 'if'}
         <fieldset class="conditional-builder">
@@ -341,14 +451,23 @@
           <p class="switch-hint">Use columns and functions to build each condition. Put text in single quotes inside conditions; return text is quoted for you. <code>NULL</code> leaves unmatched rows empty.</p>
           {#if structuredSql}<details><summary>View SQL</summary><code>{structuredSql}</code></details>{/if}
         </section>
+      {:else if choosingConditional}
+        <div class="chooser">
+          <p>Pick a shape, then fill it in. Columns you click are added to the active condition.</p>
+          <div class="kind-grid">
+            <ColumnKindOption glyph="?:" title="If / else" detail="One condition, two results" selected={false} onselect={() => startConditional('if')} />
+            <ColumnKindOption glyph="≡" title="Switch" detail="Several conditions, first match wins" selected={false} onselect={() => startConditional('switch')} />
+          </div>
+          <Button type="button" variant="ghost" onclick={() => { wroteSql = true; focusCaret(formula.length); }}>Write SQL instead</Button>
+        </div>
       {:else}
         <label class="field">Formula
-          <textarea bind:this={textarea} value={formula} oninput={(event) => editFormula(event.currentTarget.value)} rows="3" spellcheck="false" placeholder='Select a column or write SQL'></textarea>
+          <textarea data-focus bind:this={textarea} value={formula} oninput={(event) => editFormula(event.currentTarget.value)} rows="3" spellcheck="false" placeholder='Select a column or write SQL'></textarea>
         </label>
       {/if}
 
       {#if conditionalBuilder?.kind === 'if'}<Button type="button" onclick={useFreeform}>Edit as SQL</Button>{/if}
-      {#if !conditionalBuilder}<div class="operations">
+      {#if !conditionalBuilder && !choosingConditional}<div class="operations">
         <p class="type-status" aria-live="polite">Result type: <strong>{conditionalBuilder ? 'building conditional' : kind === 'unknown' ? 'unknown' : kind}</strong></p>
         <FormulaHelpers onInsert={insertText} onWrap={wrapTyped} onTemplate={templateTyped} onReplace={replaceExpression} keypad {kind} ready={canUseOperations} editable={!conditionalBuilder} {activeFunction}>
           {#snippet conditional()}
@@ -368,35 +487,66 @@
           </aside>
         {/if}
       </div>
-    {/if}
+            {/if}
+          {:else}
+            <dl class="summary">
+              <div><dt>Name</dt><dd><code>{name.trim()}</code></dd></div>
+              <div><dt>{targetColumn ? 'Replaces' : 'Position'}</dt><dd>{boundaryLabel}</dd></div>
+              <div><dt>Result type</dt><dd>{resultType}</dd></div>
+            </dl>
+            <div class="sql"><span>SQL</span><code>{expression}</code></div>
+          {/if}
+        </div>
+      {/key}
 
-    {#if localError || error}<p class="error" role="alert">{localError || error}</p>{/if}
-    <footer>
-      <Button type="button" onclick={() => dialog?.close()} disabled={applying}>Cancel</Button>
-      <Button type="submit" variant="primary" disabled={applying}>{applying ? 'Checking…' : targetColumn ? 'Apply change' : 'Insert column'}</Button>
-    </footer>
+      {#if localError || error}<p class="error" role="alert">{localError || error}</p>{/if}
+      <footer>
+        {#if step === 0}
+          <Button type="button" variant="ghost" onclick={() => dialog?.close()} disabled={applying}>Cancel</Button>
+        {:else}
+          <Button type="button" variant="ghost" onclick={() => go(step - 1)} disabled={applying}>Back</Button>
+        {/if}
+        <Button type="submit" variant="primary" disabled={applying}>{primaryLabel}</Button>
+      </footer>
+    </div>
   </form>
 </dialog>
 
 <style>
-  dialog { padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 14px 40px rgba(0, 0, 0, 0.04); }
-  dialog::backdrop { background: rgba(17, 17, 17, 0.32); }
-  .formula-menu { width: min(920px, 96vw); max-height: 92vh; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
-  .formula-menu.switching { width: min(1220px, 96vw); }
+  dialog { --ease: cubic-bezier(0.2, 0.8, 0.2, 1); padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 14px 40px rgba(0, 0, 0, 0.04); overflow: hidden; }
+  dialog[open]::backdrop { background: rgba(17, 17, 17, 0.32); animation: backdrop-in 240ms ease-out; }
+  .sheet { width: min(460px, 96vw); max-height: 92vh; overflow: hidden; }
+  .sheet.settled { transition: width 260ms var(--ease), height 260ms var(--ease); }
+  .sheet.wide { width: min(920px, 96vw); }
+  .sheet.wide.switching { width: min(1220px, 96vw); }
+  .content { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .step { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
   header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
   h2 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.02em; }
   header p, .note { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); }
   .close { border: 0; background: transparent; color: var(--muted); font-size: 18px; }
+  .kinds { min-width: 0; margin: 0; padding: 0; border: 0; }
+  .kinds legend { margin-bottom: 8px; font-size: 11px; color: var(--muted); }
+  .kind-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .chooser { display: grid; gap: 10px; justify-items: start; }
+  .chooser p { margin: 0; font-size: 11.5px; color: var(--muted); }
+  .chooser .kind-grid { width: 100%; }
+  .summary { display: grid; margin: 0; border: 1px solid var(--line); border-radius: var(--radius-xl); }
+  .summary div { display: flex; justify-content: space-between; gap: 16px; padding: 9px 12px; }
+  .summary div + div { border-top: 1px solid var(--line); }
+  .summary dt { font-size: 11px; color: var(--muted); }
+  .summary dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: var(--ink); text-align: right; }
+  .sql { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface-inset); }
+  .sql span { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .sql code { overflow-wrap: anywhere; font-size: 11.5px; line-height: 1.5; color: var(--ink); }
   .field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
-  .formula-menu > .field { max-width: 440px; }
   input, textarea { width: 100%; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); }
   input { height: 34px; padding: 0 9px; }
   textarea { padding: 8px 9px; resize: vertical; font: 12px/1.5 var(--font-mono); }
-  .modes { display: flex; flex-wrap: wrap; gap: 6px; }
   fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   legend { margin-bottom: 6px; font-size: 11px; color: var(--muted); }
-  .formula-workspace { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); height: min(540px, 60vh); min-height: 340px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  .formula-workspace.switching { grid-template-columns: minmax(190px, 230px) minmax(330px, 1fr) minmax(280px, 370px); height: min(650px, 70vh); }
+  .formula-workspace { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); height: min(540px, calc(92vh - 250px)); min-height: 340px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .formula-workspace.switching { grid-template-columns: minmax(190px, 230px) minmax(330px, 1fr) minmax(280px, 370px); height: min(650px, calc(92vh - 250px)); }
   .source-pane { display: flex; flex-direction: column; min-height: 0; padding: 16px; border-right: 1px solid var(--line); background: var(--surface-inset); }
   .source-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
   .source-heading strong { font-size: 12px; font-weight: 600; color: var(--ink); }
@@ -440,12 +590,15 @@
   .switch-builder summary { cursor: pointer; }
   .switch-builder details code { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--ink); }
   .switch-builder label.active input, .switch-builder label.active textarea { border-color: var(--line-strong); }
+  @keyframes backdrop-in { from { opacity: 0; } }
   @keyframes case-enter { from { opacity: 0; transform: translateY(4px); } }
-  @media (prefers-reduced-motion: reduce) { .switch-case { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .switch-case, dialog[open]::backdrop { animation: none; } .sheet.settled { transition: none; } }
   code { font-family: var(--font-mono); }
   .error { margin: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--error) 45%, var(--line)); border-radius: var(--radius-md); color: var(--error); font-size: 12px; }
-  footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+  footer { display: flex; justify-content: space-between; gap: 8px; padding-top: 2px; }
   @media (max-width: 720px) {
+    .sheet { overflow-y: auto; }
+    .kind-grid { grid-template-columns: 1fr; }
     .formula-workspace { display: block; flex: none; height: auto; min-height: 0; overflow: visible; }
     .source-pane { height: 250px; border-right: 0; border-bottom: 1px solid var(--line); }
     .editor-pane { overflow: visible; }

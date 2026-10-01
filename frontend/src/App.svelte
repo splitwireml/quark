@@ -3357,6 +3357,7 @@
   <FormulaMenu
     columns={result?.columns ?? []}
     targetColumn={mutationTarget.kind === 'modify' ? mutationTarget.column : null}
+    origin={mutationTarget.kind === 'insert' ? mutationTarget.trigger : null}
     initialExpression={mutationTarget.kind === 'modify' ? generatedColumns[mutationTarget.column.name] : undefined}
     boundaryLabel={mutationTarget.kind === 'modify' ? mutationTarget.column.name : mutationTarget.right ? `Between ${mutationTarget.left} and ${mutationTarget.right}` : `After ${mutationTarget.left}`}
     applying={mutationApplying} error={mutationError}
