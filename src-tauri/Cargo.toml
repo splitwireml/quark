@@ -1,0 +1,25 @@
+[package]
+name = "quark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "quark"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+axum.workspace = true
+quark-core = { path = "../crates/quark-core" }
+serde_json.workspace = true
+tauri = "2.12"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
