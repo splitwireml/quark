@@ -99,13 +99,14 @@ Rules for workers:
 - [ ] Trace every **Build** bullet to code, and every **Tests first** bullet to a test that asserts it.
 - [ ] Mutation spot check: break one asserted behavior, confirm a test fails, then revert.
 - [ ] Check scope and budget: only the card's files, within budget, no unrelated edits.
+- [ ] If the unit changes a signature other units use, run `codegraph impact -p /Users/mali/Development/quark <symbol>` against the integrated branch and check every caller is still valid.
 - [ ] Check section 2: no `unwrap()` outside tests, no lock held across `.await`, no DuckDB call on the async runtime, error texts exactly as specified, no unlisted dependencies.
 - [ ] Send a verdict. Changes go back to the same worker when the runtime can resume it. Otherwise send them to one fresh fixer, which gets the worktree, the diff and the findings. After two change rounds, split the unit or escalate to the Lead.
 - [ ] Integrate each approved unit (section 1.6). When the group is done, check that its units fit together (no duplicate helpers, consistent names), run the group gate from section 6, and send a review-group report to the Lead.
 
 **Sprint manager, spawned at the sprint's end:**
 - [ ] Push `rust-desktop/skeleton` and watch CI.
-- [ ] Read the sprint's review-group reports and audit the sprint's hot spots (section 6) in the code. Use targeted reads, not the whole diff.
+- [ ] Read the sprint's review-group reports and audit the sprint's hot spots (section 6) in the code. Use `codegraph node` on the symbols involved, not reads of the whole diff.
 - [ ] Review any **direct** unit the same way a task manager would.
 - [ ] Send a sprint report (section 1.7) to the Lead.
 
@@ -123,7 +124,7 @@ Every worker gets its own git worktree, so parallel work never shares a working 
 - [ ] Run `git config gc.auto 0`, so an automatic gc never races parallel git commands. At the exit gate, restore it with `git config --unset gc.auto`.
 - [ ] Create `/Users/mali/Development/quark-wt/` and the gate worktree, on a detached HEAD so it never holds the branch: `git worktree add --detach /Users/mali/Development/quark-wt/gate rust-desktop/skeleton`.
 - [ ] Start the run log at `/Users/mali/Development/quark-wt/runlog.md`. It is outside the repository and never committed, and a new Lead session can resume from it.
-- [ ] Check the tools: `rustc 1.97.1`, `uv`, Node 22, `npx`.
+- [ ] Check the tools: `rustc 1.97.1`, `uv`, Node 22, `npx`, and `codegraph status -p /Users/mali/Development/quark`. CodeGraph 1.5.0 or later is needed; if the index is missing, run `codegraph init` in the main checkout only.
 
 **Warm caches (Lead, at each batch gate):**
 - The gate worktree builds what later worktrees copy: `cargo build -p quark-core` (and `-p quark` once E4 exists) into `gate/target`, `npm ci` into `gate/frontend/node_modules`, and `uv sync --frozen`.
@@ -151,6 +152,7 @@ A `--ff-only` merge succeeds only if the branch hasn't moved since the rebase. I
 
 **Batch gate (Lead):**
 - [ ] Every unit in the batch is approved and integrated.
+- [ ] Run `codegraph sync -p /Users/mali/Development/quark`, so the next batch's agents query an up-to-date index.
 - [ ] In the gate worktree, run `git checkout --detach rust-desktop/skeleton`, then the batch gate commands from section 6.
 - [ ] Add one line to the run log: batch, base sha, commands, results.
 - [ ] If the gate is red, open a fix batch (one fix unit per failure cluster, 5 at most) and re-run the gate.
@@ -278,15 +280,22 @@ Fixed overhead means the system prompt, tool definitions, `CLAUDE.md` files and 
 2. **No whole large files.**
    - Cards are pasted into assignments. Task managers pull a card out of this plan by line range: find it with `rg -n '^#### <ID> ·'`, then print it with `sed -n`. They never read the whole plan, which is about 26k tokens.
    - Any file longer than about 1,000 lines is read by line range only.
-3. **Rust rules come from the digest** in section 2, not from the full skill (about 9.5k tokens).
-4. **Command output stays compact.**
+3. **CodeGraph before reading files.** The index covers Python, TypeScript, Svelte and Rust. It lives in the main checkout's `.codegraph/` and is not tracked, so worktrees don't have it. Every agent queries it from wherever it runs, with `-p /Users/mali/Development/quark`:
+   - `codegraph node -p <repo> <symbol>` gives one symbol's full source with line numbers, plus its callers. It costs about 1–2k tokens, compared with about 25k for all of `backend/app.py`.
+   - `codegraph explore -p <repo> --max-files 3 "<names or question>"` gives several related symbols and the call paths between them, for about 2–4k tokens.
+   - `codegraph callers`, `codegraph impact` and `codegraph affected` show who depends on a symbol and which tests a change touches.
+   - `-f <file>` narrows a name that appears in several files; `quote`, for example, also exists in a frontend test. `codegraph node -p <repo> -f <file> --symbols-only` lists a file's symbols, which is about 3k tokens for `backend/app.py` and a cheap way to get oriented.
+
+   The index reflects the integrated branch, not a worker's uncommitted edits in its own worktree. Use `rg -n` with line ranges only for files CodeGraph does not cover (YAML, TOML, JSON, Markdown, test data) or where it comes up short. Never run `codegraph init` inside a worktree, because it would build a 50 MB index for each one.
+4. **Rust rules come from the digest** in section 2, not from the full skill (about 9.5k tokens).
+5. **Command output stays compact.**
    - Prefix every command with `rtk`.
    - Pytest triage uses `-q --tb=line`; a single failure uses `--tb=short`.
    - Read CI with `gh run view <id> --json conclusion,jobs`.
-5. **Hard stop at 100k.**
+6. **Hard stop at 100k.**
    - An agent that passes about 40 tool calls, or about 80k tokens of context, stops and sends a handoff: what is done, what is left, and any open question. Its manager continues with a fresh agent.
    - Change rounds resume the original worker only while it is under about 60k. Otherwise a fresh fixer gets the diff and the findings.
-6. **The Lead is a fresh main session, not the planning session.** The planning session is already past 150k.
+7. **The Lead is a fresh main session, not the planning session.** The planning session is already past 150k.
    - The Lead runs each batch as one Workflow script. The script's return value is the compact batch summary, so agent transcripts never enter the Lead's context.
    - If the Lead passes about 80k, it writes a handoff to the run log, and a new session continues from there.
 
@@ -299,7 +308,8 @@ Every unit's requirements include this section.
 **Process**
 - **Context budget (every agent):** target 60k tokens of context, hard stop at 100k (section 1.10).
   - Past about 40 tool calls, stop and send a handoff.
-  - Read only what your card or assignment names. In files longer than about 1,000 lines, use `rg -n` and read line ranges.
+  - Look code up with CodeGraph first, using `-p /Users/mali/Development/quark` (rule 3 in section 1.10). Use `codegraph node -p <repo> <symbol>` for one symbol and `codegraph explore -p <repo> --max-files 3 "<names>"` for an area. For a port, start with the Python symbols listed for your unit under **Python reference symbols** below.
+  - Read only what your card or assignment names. For anything CodeGraph doesn't cover, in a file longer than about 1,000 lines, use `rg -n` and read line ranges.
   - Never read these in full: `tests/test_backend.py`, `frontend/src/App.svelte`, `backend/app.py`, the plan, the spec.
   - Prefix every shell command with `rtk`.
 - **Worktree:** work only inside your own worktree (section 1.6). Commit subjects follow Conventional Commits with scopes `core`, `desktop`, `ui`, `tests`, `ci` or `build`. Every commit message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -378,6 +388,31 @@ User-facing failures are `ApiError`, rendered as `{"detail": "<text>"}`. The exa
 - **Naming:**
   - Treat acronyms as words: `ApiError`, `SqlQueryRequest` [name-acronym-word].
   - Booleans start with `is_` or `has_` [name-is-has-bool].
+
+**Python reference symbols** (all are in `backend/app.py` unless noted; look each up with `codegraph node -p /Users/mali/Development/quark -f backend/app.py <symbol>`)
+
+| Units | Symbols |
+|---|---|
+| A1 | `quote`, `scan_expression` |
+| A2 | `dataset_name`, `page_count` |
+| A3 | `datasets_for`, `mount_project_source` (the id encodings) |
+| A4 | `profile_kind`, plus the constants `NUMERIC`, `TEXT`, `DATE`, `ARROW_NATIVE` |
+| A5 | `literal` |
+| A6, A8, A10 | `safe`, `query_response` (the JSON-fallback encoding) |
+| A7 | `Query`, `Filter`, `Sort`, `SQLRequest`, `SQLQuery` |
+| A9 | `filtered_relation`, `controlled_query` |
+| B3, B5 | `connect`, `datasets_for`, `metadata`, `workspace_for` |
+| B4 | `read_only_sql`, `sql_metadata` |
+| B6 | `mount_project_source`, `mount_dataset`, `workspace_for` |
+| B7, B8 | `query_response`, `sql_metadata`, `sql_query`, `query` |
+| C1, C2 | `client`, `upload`, `dataset`, `make_client` in `tests/test_backend.py` and `tests/backend_client.py` |
+| C3, C4, C5 | `save_projects`, `save_registry`, `lifespan` |
+| C6 | `list_projects`, `create_project`, `list_project_sources`, `get_project_source`, `list_project_views`, `get_connection`, `public`, `public_project` |
+| C7, C9 | `upload`, `add`, `delete_node`, `invalidate_project` |
+| C8, C10 | `list_nodes`, `list_datasets`, `query`, `sql_query`, `duckdb_error` |
+| E2 | `responseFor`, `exportData` in `frontend/src/lib/api.ts` |
+
+Units not listed (B1, B2, C11, C12, D1–D12, E1, E3–E9) have no Python counterpart. They look up the Rust symbols in their **Needs**.
 
 ## 3. Review Focus
 
@@ -1421,6 +1456,7 @@ Each batch lists its review groups, the hot spots its task manager and sprint ma
        | routes | `api/*` |
 
      - a budget of 100 lines;
+     - the Python and Rust snippets involved, pulled with `codegraph node` (about 1–2k tokens each), so the fix worker doesn't have to search;
      - a Rust regression test that reproduces the failure.
   3. Repeat until nothing fails.
 - **Rules:**
