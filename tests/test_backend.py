@@ -6,7 +6,6 @@ import json
 import sys
 import threading
 import time
-import warnings
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -18,16 +17,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import duckdb
 import pytest
 
-warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient` is deprecated.*")
-from fastapi.testclient import TestClient
-
 import backend.app as backend_app
-from backend.app import create_app, page_count, safe
+from backend.app import page_count, safe
+from backend_client import make_client
 
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         yield client
 
 
@@ -218,7 +215,7 @@ def test_export_and_metadata_are_serialized(tmp_path, monkeypatch):
         "connect",
         lambda *args, **kwargs: CoordinatedConnection(original_connect(*args, **kwargs)),
     )
-    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as client:
+    with make_client(tmp_path, raise_server_exceptions=False) as client:
         node = upload(client, "items.csv", b"value\n1\n")
         payload = {
             "format": "csv",
@@ -359,8 +356,7 @@ def test_export_csv_requires_exactly_one_sheet_and_payload_bounds(client):
 
 
 def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
-    app = create_app(tmp_path)
-    with TestClient(app) as client:
+    with make_client(tmp_path) as client:
         node = upload(client, "people.csv", b"name,age\nAda,37\nBob,\n")
         assert node["name"] == "people.csv"
         assert node["kind"] == "upload"
@@ -373,7 +369,7 @@ def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
 
     registry = json.loads((tmp_path / "registry.json").read_text())
     assert registry == [{**node, "dataset_name": "people"}]
-    with TestClient(create_app(tmp_path)) as restarted:
+    with make_client(tmp_path) as restarted:
         assert restarted.get("/api/nodes").json() == [node]
         assert restarted.delete(f"/api/nodes/{node['id']}").status_code == 204
         assert restarted.get("/api/nodes").json() == []
@@ -389,7 +385,7 @@ def test_flat_file_aliases_are_safe_and_persist_across_restart(tmp_path):
         ("Mixed.Case Name.csv", "mixed_case_name"),
     ]
     uploaded = []
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         for filename, alias in cases:
             node = upload(client, filename, b"value\n1\n")
             uploaded.append((node, alias))
@@ -400,7 +396,7 @@ def test_flat_file_aliases_are_safe_and_persist_across_restart(tmp_path):
 
     registry = json.loads((tmp_path / "registry.json").read_text())
     assert [node["dataset_name"] for node in registry] == [alias for _, alias in uploaded]
-    with TestClient(create_app(tmp_path)) as restarted:
+    with make_client(tmp_path) as restarted:
         for node, alias in uploaded:
             assert [item["name"] for item in restarted.get(f"/api/nodes/{node['id']}/datasets").json()] == [alias]
             response = restarted.post(f"/api/nodes/{node['id']}/sql", json={"sql": f"SELECT * FROM {alias}"})
@@ -415,7 +411,7 @@ def test_legacy_registry_without_dataset_name_keeps_data_view(tmp_path):
     node = {"id": "legacy", "name": "Claims v1.csv", "kind": "upload", "source": str(source)}
     (tmp_path / "registry.json").write_text(json.dumps([node]))
 
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         assert [item["name"] for item in client.get("/api/nodes/legacy/datasets").json()] == ["data"]
         response = client.post("/api/nodes/legacy/sql", json={"sql": "SELECT * FROM data"})
         assert response.status_code == 200, response.text
@@ -428,7 +424,7 @@ def test_restart_keeps_registry_entries_when_a_source_is_temporarily_missing(tmp
     (tmp_path / "uploads").mkdir()
     (tmp_path / "registry.json").write_text(json.dumps([node]))
 
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         assert client.get("/api/nodes").json() == []
         uploaded = upload(client, "new.csv", b"value\n1\n")
         assert json.loads((tmp_path / "registry.json").read_text()) == [node, {**uploaded, "dataset_name": "new"}]
@@ -574,12 +570,12 @@ def test_workbook_confirmation_validates_selection_and_cancel(client, tmp_path):
 
 
 def test_restart_discards_unconfirmed_workbook_upload(tmp_path):
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         preview = workbook_preview(client, tmp_path)
         source = tmp_path / "uploads" / f"{preview['id']}.xlsx"
         assert source.exists()
 
-    with TestClient(create_app(tmp_path)) as restarted:
+    with make_client(tmp_path) as restarted:
         assert restarted.post(f"/api/nodes/upload/{preview['id']}/confirm", json={"sheets": ["People"]}).status_code == 404
     assert source.exists() is False
 
@@ -988,7 +984,7 @@ def test_category_values_do_not_share_a_connection_concurrently(tmp_path, monkey
                 self.executing.release()
 
     monkeypatch.setattr(backend_app.duckdb, "connect", lambda *args, **kwargs: GuardedConnection(original_connect(*args, **kwargs)))
-    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as client:
+    with make_client(tmp_path, raise_server_exceptions=False) as client:
         node = client.post("/api/nodes/attach", json={"path": str(db)}).json()
         dataset_id = dataset(client, node, "items")["id"]
         url = f"/api/nodes/{node['id']}/datasets/{dataset_id}/columns/category/values"
@@ -1123,7 +1119,7 @@ def test_missing_nodes_and_stale_registry_are_not_active(tmp_path):
     (tmp_path / "registry.json").write_text(json.dumps([{
         "id": "gone", "name": "gone.csv", "kind": "upload", "source": str(tmp_path / "gone.csv")
     }]))
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         assert client.get("/api/nodes").json() == []
         assert client.get("/api/nodes/gone/datasets").status_code == 404
 
@@ -1249,7 +1245,7 @@ def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
 
 
 def test_stats_invalid_filter_value_returns_422(tmp_path):
-    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as stats_client:
+    with make_client(tmp_path, raise_server_exceptions=False) as stats_client:
         node = upload(stats_client, "values.csv", b"value\n1\n2\n")
         base = f"/api/nodes/{node['id']}/datasets/{dataset(stats_client, node, 'values')['id']}"
         response = stats_client.post(base + "/columns/value/stats", json={
@@ -1573,7 +1569,7 @@ def test_project_source_api_layers_mount_only_the_requested_source(tmp_path, mon
         return connections[-1]
 
     monkeypatch.setattr(backend_app.duckdb, "connect", recording_connect)
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         project = create_project(client, "Layered")
         other = create_project(client, "Other")
         first = project_upload(client, project, "first.csv", b"value\n1\n")
@@ -1640,7 +1636,7 @@ def test_project_source_api_layers_mount_only_the_requested_source(tmp_path, mon
 
 
 def test_projects_persist_with_stable_workspace_ids(tmp_path):
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         project = create_project(client, "  Sales  ")
         assert project == {
             "id": project["id"], "name": "Sales",
@@ -1651,7 +1647,7 @@ def test_projects_persist_with_stable_workspace_ids(tmp_path):
             project,
         ]
 
-    with TestClient(create_app(tmp_path)) as restarted:
+    with make_client(tmp_path) as restarted:
         assert restarted.get("/api/projects").json()[1] == project
 
 
@@ -1662,7 +1658,7 @@ def test_legacy_sources_are_visible_in_default_project_without_registry_migratio
     stored = {"id": "legacy", "name": "legacy.csv", "kind": "upload", "source": str(source)}
     (tmp_path / "registry.json").write_text(json.dumps([stored]))
 
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         assert client.get("/api/projects").json()[0]["source_count"] == 1
         assert client.get("/api/projects/default/sources").json() == [{"id": "legacy", "name": "legacy.csv"}]
         assert client.get("/api/nodes").json() == [stored]
@@ -1671,7 +1667,7 @@ def test_legacy_sources_are_visible_in_default_project_without_registry_migratio
 
 
 def test_project_sources_are_isolated_and_base_views_execute_in_project_workspace(tmp_path):
-    with TestClient(create_app(tmp_path)) as client:
+    with make_client(tmp_path) as client:
         first = create_project(client, "First")
         second = create_project(client, "Second")
         source = project_upload(client, first, "people.csv", b"id,name\n1,Ada\n2,Bob\n")
@@ -1705,7 +1701,7 @@ def test_project_sources_are_isolated_and_base_views_execute_in_project_workspac
         "source": str(tmp_path / "uploads" / f"{source['id']}.csv"),
         "dataset_name": "people",
     }]
-    with TestClient(create_app(tmp_path)) as restarted:
+    with make_client(tmp_path) as restarted:
         assert restarted.get(f"/api/projects/{first['id']}/views").json() == views
 
 
@@ -1746,7 +1742,7 @@ def test_project_sql_requests_serialize_shared_workspace(tmp_path, monkeypatch):
         "connect",
         lambda *args, **kwargs: CoordinatedConnection(original_connect(*args, **kwargs)),
     )
-    with TestClient(create_app(tmp_path), raise_server_exceptions=False) as client:
+    with make_client(tmp_path, raise_server_exceptions=False) as client:
         project = create_project(client, "Concurrent")
         project_upload(client, project, "values.csv", b"value\n0\n")
         client.get(f"/api/projects/{project['id']}/views").raise_for_status()
