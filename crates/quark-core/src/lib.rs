@@ -3,6 +3,7 @@
 pub mod error;
 pub mod ids;
 pub mod literal;
+pub mod query;
 pub mod registry;
 pub mod sql;
 pub mod values;
