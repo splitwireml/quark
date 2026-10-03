@@ -120,7 +120,7 @@ Rules for workers:
 Every worker gets its own git worktree, so parallel work never shares a working tree, an index or build output.
 
 **Pre-flight (Lead, once):**
-- [ ] The main checkout (`/Users/mali/Development/quark`) stays on `rust-desktop/skeleton`, and each integration fast-forwards it, so the human sees every unit land. During the run, the human neither commits on this branch nor edits files the plan touches. The existing uncommitted change to `AggregateMenuPopover.svelte` is fine, because no unit touches that file.
+- [ ] The main checkout (`/Users/mali/Development/quark`) stays on `rust-desktop/skeleton`, and each integration fast-forwards it, so the human sees every unit land. During the run, the human neither commits on this branch nor edits files the plan touches. Uncommitted edits to other files are fine, because the fast-forward merges only touch the files a unit changed.
 - [ ] Run `git config gc.auto 0`, so an automatic gc never races parallel git commands. At the exit gate, restore it with `git config --unset gc.auto`.
 - [ ] Create `/Users/mali/Development/quark-wt/` and the gate worktree, on a detached HEAD so it never holds the branch: `git worktree add --detach /Users/mali/Development/quark-wt/gate rust-desktop/skeleton`.
 - [ ] Start the run log at `/Users/mali/Development/quark-wt/runlog.md`. It is outside the repository and never committed, and a new Lead session can resume from it.
@@ -161,7 +161,7 @@ A `--ff-only` merge succeeds only if the branch hasn't moved since the rebase. I
 **Safety rules:**
 - Only sprint managers push, only `rust-desktop/skeleton`, and only at sprint gates. Nothing is merged into `rust-desktop/integration` or `main`, and no pull requests are opened.
 - Worktree creation and removal can run concurrently. Fast-forward merges into the main checkout are serialized by git's index lock. If a git command fails on a `.lock` file, wait 2 s and retry; never delete lock files by hand.
-- Never stage or modify the user's work in progress: `frontend/src/components/organisms/AggregateMenuPopover.svelte`, `.agents/`, `.claude/skills/rust-skills`, `.hermes/`, `.pi/`, `skills-lock.json`.
+- Never stage or modify anything outside the card's file list. That includes the installed agent skills under `.agents/`, `.claude/skills/`, `.hermes/` and `.pi/`, and `skills-lock.json`.
 
 ### 1.7 Message templates
 
