@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.97"
 
 [workspace.dependencies]
+base64 = "0.23"
 axum = { version = "0.8", features = ["multipart"] }
 duckdb = { version = "=1.10504.0", features = ["bundled", "parquet", "json"] }
 serde = { version = "1", features = ["derive"] }
