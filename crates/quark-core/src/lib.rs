@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod ids;
+pub mod literal;
 pub mod registry;
 pub mod sql;
 pub mod values;
