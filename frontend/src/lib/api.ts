@@ -1,8 +1,9 @@
+import { apiFetch } from './api-transport';
 import { ARROW_MEDIA_TYPE, decodeQueryResponse } from './table-rows';
 import type { BaseViewInfo, CategoryValuesResponse, ColumnStats, DatasetInfo, ExportDownload, ExportRequest, JoinWorkspaceRequest, JoinWorkspaceResponse, NodeInfo, ProjectInfo, ProjectSourceInfo, QueryRequest, QueryResponse, SourceSummary, SqlQueryRequest, SqlVisualizeRequest, VisualizeRequest, VisualizeResponse, WorkbookPreview } from './types';
 
 async function responseFor(url: string, init?: RequestInit): Promise<Response> {
-  const response = await fetch(url, init);
+  const response = await apiFetch(url, init);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
@@ -87,15 +88,7 @@ export function previewJoinWorkspace(body: JoinWorkspaceRequest): Promise<JoinWo
 }
 
 export async function exportData(body: ExportRequest): Promise<ExportDownload> {
-  const response = await fetch('/api/exports', json(body));
-  if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
-    try {
-      const detail = await response.json();
-      message = detail.detail ?? detail.message ?? message;
-    } catch { /* use HTTP status */ }
-    throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
-  }
+  const response = await responseFor('/api/exports', json(body));
   const disposition = response.headers.get('Content-Disposition') ?? '';
   const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
   const quoted = disposition.match(/filename="([^"]+)"/i)?.[1];
