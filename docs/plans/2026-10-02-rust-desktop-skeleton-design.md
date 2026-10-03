@@ -83,7 +83,7 @@ These boundaries are a starting point; the plan may merge small modules.
 ### 4.3 Runtime model
 
 - **Engines.** An engine is one DuckDB database the backend owns. It is either a project workspace (an in-memory database with one schema per mounted source dataset) or a legacy per-node database (default-project sources addressed by node id). Both use the same code, so every efficiency upgrade applies to both.
-- **Serialization.** Request handling keeps today's global serialization. One `std::sync::Mutex` guards engine use. Handlers take it inside `tokio::task::spawn_blocking` and never hold it across an `.await`. The lock carries a `ponytail:` comment naming its ceiling (one query at a time) and its upgrade path (parallel reads, sub-project 2).
+- **Serialization.** Each engine's DuckDB connection sits behind its own `std::sync::Mutex`, so one engine runs one query at a time, as today. Project and source metadata sit behind a separate catalog lock that is never held during a query, so an upload can register while a slow query runs (the existing pytest suite checks this). Handlers take locks inside `tokio::task::spawn_blocking` and never hold one across an `.await`. Locks recover from poisoning, so a panic in one request cannot wedge later ones. The connection lock carries a `ponytail:` comment naming its ceiling (one query at a time per engine) and its upgrade path (parallel reads, sub-project 2).
 - **Background work.** Columnar imports and result materialization run on cloned connections or separate databases outside the lock, so a request never waits for a cache to finish building.
 - **Rebuild, don't mutate.** When an engine's sources change, the engine is rebuilt. The old one stays alive through an `Arc` until work using it finishes. Each rebuild increments a generation number that is part of every cache key.
 
@@ -138,7 +138,7 @@ The desktop app uses Tauri's `app_local_data_dir()`:
 
 At startup the backend reads both files, tolerating malformed content as today. A source is active when its file exists. The registry is never rewritten at startup, and files in `uploads/` that no registry entry references are deleted.
 
-Sources open on first use rather than at launch. One consequence differs from Python: a file that exists but cannot be read now appears in the source list and errors when opened, where Python hid it.
+Sources open on first use rather than at launch. One consequence differs from Python: a file that exists but cannot be read now appears in the source list and errors when opened, where Python hid it. Uploads are still validated by opening them, as today: a file DuckDB cannot read returns 400 "Could not open source: ..." and is deleted.
 
 An existing `./data` folder keeps working by pointing `QUARK_DATA_DIR` at it. There is no automatic migration.
 
@@ -157,7 +157,7 @@ Before user SQL is described or executed, `SELECT json_serialize_sql(?)` must re
 
 Checked against DuckDB 1.5.4 on 21 statements, it agrees with Python's `extract_statements` plus SELECT-type check on all of them except the PRAGMA shorthand (`pragma version`), which it also rejects. That stricter behavior is accepted.
 
-A rejected statement returns 422 "SQL accepts only one read-only SELECT query". A parse failure returns 422 "Invalid SQL query: ...". Accepted SQL runs only inside `query(?)` with the text bound as a parameter, exactly as today. If a pytest guard case ever disagrees, the fallback is DuckDB's C API statement extraction in one small `unsafe` module.
+A rejected statement, an empty string, or more than one statement returns 422 "SQL accepts only one read-only SELECT query". A parse failure returns 422 "Invalid SQL query: Parser Error: <DuckDB's message>", which matches Python's text. Accepted SQL runs only inside `query(?)` with the text bound as a parameter, exactly as today. If a pytest guard case ever disagrees, the fallback is DuckDB's C API statement extraction in one small `unsafe` module.
 
 ### 5.6 Query building
 
@@ -168,7 +168,7 @@ Ported unchanged from `filtered_relation` and `controlled_query`:
 - Dedupe uses `QUALIFY row_number() OVER (PARTITION BY keys) = 1`. Keys must be unique, existing columns.
 - Sorts apply in order. Unknown columns return 422.
 - Values are bound parameters. Identifiers are validated against `DESCRIBE` output and double-quoted.
-- The response's `sql` field is the display form, with literals inlined by `literal()`'s rules (NULL, TRUE and FALSE, integers, Python-style float repr including `'NaN'::DOUBLE` and `'Infinity'::DOUBLE`, quoted strings), when filters, sorts or dedupe are present. Otherwise it is the original SQL.
+- The response's `sql` field is the display form, with literals inlined by `literal()`'s rules (NULL, TRUE and FALSE, integers, Python-style float repr, quoted strings), when filters, sorts or dedupe are present. Otherwise it is the original SQL, trimmed. Filter values arrive as JSON, which cannot carry NaN or infinity, so Python's `'NaN'::DOUBLE` and `'Infinity'::DOUBLE` branches are not needed.
 - Each page reports total rows, the page itself (`LIMIT ? OFFSET ?`), the null fraction of every column, elapsed milliseconds to three decimals, and the page count. Section 6 caches parts of this.
 
 ### 5.7 Response encoding
@@ -330,7 +330,8 @@ Versions, dashboards and settings stay in `localStorage`. The Tauri page origin 
 ### 7.6 Developer workflow
 
 - `cargo tauri dev` opens the app window with the Vite dev server (live UI reload) and the Rust backend.
-- `quark-dev-server [--data-dir DIR] [--cache-dir DIR] [--port N]` serves the bare router on `127.0.0.1`. Defaults: port 8000, data folder `./data`, cache folder `<data dir>/cache`. It has no token and is never bundled. When asked for port 0, it prints `QUARK_LISTENING 127.0.0.1:<port>` as its first line of output. It must not share a data folder with a running Python server.
+- `quark-dev-server [--data-dir DIR] [--cache-dir DIR] [--port N]` serves the bare router on `127.0.0.1`. Defaults: port 8000, data folder `./data`, cache folder `<data dir>/cache`. It has no token and is never bundled. Its first line of output is always `QUARK_LISTENING 127.0.0.1:<port>`, which tells a test the port it got when it asked for port 0. It must not share a data folder with a running Python server.
+- **Transport self-test.** Launching the app with `QUARK_SELF_TEST=1` makes the window, once its page has loaded, call `/api/projects` through the real webview, CORS, Host and token path. The app then exits with 0 on success, or 1 if that hasn't succeeded within 30 seconds. Agents and CI can verify the transport on each OS this way without clicking anything. The hook is inert unless the variable is set.
 - The Python backend keeps working until sub-project 5.
 
 ## 8. Testing
@@ -399,7 +400,7 @@ These run locally as an ignored Rust test plus the existing benchmark, not in CI
 
 ## 9. CI and builds
 
-One workflow, `.github/workflows/ci.yml`, runs on pull requests and pushes to main.
+One workflow, `.github/workflows/ci.yml`, runs on pull requests, on pushes to `main` and to `rust-desktop/**` branches (the pivot is not merged anywhere yet, so its branches need CI of their own), and on manual runs.
 
 | Job | Runs on | Steps |
 |---|---|---|
@@ -407,7 +408,7 @@ One workflow, `.github/workflows/ci.yml`, runs on pull requests and pushes to ma
 | lint | ubuntu-22.04 | `cargo fmt --check`; `cargo clippy --workspace -- -D warnings` with workspace-level lints (WebKitGTK headers installed) |
 | python | ubuntu-22.04 | `uv run pytest` in Python mode |
 | frontend | ubuntu-22.04 | `npm ci`, `npm test`, `npm run check`, `npm run build` |
-| bundle | macos-latest, windows-latest, ubuntu-22.04 | Pushes to main and manual runs only; unsigned installers uploaded as artifacts |
+| bundle | macos-latest, windows-latest, ubuntu-22.04 | Pushes to main and manual runs only; unsigned installers uploaded as artifacts; then the built app runs the transport self-test (under `xvfb-run` on Ubuntu) |
 
 The core job runs on all three OSes because Windows paths (backslashes, drive letters in `allowed_paths`) are the likeliest thing to break.
 
@@ -429,7 +430,7 @@ Build cost and housekeeping:
 The skeleton is done when:
 
 1. CI is green on all three OSes: core tests, `pytest -m skeleton` against Rust, the Python suite in Python mode, and the frontend checks.
-2. CI has built installers for all three OSes, and the manual smoke test (section 8.5) passes on each.
+2. CI has built installers for all three OSes, the transport self-test (section 7.6) passes on each, and the manual smoke test (section 8.5) passes on each.
 3. The performance acceptance (section 8.6) is met.
 4. The cancellation test (section 8.2) passes.
 
