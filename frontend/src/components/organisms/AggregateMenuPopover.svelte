@@ -130,7 +130,7 @@
   .field-option small { flex: none; font: 10px var(--font-mono); color: var(--faint); }
   .field-option.used small { color: var(--action-dark); }
   .empty { margin: 4px 0; font-size: 11px; color: var(--faint); }
-  .columns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .columns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-height: 136px; overflow-y: auto; }
   .column-role { display: inline-flex; min-width: 0; animation: recipe-in 160ms cubic-bezier(0.16, 1, 0.3, 1); }
   .column-role :global(.chip) { height: 28px; gap: 4px; padding-left: 4px; }
   .column-role :global(.remove) { width: 22px; height: 24px; }
