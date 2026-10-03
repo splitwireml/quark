@@ -7,3 +7,4 @@ frontend/dist/
 data/
 cloudflared.log
 .DS_Store
+/target/
