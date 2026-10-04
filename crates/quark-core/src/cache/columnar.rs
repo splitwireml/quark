@@ -233,8 +233,14 @@ fn remove_stray_partials(columnar_dir: &Path) {
         return;
     };
     for path in entries.flatten().map(|entry| entry.path()) {
-        if path.to_string_lossy().ends_with(".partial") {
+        let name = path.to_string_lossy();
+        if name.ends_with(".partial") {
             remove_partial(&path);
+        } else if name.ends_with(".partial.wal")
+            && let Err(error) = fs::remove_file(&path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "could not delete an orphan partial log");
         }
     }
 }
@@ -413,6 +419,21 @@ mod tests {
             .query_row("SELECT count(*) FROM data", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn orphan_partial_wal_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let columnar = cache.join("columnar");
+        fs::create_dir_all(&columnar).unwrap();
+        let wal = columnar.join("x.duckdb.partial.wal");
+        fs::write(&wal, b"orphan log").unwrap();
+
+        let (mut worker, _ready) = start(&cache);
+        worker.shutdown();
+
+        assert!(!wal.exists());
     }
 
     #[test]
