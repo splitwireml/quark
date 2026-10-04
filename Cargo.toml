@@ -46,5 +46,8 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+[profile.release.build-override]
+strip = false
+
 [profile.dev.package.libduckdb-sys]
 opt-level = 3
