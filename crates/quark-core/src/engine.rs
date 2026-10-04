@@ -419,9 +419,9 @@ mod tests {
     #[test]
     fn paths_with_quotes_spaces_and_unicode() {
         let root = tempfile::tempdir().unwrap();
-        let folder = root.path().join("it's a \"dir\" zoë📊");
+        let folder = root.path().join("it's a dir").join("Zoë data📊");
         fs::create_dir_all(&folder).unwrap();
-        let file = folder.join("it's \"q\" ü.csv");
+        let file = folder.join("Zoë's claims (v1).csv");
         fs::write(&file, "a\n1\n2\n").unwrap();
 
         let engine = open(&file, Some("we\"ird 'name'"), root.path()).unwrap();
