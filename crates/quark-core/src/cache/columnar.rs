@@ -1,11 +1,23 @@
-//! Columnar cache identity: a hash of the source file's identity and how it is scanned.
+//! Columnar cache identity (a hash of the source file's identity and how it is scanned)
+//! and the background worker that fills the cache.
 
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fmt::Write;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, JoinHandle};
 use std::time::UNIX_EPOCH;
 
+use anyhow::{Context, bail};
+use duckdb::{Connection, InterruptHandle};
 use sha2::{Digest, Sha256};
+
+use crate::engine::{Dirs, configure_spill, lock_down_paths};
 
 /// Content-addressed name of a columnar cache file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -59,10 +71,179 @@ impl ColumnarKey {
     }
 }
 
+/// One flat file to import into the columnar cache.
+pub struct ColumnarJob {
+    pub source_id: String,
+    pub key: ColumnarKey,
+    pub source_path: PathBuf,
+    pub scan_expression: String,
+}
+
+#[derive(Default)]
+struct Shared {
+    is_stopping: AtomicBool,
+    running: Mutex<Option<Arc<InterruptHandle>>>,
+}
+
+impl Shared {
+    fn running(&self) -> MutexGuard<'_, Option<Arc<InterruptHandle>>> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.is_stopping.load(Ordering::SeqCst)
+    }
+}
+
+/// Imports flat files into per-source DuckDB files, one at a time, on its own thread.
+pub struct ColumnarWorker {
+    sender: Option<Sender<ColumnarJob>>,
+    shared: Arc<Shared>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ColumnarWorker {
+    /// Clears stray `*.partial` files, then starts the worker thread.
+    /// `on_ready` is called with the source id after each import lands.
+    pub fn start(
+        cache_dir: &Path,
+        spill_dir: &Path,
+        on_ready: Box<dyn Fn(String) + Send>,
+    ) -> ColumnarWorker {
+        remove_stray_partials(&cache_dir.join("columnar"));
+        let (sender, receiver) = mpsc::channel();
+        let shared = Arc::new(Shared::default());
+        let context = WorkerContext {
+            cache_dir: cache_dir.to_owned(),
+            // `configure_spill` derives the spill folder as `<cache>/duckdb-tmp`.
+            spill_dirs: Dirs {
+                data: cache_dir.to_owned(),
+                cache: spill_dir.parent().unwrap_or(spill_dir).to_owned(),
+            },
+            shared: Arc::clone(&shared),
+            on_ready,
+        };
+        let thread = thread::spawn(move || context.run(&receiver));
+        ColumnarWorker {
+            sender: Some(sender),
+            shared,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn enqueue(&self, job: ColumnarJob) {
+        let Some(sender) = &self.sender else {
+            tracing::warn!(source_id = %job.source_id, "columnar worker is stopped; job dropped");
+            return;
+        };
+        if let Err(rejected) = sender.send(job) {
+            tracing::warn!(source_id = %rejected.0.source_id, "columnar worker is gone; job dropped");
+        }
+    }
+
+    /// Stops accepting jobs, interrupts the running import and waits for the thread.
+    pub fn shutdown(&mut self) {
+        self.shared.is_stopping.store(true, Ordering::SeqCst);
+        self.sender = None;
+        if let Some(handle) = self.shared.running().as_ref() {
+            handle.interrupt();
+        }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::warn!("columnar worker thread panicked");
+        }
+    }
+}
+
+struct WorkerContext {
+    cache_dir: PathBuf,
+    spill_dirs: Dirs,
+    shared: Arc<Shared>,
+    on_ready: Box<dyn Fn(String) + Send>,
+}
+
+impl WorkerContext {
+    fn run(&self, receiver: &Receiver<ColumnarJob>) {
+        let mut failed = HashSet::new();
+        for job in receiver {
+            if self.shared.is_stopping() {
+                break;
+            }
+            if job.key.is_ready(&self.cache_dir) || failed.contains(&job.key) {
+                continue;
+            }
+            let outcome = self.import(&job);
+            *self.shared.running() = None;
+            match outcome {
+                Ok(()) => (self.on_ready)(job.source_id),
+                Err(error) => {
+                    remove_partial(&job.key.partial_path(&self.cache_dir));
+                    if !self.shared.is_stopping() {
+                        // Display shows only the outermost context, never DuckDB's cell values.
+                        tracing::warn!(source_id = %job.source_id, %error, "columnar import failed");
+                        failed.insert(job.key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn import(&self, job: &ColumnarJob) -> anyhow::Result<()> {
+        let partial = job.key.partial_path(&self.cache_dir);
+        fs::create_dir_all(self.cache_dir.join("columnar"))
+            .context("could not create the columnar folder")?;
+        remove_partial(&partial);
+        let conn = Connection::open(&partial).context("could not create the columnar file")?;
+        *self.shared.running() = Some(conn.interrupt_handle());
+        if self.shared.is_stopping() {
+            bail!("import cancelled");
+        }
+        configure_spill(&conn, &self.spill_dirs)?;
+        lock_down_paths(&conn, &[job.source_path.to_string_lossy().into_owned()])?;
+        conn.execute_batch(&format!(
+            "CREATE TABLE data AS SELECT * FROM {}",
+            job.scan_expression
+        ))
+        .context("could not import the source")?;
+        conn.close()
+            .map_err(|(_, error)| error)
+            .context("could not close the columnar file")?;
+        fs::rename(&partial, job.key.final_path(&self.cache_dir))
+            .context("could not publish the columnar file")?;
+        Ok(())
+    }
+}
+
+/// Deletes a partial import and the write-ahead log DuckDB may have left beside it.
+fn remove_partial(partial: &Path) {
+    let mut wal = OsString::from(partial);
+    wal.push(".wal");
+    for path in [partial, Path::new(&wal)] {
+        if let Err(error) = fs::remove_file(path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "could not delete a partial columnar file");
+        }
+    }
+}
+
+fn remove_stray_partials(columnar_dir: &Path) {
+    let Ok(entries) = fs::read_dir(columnar_dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.to_string_lossy().ends_with(".partial") {
+            remove_partial(&path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::{self, File};
+    use crate::sql::scan_expression;
+    use std::fs::File;
     use std::time::Duration;
 
     const SCAN: &str = "read_csv_auto('x.csv')";
@@ -145,5 +326,123 @@ mod tests {
         assert!(!key.is_ready(&cache));
         fs::write(key.final_path(&cache), b"").unwrap();
         assert!(key.is_ready(&cache));
+    }
+
+    const WAIT: Duration = Duration::from_secs(60);
+
+    fn start(cache: &Path) -> (ColumnarWorker, Receiver<String>) {
+        let (sender, ready) = mpsc::channel();
+        let on_ready = Box::new(move |source_id: String| {
+            sender.send(source_id).unwrap();
+        });
+        let worker = ColumnarWorker::start(cache, &cache.join("duckdb-tmp"), on_ready);
+        (worker, ready)
+    }
+
+    fn job(dir: &Path, name: &str, body: &str) -> ColumnarJob {
+        let file = dir.join(name);
+        fs::write(&file, body).unwrap();
+        let scan = scan_expression(&file.to_string_lossy()).unwrap();
+        ColumnarJob {
+            source_id: name.to_owned(),
+            key: key(&file, &scan, VERSION),
+            source_path: file,
+            scan_expression: scan,
+        }
+    }
+
+    fn snapshot(conn: &Connection, from: &str) -> (Vec<(String, String)>, Vec<String>) {
+        let columns = conn
+            .prepare(&format!("DESCRIBE SELECT * FROM {from}"))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT CAST(t AS VARCHAR) FROM (SELECT * FROM {from}) t"
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        (columns, rows)
+    }
+
+    #[test]
+    fn import_matches_live_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let (mut worker, ready) = start(&cache);
+        let csv = "id,price,name,born,active\n1,1.5,alpha,2020-01-02,true\n2,,beta,2021-03-04,false\n3,3.25,,2022-05-06,true\n";
+        let job = job(dir.path(), "a.csv", csv);
+        let (key, scan) = (job.key.clone(), job.scan_expression.clone());
+        worker.enqueue(job);
+
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), "a.csv");
+        worker.shutdown();
+        assert!(key.is_ready(&cache));
+        assert!(!key.partial_path(&cache).exists());
+        let cached = Connection::open(key.final_path(&cache)).unwrap();
+        let live = Connection::open_in_memory().unwrap();
+        assert_eq!(snapshot(&cached, "data"), snapshot(&live, &scan));
+    }
+
+    #[test]
+    fn leftover_partial_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let job = job(dir.path(), "a.csv", "a,b\n1,2\n");
+        let partial = job.key.partial_path(&cache);
+        fs::create_dir_all(cache.join("columnar")).unwrap();
+        fs::write(&partial, b"not a database").unwrap();
+
+        let (mut worker, ready) = start(&cache);
+        assert!(!partial.exists());
+        fs::write(&partial, b"still not a database").unwrap();
+        let key = job.key.clone();
+        worker.enqueue(job);
+
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), "a.csv");
+        worker.shutdown();
+        assert!(!partial.exists());
+        let cached = Connection::open(key.final_path(&cache)).unwrap();
+        let count: i64 = cached
+            .query_row("SELECT count(*) FROM data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn failed_key_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let (mut worker, ready) = start(&cache);
+        let missing = dir.path().join("missing.csv");
+        let scan = scan_expression(&missing.to_string_lossy()).unwrap();
+        let anchor = job(dir.path(), "anchor.csv", "a\n1\n");
+        let failing = || ColumnarJob {
+            source_id: "missing.csv".to_owned(),
+            key: key(&anchor.source_path, &scan, VERSION),
+            source_path: missing.clone(),
+            scan_expression: scan.clone(),
+        };
+        let failed_key = failing().key;
+
+        worker.enqueue(failing());
+        worker.enqueue(job(dir.path(), "first.csv", "a\n1\n"));
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), "first.csv");
+        assert!(!failed_key.is_ready(&cache));
+        assert!(!failed_key.partial_path(&cache).exists());
+
+        fs::write(&missing, "a\n1\n").unwrap();
+        worker.enqueue(failing());
+        worker.enqueue(job(dir.path(), "second.csv", "a\n2\n"));
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), "second.csv");
+        worker.shutdown();
+        assert!(!failed_key.is_ready(&cache));
+        assert!(ready.try_recv().is_err());
     }
 }
