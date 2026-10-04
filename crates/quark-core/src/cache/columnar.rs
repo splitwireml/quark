@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use duckdb::{Connection, InterruptHandle};
@@ -22,6 +22,9 @@ use crate::engine::{Dirs, configure_spill, lock_down_paths};
 /// The most the columnar folder may hold before the least recently used files go.
 // ponytail: fixed 10 GB cap; becomes a setting only if users need it.
 const CACHE_CAP: u64 = 10 * 1024 * 1024 * 1024;
+
+/// How often shutdown interrupts the import again until the worker thread ends.
+const REINTERRUPT_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Content-addressed name of a columnar cache file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -107,6 +110,15 @@ pub struct ColumnarJob {
 struct Shared {
     is_stopping: AtomicBool,
     running: Mutex<Option<Arc<InterruptHandle>>>,
+    #[cfg(test)]
+    hold: Mutex<Option<Hold>>,
+}
+
+/// Test hook: where the import pauses between statements, and how a test lets it go on.
+#[cfg(test)]
+struct Hold {
+    reached: Sender<()>,
+    release: Receiver<()>,
 }
 
 impl Shared {
@@ -116,6 +128,19 @@ impl Shared {
 
     fn is_stopping(&self) -> bool {
         self.is_stopping.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn hold_before_create(&self) {
+        let hold = self
+            .hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(Hold { reached, release }) = hold {
+            reached.send(()).ok();
+            release.recv().ok();
+        }
     }
 }
 
@@ -181,12 +206,18 @@ impl ColumnarWorker {
     pub fn shutdown(&mut self) {
         self.shared.is_stopping.store(true, Ordering::SeqCst);
         self.sender = None;
-        if let Some(handle) = self.shared.running().as_ref() {
-            handle.interrupt();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // DuckDB drops an interrupt that lands between statements, so keep interrupting until
+        // the thread ends. The job also checks the flag before each statement.
+        while !thread.is_finished() {
+            if let Some(handle) = self.shared.running().as_ref() {
+                handle.interrupt();
+            }
+            thread::sleep(REINTERRUPT_INTERVAL);
         }
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
+        if thread.join().is_err() {
             tracing::warn!("columnar worker thread panicked");
         }
     }
@@ -229,6 +260,13 @@ impl WorkerContext {
         }
     }
 
+    fn ensure_running(&self) -> anyhow::Result<()> {
+        if self.shared.is_stopping() {
+            bail!("import cancelled");
+        }
+        Ok(())
+    }
+
     fn import(&self, job: &ColumnarJob) -> anyhow::Result<()> {
         let partial = job.key.partial_path(&self.cache_dir);
         fs::create_dir_all(self.cache_dir.join("columnar"))
@@ -236,11 +274,13 @@ impl WorkerContext {
         remove_partial(&partial);
         let conn = Connection::open(&partial).context("could not create the columnar file")?;
         *self.shared.running() = Some(conn.interrupt_handle());
-        if self.shared.is_stopping() {
-            bail!("import cancelled");
-        }
+        self.ensure_running()?;
         configure_spill(&conn, &self.spill_dirs)?;
+        self.ensure_running()?;
         lock_down_paths(&conn, &[job.source_path.to_string_lossy().into_owned()])?;
+        #[cfg(test)]
+        self.shared.hold_before_create();
+        self.ensure_running()?;
         conn.execute_batch(&format!(
             "CREATE TABLE data AS SELECT * FROM {}",
             job.scan_expression
@@ -595,27 +635,23 @@ mod tests {
         assert_eq!(CACHE_CAP, 10 * 1024_u64.pow(3));
     }
 
+    /// A scan that never finishes on its own, so only an interrupt can end the import.
+    const ENDLESS_SCAN: &str = "(SELECT sum(i) FROM range(10000000000) t(i))";
+
+    fn endless_job(dir: &Path) -> ColumnarJob {
+        let mut job = job(dir, "endless.csv", "a\n1\n");
+        job.scan_expression = ENDLESS_SCAN.to_owned();
+        job
+    }
+
     #[test]
     fn shutdown_interrupts_a_running_import() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
-        let csv = dir.path().join("big.csv");
-        Connection::open_in_memory()
-            .unwrap()
-            .execute_batch(&format!(
-                "COPY (SELECT * FROM range(20000000)) TO '{}' (HEADER, FORMAT csv)",
-                csv.to_string_lossy()
-            ))
-            .unwrap();
-        let scan = scan_expression(&csv.to_string_lossy()).unwrap();
-        let key = key(&csv, &scan, VERSION);
+        let job = endless_job(dir.path());
+        let key = job.key.clone();
         let (mut worker, ready) = start(&cache);
-        worker.enqueue(ColumnarJob {
-            source_id: "big.csv".to_owned(),
-            key: key.clone(),
-            source_path: csv,
-            scan_expression: scan,
-        });
+        worker.enqueue(job);
         let started = Instant::now();
         while !key.partial_path(&cache).exists() {
             assert!(started.elapsed() < WAIT, "the import never started");
@@ -627,6 +663,45 @@ mod tests {
         worker.shutdown();
 
         assert!(stopping.elapsed() < Duration::from_secs(2));
+        assert!(!key.is_ready(&cache));
+        assert!(!key.partial_path(&cache).exists());
+        assert!(ready.try_recv().is_err());
+    }
+
+    #[test]
+    fn shutdown_between_statements_still_stops_the_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let job = endless_job(dir.path());
+        let key = job.key.clone();
+        let (mut worker, ready) = start(&cache);
+        let (reached_sender, reached) = mpsc::channel();
+        let (release, release_receiver) = mpsc::channel();
+        *worker.shared.hold.lock().unwrap() = Some(Hold {
+            reached: reached_sender,
+            release: release_receiver,
+        });
+        worker.enqueue(job);
+        reached.recv_timeout(WAIT).unwrap();
+
+        // Let the import go on only after shutdown has begun and its first interrupt is spent.
+        let shared = Arc::clone(&worker.shared);
+        thread::spawn(move || {
+            while !shared.is_stopping() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            thread::sleep(Duration::from_millis(50));
+            release.send(()).ok();
+        });
+        let (stopped_sender, stopped) = mpsc::channel();
+        thread::spawn(move || {
+            worker.shutdown();
+            stopped_sender.send(()).ok();
+        });
+
+        stopped
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shutdown must return while the import is between statements");
         assert!(!key.is_ready(&cache));
         assert!(!key.partial_path(&cache).exists());
         assert!(ready.try_recv().is_err());
