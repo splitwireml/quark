@@ -1,5 +1,6 @@
 //! Data and cache folders, spill configuration and DuckDB lockdown.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use duckdb::{AccessMode, Config, Connection, ToSql};
 use serde::Serialize;
 
 use crate::ids::dataset_id;
+use crate::mount::ViewInfo;
 use crate::query::ColumnMeta;
 use crate::registry::SourceRecord;
 use crate::sql::{quote_ident, scan_expression, sql_string};
@@ -101,6 +103,8 @@ pub enum EngineKind {
 
 pub struct EngineInner {
     pub conn: Connection,
+    /// Views mounted so far, by source id.
+    pub mounted: BTreeMap<String, Vec<ViewInfo>>,
 }
 
 pub struct Engine {
@@ -115,7 +119,10 @@ impl Engine {
         Self {
             kind,
             generation,
-            inner: Mutex::new(EngineInner { conn }),
+            inner: Mutex::new(EngineInner {
+                conn,
+                mounted: BTreeMap::new(),
+            }),
         }
     }
 
