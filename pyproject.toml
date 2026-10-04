@@ -18,3 +18,7 @@ dev = ["httpx>=0.28", "pytest>=8.3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "skeleton: behavior the Rust desktop skeleton must reproduce",
+    "python_only: behavior that only applies to the Python backend",
+]

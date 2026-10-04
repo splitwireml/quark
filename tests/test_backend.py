@@ -181,6 +181,7 @@ def test_export_xlsx_preserves_excel_unsafe_scalars_headers_and_zoned_dates(clie
     workbook.close()
 
 
+@pytest.mark.python_only
 def test_export_and_metadata_are_serialized(tmp_path, monkeypatch):
     original_connect = duckdb.connect
     executing = threading.Lock()
@@ -356,6 +357,7 @@ def test_export_csv_requires_exactly_one_sheet_and_payload_bounds(client):
     }).status_code == 422
 
 
+@pytest.mark.skeleton
 def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
     with make_client(tmp_path) as client:
         node = upload(client, "people.csv", b"name,age\nAda,37\nBob,\n")
@@ -377,6 +379,7 @@ def test_upload_list_datasets_delete_and_registry_restart(tmp_path):
     assert Path(node["source"]).exists() is False
 
 
+@pytest.mark.skeleton
 def test_flat_file_aliases_are_safe_and_persist_across_restart(tmp_path):
     cases = [
         ("Claims v1.csv", "claims_v1"),
@@ -405,6 +408,7 @@ def test_flat_file_aliases_are_safe_and_persist_across_restart(tmp_path):
             assert response.json()["rows"] == [{"value": 1}]
 
 
+@pytest.mark.skeleton
 def test_legacy_registry_without_dataset_name_keeps_data_view(tmp_path):
     source = tmp_path / "uploads" / "legacy.csv"
     source.parent.mkdir()
@@ -420,6 +424,7 @@ def test_legacy_registry_without_dataset_name_keeps_data_view(tmp_path):
     assert json.loads((tmp_path / "registry.json").read_text()) == [node]
 
 
+@pytest.mark.skeleton
 def test_restart_keeps_registry_entries_when_a_source_is_temporarily_missing(tmp_path):
     node = {"id": "offline", "name": "offline.csv", "kind": "upload", "source": str(tmp_path / "uploads" / "offline.csv")}
     (tmp_path / "uploads").mkdir()
@@ -434,6 +439,7 @@ def test_restart_keeps_registry_entries_when_a_source_is_temporarily_missing(tmp
     assert json.loads((tmp_path / "registry.json").read_text()) == [node]
 
 
+@pytest.mark.skeleton
 def test_upload_supported_formats_and_rejects_unsupported(client, tmp_path):
     parquet = tmp_path / "x.parquet"
     db = tmp_path / "x.duckdb"
@@ -599,6 +605,7 @@ def test_attach_is_read_only_and_missing_paths_fail(client, tmp_path):
     assert db.exists()
 
 
+@pytest.mark.skeleton
 def test_uploaded_sql_blocks_external_files_but_queries_registered_view(client, tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("private")
@@ -668,6 +675,7 @@ def test_dataset_list_includes_columns_for_every_table(client, tmp_path):
     ]
 
 
+@pytest.mark.skeleton
 def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client):
     node = upload(
         client,
@@ -700,6 +708,7 @@ def test_query_pages_repeated_filters_ordered_multisort_and_null_metadata(client
     assert columns["price"]["null_fraction"] == 0.0
 
 
+@pytest.mark.skeleton
 def test_query_filter_connectors_fold_left_to_right(client):
     node = upload(
         client,
@@ -721,6 +730,7 @@ def test_query_filter_connectors_fold_left_to_right(client):
     assert 'WHERE (("category" = \'x\' OR "name" = \'alto\') AND "price" >= 20)' in response.json()["sql"]
 
 
+@pytest.mark.skeleton
 def test_sql_query_pages_with_metadata_and_safe_values(client):
     node = upload(
         client,
@@ -750,6 +760,7 @@ def test_sql_query_pages_with_metadata_and_safe_values(client):
 
 
 @pytest.mark.parametrize("exotic", [False, True])
+@pytest.mark.skeleton
 def test_arrow_query_matches_json_pages_and_metadata(client, exotic):
     import pyarrow as pa
 
@@ -819,6 +830,7 @@ def test_sql_result_controls_filter_sort_categories_and_profile(client):
     "SELECT 1 AS value /* trailing */",
     "SELECT 1 AS value; /* trailing */",
 ])
+@pytest.mark.skeleton
 def test_sql_query_accepts_trailing_comments(client, sql):
     node = upload(client, "items.csv", b"name\nAda\n")
     response = client.post(f"/api/nodes/{node['id']}/sql", json={"sql": f"  {sql}  "})
@@ -834,6 +846,7 @@ def test_sql_query_accepts_trailing_comments(client, sql):
     "COPY data TO '/tmp/items.csv'", "ATTACH '/tmp/items.duckdb'", "PRAGMA version",
     "SELECT 1; SELECT 2",
 ])
+@pytest.mark.skeleton
 def test_sql_query_rejects_non_select_blank_and_multiple_statements(client, sql):
     node = upload(client, "items.csv", b"name,value\na,1\n")
     response = client.post(f"/api/nodes/{node['id']}/sql", json={"sql": sql})
@@ -850,12 +863,14 @@ def test_sql_query_rejects_non_select_blank_and_multiple_statements(client, sql)
     {"sorts": [{"column": "missing", "direction": "asc"}]},
     {"sorts": [{"column": "name", "direction": "sideways"}]},
 ])
+@pytest.mark.skeleton
 def test_query_rejects_invalid_paging_and_metadata(client, payload):
     node = upload(client, "x.csv", b'name,value\na,1\n')
     response = client.post(f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'x')['id']}/query", json=payload)
     assert response.status_code == 422
 
 
+@pytest.mark.skeleton
 def test_filter_operators_and_bound_values(client):
     node = upload(client, "x.csv", b'name,value\nalpha,1\nalpine,2\nbeta,\n')
     url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'x')['id']}/query"
@@ -959,6 +974,7 @@ def test_category_values_are_distinct_counted_safe_and_text_only(client, tmp_pat
     assert client.get(f"/api/nodes/{node['id']}/datasets/missing/columns/category/values").status_code == 404
 
 
+@pytest.mark.python_only
 def test_category_values_do_not_share_a_connection_concurrently(tmp_path, monkeypatch):
     db = tmp_path / "categories.duckdb"
     with duckdb.connect(str(db)) as con:
@@ -1035,6 +1051,7 @@ def test_category_values_are_paged_and_searchable(client, tmp_path):
     assert client.get(url, params={"limit": 501}).status_code == 422
 
 
+@pytest.mark.skeleton
 def test_in_filter_single_multi_and_validation(client):
     node = upload(client, "items.csv", b"category,kind\na,x\nb,x\nc,y\n' OR true --,z\n")
     url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'items')['id']}/query"
@@ -1116,6 +1133,7 @@ def test_safe_serializes_unsafe_aggregate_integers():
     assert page_count(10, 3) == 4
 
 
+@pytest.mark.skeleton
 def test_missing_nodes_and_stale_registry_are_not_active(tmp_path):
     (tmp_path / "registry.json").write_text(json.dumps([{
         "id": "gone", "name": "gone.csv", "kind": "upload", "source": str(tmp_path / "gone.csv")
@@ -1178,6 +1196,7 @@ def test_time_profile_has_no_year_breakdown(client, tmp_path):
     assert (stats.json()["min"], stats.json()["max"], stats.json()["year_counts"]) == ("08:30:00", "17:45:00", [])
 
 
+@pytest.mark.skeleton
 def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
     node = upload(client, "dedupe.csv", b"group,kind,score,label\na,x,1,first\na,x,3,second\na,y,2,third\nb,x,4,fourth\n")
     url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'dedupe')['id']}/query"
@@ -1198,6 +1217,7 @@ def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
     assert client.post(url, json={"dedupe_columns": ["missing"]}).status_code == 422
 
 
+@pytest.mark.skeleton
 def test_builder_query_returns_equivalent_executable_sql(client):
     node = upload(
         client,
@@ -1256,6 +1276,7 @@ def test_stats_invalid_filter_value_returns_422(tmp_path):
 
 
 @pytest.mark.parametrize("sql_mode", [False, True])
+@pytest.mark.python_only
 def test_stats_cache_reuses_profiles_and_keys_row_selection(client, sql_mode):
     node = upload(client, "cached.csv", b"group,value,other\na,1,10\na,2,20\nb,3,30\n")
     base = f"/api/nodes/{node['id']}"
@@ -1287,6 +1308,7 @@ def test_stats_cache_reuses_profiles_and_keys_row_selection(client, sql_mode):
         assert client.post(base + "/columns/missing/stats", json=body).status_code == 404
 
 
+@pytest.mark.python_only
 def test_stats_cache_refreshes_changed_files_and_separates_nodes(client, tmp_path):
     node = upload(client, "cached.csv", b"value\n1\n2\n")
     other = upload(client, "cached.csv", b"value\n9\n")
@@ -1312,6 +1334,7 @@ def test_stats_cache_refreshes_changed_files_and_separates_nodes(client, tmp_pat
     "SELECT * FROM cached USING SAMPLE 1 ROWS",
     "SELECT * FROM query('SELECT ran' || 'dom() AS value')",
 ])
+@pytest.mark.python_only
 def test_stats_cache_bypasses_volatile_and_dynamic_sql(client, sql):
     node = upload(client, "cached.csv", b"value\n1\n2\n")
     url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
@@ -1326,6 +1349,7 @@ def test_stats_cache_bypasses_volatile_and_dynamic_sql(client, sql):
     ("CREATE VIEW readings AS SELECT random() AS value", "SELECT * FROM readings"),
     ("CREATE MACRO reading() AS random()", "SELECT reading() AS value"),
 ])
+@pytest.mark.python_only
 def test_stats_cache_bypasses_stored_views_and_macros(client, tmp_path, definition, sql):
     db = tmp_path / "volatile.duckdb"
     with duckdb.connect(str(db)) as con:
@@ -1339,6 +1363,7 @@ def test_stats_cache_bypasses_stored_views_and_macros(client, tmp_path, definiti
         assert compute.call_count == 2
 
 
+@pytest.mark.python_only
 def test_stats_cache_refreshes_rebuilt_project_workspace(client):
     project = create_project(client, "Profiles")
     project_upload(client, project, "cached.csv", b"value\n1\n2\n")
@@ -1355,6 +1380,7 @@ def test_stats_cache_refreshes_rebuilt_project_workspace(client):
         assert compute.call_count == 2
 
 
+@pytest.mark.python_only
 def test_stats_cache_bypasses_direct_file_scans(client, tmp_path):
     node = upload(client, "cached.csv", b"value\n1\n")
     external = tmp_path / "uploads" / "external.csv"
@@ -1368,6 +1394,7 @@ def test_stats_cache_bypasses_direct_file_scans(client, tmp_path):
         assert compute.call_count == 2
 
 
+@pytest.mark.python_only
 def test_stats_cache_evicts_least_recent_profile(client):
     node = upload(client, "cached.csv", b"value\n1\n")
     url = f"/api/nodes/{node['id']}/sql/columns/value/stats"
@@ -1557,6 +1584,7 @@ def project_upload(client, project, name, content):
     return response.json()
 
 
+@pytest.mark.python_only
 def test_project_source_api_layers_mount_only_the_requested_source(tmp_path, monkeypatch):
     original_connect = duckdb.connect
     connections = []
@@ -1636,6 +1664,7 @@ def test_project_source_api_layers_mount_only_the_requested_source(tmp_path, mon
         assert client.get(f"/api/projects/{other['id']}/sources/{first['id']}/path").status_code == 404
 
 
+@pytest.mark.skeleton
 def test_projects_persist_with_stable_workspace_ids(tmp_path):
     with make_client(tmp_path) as client:
         project = create_project(client, "  Sales  ")
@@ -1652,6 +1681,7 @@ def test_projects_persist_with_stable_workspace_ids(tmp_path):
         assert restarted.get("/api/projects").json()[1] == project
 
 
+@pytest.mark.skeleton
 def test_legacy_sources_are_visible_in_default_project_without_registry_migration(tmp_path):
     source = tmp_path / "uploads" / "legacy.csv"
     source.parent.mkdir()
@@ -1667,6 +1697,7 @@ def test_legacy_sources_are_visible_in_default_project_without_registry_migratio
     assert json.loads((tmp_path / "registry.json").read_text()) == [stored]
 
 
+@pytest.mark.skeleton
 def test_project_sources_are_isolated_and_base_views_execute_in_project_workspace(tmp_path):
     with make_client(tmp_path) as client:
         first = create_project(client, "First")
@@ -1706,6 +1737,7 @@ def test_project_sources_are_isolated_and_base_views_execute_in_project_workspac
         assert restarted.get(f"/api/projects/{first['id']}/views").json() == views
 
 
+@pytest.mark.python_only
 def test_project_sql_requests_serialize_shared_workspace(tmp_path, monkeypatch):
     original_connect = duckdb.connect
     armed = threading.Event()
@@ -1888,6 +1920,7 @@ def test_project_owned_sources_cannot_join_through_dataset_references(client):
     assert response.status_code == 404, response.text
 
 
+@pytest.mark.skeleton
 def test_project_workspace_invalidation_keeps_inflight_query_and_refreshes_membership(client):
     project = create_project(client, "Changing")
     first = project_upload(client, project, "first.csv", b"value\n1\n")
@@ -2152,6 +2185,7 @@ def test_visualize_bar_rejects_an_unknown_group_column(client):
     }).status_code == 422
 
 
+@pytest.mark.python_only
 def test_visualize_scatter_returns_size_and_color_domains_over_the_whole_relation(client, monkeypatch):
     body = b"x,y,weight,region\n" + b"".join(f"{i},{i * 2},{i},r{i % 3}\n".encode() for i in range(1, 101))
     node = upload(client, "scales.csv", body)
