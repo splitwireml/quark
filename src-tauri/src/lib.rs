@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use quark_core::api::router;
 use quark_core::engine::Dirs;
-use quark_core::secure::{SecurityConfig, desktop_origins, generate_token, secure};
+use quark_core::secure::{SecurityConfig, desktop_origins, generate_token, is_app_origin, secure};
 use quark_core::state::AppState;
 use tauri::webview::PageLoadEvent;
 use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
@@ -104,7 +104,6 @@ fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupRe
         serde_json::json!(format!("http://127.0.0.1:{port}")),
         serde_json::json!(token),
     );
-    let origins = desktop_origins(cfg!(debug_assertions));
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Quark")
         .inner_size(1440.0, 900.0)
@@ -115,12 +114,7 @@ fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupRe
                 self_test::run_in(&window);
             }
         })
-        .on_navigation(move |url| {
-            let origin = format!("{}://{}", url.scheme(), url.authority());
-            origins
-                .iter()
-                .any(|allowed| allowed.as_bytes() == origin.as_bytes())
-        })
+        .on_navigation(|url| is_app_origin(url.as_str(), cfg!(debug_assertions)))
         .build()?;
     Ok(())
 }

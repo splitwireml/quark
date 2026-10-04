@@ -55,6 +55,18 @@ pub fn desktop_origins(debug: bool) -> Vec<HeaderValue> {
     origins
 }
 
+/// True when `url` stays on one of the desktop origins; the webview may navigate there.
+pub fn is_app_origin(url: &str, debug: bool) -> bool {
+    let after_scheme = url.find("://").map_or(0, |at| at + 3);
+    let end = url[after_scheme..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |at| after_scheme + at);
+    let origin = &url[..end];
+    desktop_origins(debug)
+        .iter()
+        .any(|allowed| allowed.as_bytes() == origin.as_bytes())
+}
+
 /// Layers, innermost first: token check, Host check, CORS.
 pub fn secure(router: Router, config: SecurityConfig) -> Router {
     let cors = CorsLayer::new()
@@ -187,6 +199,54 @@ mod tests {
                 .iter()
                 .all(|h| allowed.contains(h))
         );
+    }
+
+    #[test]
+    fn desktop_origins_are_exact() {
+        let release: Vec<_> = desktop_origins(false)
+            .iter()
+            .map(|origin| origin.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(release, ["tauri://localhost", "http://tauri.localhost"]);
+        let debug: Vec<_> = desktop_origins(true)
+            .iter()
+            .map(|origin| origin.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            debug,
+            [
+                "tauri://localhost",
+                "http://tauri.localhost",
+                "http://localhost:5173"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_from_windows_app_origin_passes() {
+        let request = Request::options("/ping")
+            .header(header::HOST, "127.0.0.1:4242")
+            .header(header::ORIGIN, "http://tauri.localhost")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = guarded().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "http://tauri.localhost"
+        );
+    }
+
+    #[test]
+    fn navigation_stays_on_app_origin() {
+        assert!(is_app_origin("tauri://localhost/x", false));
+        assert!(is_app_origin("http://tauri.localhost/x", false));
+        assert!(!is_app_origin("https://evil.example", false));
+        assert!(!is_app_origin("http://127.0.0.1:1234", false));
+        assert!(!is_app_origin("http://localhost:5173", false));
+        assert!(is_app_origin("http://localhost:5173", true));
+        assert!(is_app_origin("http://localhost:5173/index.html?a=b", true));
     }
 
     #[tokio::test]
