@@ -157,7 +157,7 @@ fn two_million_row_csv_meets_the_targets() {
     table.add(
         "first page, qty > 10 (live CSV, import running)",
         first,
-        None,
+        Some(750.0),
     );
     let import = Instant::now();
     wait_until("the columnar import", || state.catalog().engines.is_empty());
