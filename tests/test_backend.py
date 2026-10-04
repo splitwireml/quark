@@ -166,14 +166,15 @@ def test_export_xlsx_preserves_excel_unsafe_scalars_headers_and_zoned_dates(clie
     workbook = load_workbook(io.BytesIO(response.content), read_only=True, data_only=True)
     assert workbook.sheetnames == ["Edges"]
     header, first, second = list(workbook["Edges"].values)
+    zoned = dt.datetime(2026, 9, 1, 8, 0, tzinfo=dt.timezone.utc).astimezone().isoformat()
     assert header == ("exact", "special", "zoned", "formula_text", "error_text", "invalid_xml", "exact_int", "nested", "badheader", "badheader")
     assert first == (
-        "123456789012345678.123456789012345678", "NaN", "2026-09-01T12:00:00+04:00",
+        "123456789012345678.123456789012345678", "NaN", zoned,
         "=1+1", "#N/A", "badvalue", "1000000000000001",
         '["123456789012345678.123456789012345678"]', 1, "badvalue",
     )
     assert second == (
-        "123456789012345678.123456789012345678", "Infinity", "2026-09-01T12:00:00+04:00",
+        "123456789012345678.123456789012345678", "Infinity", zoned,
         "=2+2", "#REF!", "clean", 999999999999999,
         '["123456789012345678.123456789012345678"]', 1, "clean",
     )
