@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod error;
+pub mod guard;
 pub mod ids;
 pub mod literal;
 pub mod query;
