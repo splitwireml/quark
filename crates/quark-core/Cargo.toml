@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arrow = { version = "=58.4.0", default-features = false, features = ["ipc"] }
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true

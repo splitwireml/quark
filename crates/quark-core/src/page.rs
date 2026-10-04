@@ -2,12 +2,14 @@
 
 use std::time::Instant;
 
+use duckdb::arrow::datatypes::SchemaRef;
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::{Null, ToSqlOutput};
 use duckdb::{Connection, ToSql, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::arrow::encode_page;
 use crate::engine::{EngineInner, datasets, describe};
 use crate::error::{ApiError, ApiResult};
 use crate::guard::check_select;
@@ -138,8 +140,9 @@ fn resolve(conn: &Connection, target: &PageTarget) -> ApiResult<Resolved> {
     }
 }
 
-/// The page's Arrow batches, the total row count and each column's null fraction.
+/// The page's Arrow schema and batches, the total row count and each column's null fraction.
 struct Fetched {
+    schema: SchemaRef,
     batches: Vec<RecordBatch>,
     total_rows: u64,
     null_fractions: Vec<f64>,
@@ -193,8 +196,11 @@ fn fetch(
         "SELECT * FROM ({}) AS result LIMIT ? OFFSET ?",
         built.ordered
     ))?;
-    let batches = statement.query_arrow(bind(&params))?.collect();
+    let arrow = statement.query_arrow(bind(&params))?;
+    let schema = arrow.get_schema();
+    let batches = arrow.collect();
     Ok(Fetched {
+        schema,
         batches,
         total_rows,
         null_fractions,
@@ -228,9 +234,6 @@ pub fn run_page(
 ) -> ApiResult<PageBody> {
     let started = Instant::now();
     request.validate()?;
-    if format == Format::Arrow {
-        return Err(ApiError::not_implemented("Not in the desktop build yet"));
-    }
     let conn = &inner.conn;
     let resolved = resolve(conn, target)?;
     let built = build_query(
@@ -271,9 +274,18 @@ pub fn run_page(
         elapsed_ms: (started.elapsed().as_secs_f64() * 1_000_000.0).round() / 1000.0,
         sql,
     };
-    let mut body = serde_json::to_value(&meta).map_err(|_| ApiError::internal("Internal error"))?;
-    body["rows"] = Value::Array(rows_json(&fetched.batches, &resolved.columns));
-    Ok(PageBody::Json(body))
+    let Ok(Value::Object(mut body)) = serde_json::to_value(&meta) else {
+        return Err(ApiError::internal("Internal error"));
+    };
+    match format {
+        Format::Json => {
+            let rows = rows_json(&fetched.batches, &resolved.columns);
+            body.insert("rows".to_owned(), Value::Array(rows));
+            Ok(PageBody::Json(Value::Object(body)))
+        }
+        Format::Arrow => encode_page(&fetched.schema, &fetched.batches, &resolved.columns, body)
+            .map(PageBody::Arrow),
+    }
 }
 
 #[cfg(test)]
@@ -283,9 +295,11 @@ mod tests {
     use crate::ids::dataset_id;
     use crate::query::{Direction, Filter, Sort};
     use crate::registry::SourceRecord;
+    use arrow::ipc::reader::StreamReader;
     use duckdb::Connection;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::io::Cursor;
 
     fn inner(setup: &str) -> EngineInner {
         let conn = Connection::open_in_memory().unwrap();
@@ -304,6 +318,13 @@ mod tests {
         match body {
             PageBody::Json(value) => value,
             PageBody::Arrow(_) => panic!("expected a JSON body"),
+        }
+    }
+
+    fn arrow_body(body: PageBody) -> Vec<u8> {
+        match body {
+            PageBody::Arrow(bytes) => bytes,
+            PageBody::Json(_) => panic!("expected an Arrow body"),
         }
     }
 
@@ -347,6 +368,36 @@ mod tests {
             json_body(run_page(&mut inner, &dataset("t"), &sorted(4), Format::Json).unwrap());
         assert_eq!(beyond["rows"], json!([]));
         assert_eq!(beyond["total_rows"], 250);
+    }
+
+    #[test]
+    fn arrow_format_carries_the_json_metadata() {
+        let mut inner = inner(
+            "CREATE TABLE t AS SELECT range::INTEGER AS a, DATE '2024-01-02' AS d FROM range(5)",
+        );
+        let request = QueryRequest {
+            page_size: 2,
+            ..QueryRequest::default()
+        };
+        let mut expected =
+            json_body(run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap());
+
+        let bytes =
+            arrow_body(run_page(&mut inner, &dataset("t"), &request, Format::Arrow).unwrap());
+
+        let reader = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
+        let mut meta: Value = serde_json::from_str(&reader.schema().metadata()["quark"]).unwrap();
+        let batches: Vec<RecordBatch> = reader.map(Result::unwrap).collect();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        assert_eq!(
+            meta.as_object_mut().unwrap().remove("json_columns"),
+            Some(json!(["d"]))
+        );
+        for body in [&mut meta, &mut expected] {
+            body.as_object_mut().unwrap().remove("elapsed_ms");
+        }
+        expected.as_object_mut().unwrap().remove("rows");
+        assert_eq!(meta, expected);
     }
 
     #[test]
