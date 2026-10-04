@@ -1,5 +1,6 @@
 //! Classification of DuckDB column types and JSON conversion of Arrow cells, mirroring the Python backend.
 
+use crate::literal::python_float_repr;
 use chrono::{DateTime, NaiveTime, Offset, TimeZone, Timelike};
 use duckdb::arrow::array::{
     Array, ArrowPrimitiveType, AsArray, PrimitiveArray, downcast_dictionary_array,
@@ -168,7 +169,7 @@ fn list_json<Tz: TimeZone>(items: &dyn Array, zone: &Tz) -> Value {
     )
 }
 
-/// `entries` holds the key and value columns; each converted key is stringified.
+/// `entries` holds the key and value columns; each key is rendered by `python_key_str`.
 fn map_json<Tz: TimeZone>(entries: &[duckdb::arrow::array::ArrayRef], zone: &Tz) -> Value {
     let [keys, values] = entries else {
         return Value::Null;
@@ -176,14 +177,40 @@ fn map_json<Tz: TimeZone>(entries: &[duckdb::arrow::array::ArrayRef], zone: &Tz)
     Value::Object(
         (0..keys.len())
             .map(|index| {
-                let key = match cell_json(keys.as_ref(), index, "", zone) {
-                    Value::String(text) => text,
-                    other => other.to_string(),
-                };
-                (key, cell_json(values.as_ref(), index, "", zone))
+                (
+                    python_key_str(keys.as_ref(), index, zone),
+                    cell_json(values.as_ref(), index, "", zone),
+                )
             })
             .collect(),
     )
+}
+
+/// Renders a map key the way Python `str()` renders the value DuckDB's Python client returns.
+fn python_key_str<Tz: TimeZone>(array: &dyn Array, row: usize, zone: &Tz) -> String {
+    match array.data_type() {
+        DataType::Boolean if array.as_boolean().value(row) => "True".to_owned(),
+        DataType::Boolean => "False".to_owned(),
+        DataType::Float32 => float_key(value::<Float32Type>(array, row).into()),
+        DataType::Float64 => float_key(value::<Float64Type>(array, row)),
+        DataType::Decimal128(..) => array.as_primitive::<Decimal128Type>().value_as_string(row),
+        DataType::Decimal256(..) => array.as_primitive::<Decimal256Type>().value_as_string(row),
+        data_type => match cell_json(array, row, "", zone) {
+            Value::String(text) if matches!(data_type, DataType::Timestamp(..)) => {
+                text.replacen('T', " ", 1)
+            }
+            Value::String(text) => text,
+            other => other.to_string(),
+        },
+    }
+}
+
+fn float_key(number: f64) -> String {
+    if number.is_nan() {
+        "nan".to_owned()
+    } else {
+        python_float_repr(number)
+    }
 }
 
 fn value<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
@@ -559,6 +586,24 @@ mod tests {
             ),
             ("[9007199254740993]", r#"["9007199254740993"]"#),
             ("MAP(['k'],[[1]])", r#"{"k":[1]}"#),
+            ("MAP([true],[1])", r#"{"True":1}"#),
+            ("MAP([false],[1])", r#"{"False":1}"#),
+            (
+                "MAP([TIMESTAMP '2024-01-01 10:00:00'],[1])",
+                r#"{"2024-01-01 10:00:00":1}"#,
+            ),
+            (
+                "MAP([TIMESTAMP '2024-01-01 10:00:00.5'],[1])",
+                r#"{"2024-01-01 10:00:00.500000":1}"#,
+            ),
+            ("MAP([1.50::DECIMAL(3,2)],[1])", r#"{"1.50":1}"#),
+            ("MAP([7::INTEGER],[1])", r#"{"7":1}"#),
+            ("MAP(['a'],[1])", r#"{"a":1}"#),
+            ("MAP([1e20::DOUBLE],[1])", r#"{"1e+20":1}"#),
+            ("MAP([2.5::DOUBLE],[1])", r#"{"2.5":1}"#),
+            ("MAP(['nan'::DOUBLE],[1])", r#"{"nan":1}"#),
+            ("MAP([DATE '2024-01-02'],[1])", r#"{"2024-01-02":1}"#),
+            ("MAP([TIME '10:00:00'],[1])", r#"{"10:00:00":1}"#),
         ] {
             let cells = cells(&format!("SELECT {sql}"), "");
             assert_eq!(cells[0].to_string(), expected, "{sql}");
@@ -570,6 +615,17 @@ mod tests {
             ),
             [json!([1]), Value::Null, json!([])]
         );
+    }
+
+    #[test]
+    fn map_keys_with_a_time_zone_keep_the_offset() {
+        let zone = chrono::FixedOffset::east_opt(4 * 3600).unwrap();
+        let cells = cells_in(
+            "SELECT MAP([TIMESTAMPTZ '2024-01-01 10:00:00+00'],[1])",
+            "",
+            &zone,
+        );
+        assert_eq!(cells[0].to_string(), r#"{"2024-01-01 14:00:00+04:00":1}"#);
     }
 
     #[test]
