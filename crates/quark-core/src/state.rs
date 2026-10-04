@@ -1,12 +1,12 @@
 //! Shared app state: where the data lives and which sources are in the catalog.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -15,9 +15,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::cache::columnar::ColumnarWorker;
 use crate::engine::{DatasetInfo, Dirs, Engine, describe};
 use crate::error::{ApiError, ApiResult};
-use crate::mount::ViewInfo;
+use crate::mount::{ViewInfo, import_job};
 use crate::naming::dataset_name;
 use crate::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, default_project, load_projects,
@@ -75,6 +76,8 @@ pub struct Catalog {
     pub sources: Vec<SourceRecord>,
     /// Opened engines by node id; nothing is opened at startup.
     pub engines: HashMap<String, Arc<Engine>>,
+    /// Workspaces dropped for a new cache: their replacement mounts the whole project.
+    remount: HashSet<String>,
 }
 
 impl Catalog {
@@ -118,6 +121,8 @@ pub struct Shared {
     pub dirs: Dirs,
     pub catalog: Mutex<Catalog>,
     pub next_generation: AtomicU64,
+    /// Fills the columnar cache; `None` once the app has shut down.
+    columnar: Mutex<Option<ColumnarWorker>>,
 }
 
 #[derive(Clone)]
@@ -146,16 +151,69 @@ impl AppState {
             .collect();
         remove_orphan_uploads(&uploads, &registry)?;
 
-        Ok(Self(Arc::new(Shared {
-            dirs,
-            catalog: Mutex::new(Catalog {
-                projects,
-                registry,
-                sources,
-                engines: HashMap::new(),
-            }),
-            next_generation: AtomicU64::new(1),
-        })))
+        let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
+            let weak = weak.clone();
+            let on_ready = Box::new(move |source_id: String| {
+                if let Some(shared) = weak.upgrade() {
+                    Self(shared).drop_engines_of(&source_id);
+                }
+            });
+            let worker = ColumnarWorker::start(&dirs.cache, &spill, on_ready);
+            Shared {
+                dirs,
+                catalog: Mutex::new(Catalog {
+                    projects,
+                    registry,
+                    sources,
+                    engines: HashMap::new(),
+                    remount: HashSet::new(),
+                }),
+                next_generation: AtomicU64::new(1),
+                columnar: Mutex::new(Some(worker)),
+            }
+        });
+        Ok(Self(shared))
+    }
+
+    /// Queues the source's columnar import unless its cache is already there.
+    /// Repeats are cheap: the worker skips finished and failed imports.
+    fn queue_import(&self, source: &SourceRecord) {
+        let Some(job) = import_job(source) else {
+            return;
+        };
+        if job.key.is_ready(&self.0.dirs.cache) {
+            return;
+        }
+        let columnar = self
+            .0
+            .columnar
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(worker) = columnar.as_ref() {
+            worker.enqueue(job);
+        }
+    }
+
+    /// Forgets the engines that mount `source_id`, so the next request mounts its new cache.
+    /// Work already running finishes on the old engine.
+    fn drop_engines_of(&self, source_id: &str) {
+        let engines = {
+            let mut catalog = self.catalog();
+            let Some(source) = catalog.sources.iter().find(|source| source.id == source_id) else {
+                return;
+            };
+            let workspace = catalog
+                .project(source.project())
+                .ok()
+                .map(|project| project.node_id.clone());
+            let workspace = workspace.and_then(|node_id| {
+                let engine = catalog.engines.remove(&node_id)?;
+                catalog.remount.insert(node_id);
+                Some(engine)
+            });
+            [catalog.engines.remove(source_id), workspace]
+        };
+        drop(engines);
     }
 
     /// Locks the catalog, recovering it if a panicking thread poisoned the mutex.
@@ -285,6 +343,7 @@ impl AppState {
         catalog
             .engines
             .insert(node_id.to_owned(), Arc::clone(&engine));
+        self.queue_import(&source);
         Ok(engine)
     }
 
@@ -320,6 +379,12 @@ impl AppState {
         let generation = self.0.next_generation.fetch_add(1, Ordering::Relaxed);
         let engine = Engine::open_workspace(project, &sources, &self.0.dirs, generation)
             .map_err(invalid_value)?;
+        if catalog.remount.contains(&project.node_id) {
+            for source in &sources {
+                engine.mount(project, source).map_err(invalid_value)?;
+            }
+            catalog.remount.remove(&project.node_id);
+        }
         let engine = Arc::new(engine);
         catalog
             .engines
@@ -343,7 +408,10 @@ impl AppState {
         let mut views = Vec::new();
         for source in sources {
             match engine.mount(&project, source) {
-                Ok(mounted) => views.extend(mounted),
+                Ok(mounted) => {
+                    views.extend(mounted);
+                    self.queue_import(source);
+                }
                 Err(error) => {
                     let mut catalog = self.catalog();
                     if catalog
@@ -444,6 +512,7 @@ impl AppState {
         if source.project() == DEFAULT_PROJECT_ID {
             catalog.engines.insert(node_id.to_owned(), Arc::new(engine));
         }
+        self.queue_import(&source);
         catalog.sources.push(source);
         Ok(public)
     }
@@ -476,8 +545,17 @@ impl AppState {
         save_registry(&self.0.dirs.registry_file(), &catalog.registry).map_err(registry_not_saved)
     }
 
-    /// Drops every engine, closing its connection.
+    /// Stops the columnar worker, then drops every engine, closing its connection.
     pub fn shutdown(&self) {
+        let worker = self
+            .0
+            .columnar
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(mut worker) = worker {
+            worker.shutdown();
+        }
         let engines = std::mem::take(&mut self.catalog().engines);
         drop(engines);
     }
@@ -525,6 +603,7 @@ mod tests {
     use super::*;
     use crate::engine::EngineKind;
     use serde_json::json;
+    use std::time::Instant;
 
     fn dirs(root: &Path) -> Dirs {
         Dirs {
@@ -662,11 +741,20 @@ mod tests {
         json!({"id": id, "name": format!("Project {id}"), "node_id": format!("project_{id}")})
     }
 
-    fn started(root: &Path, registry: &[Value], projects: &[Value]) -> AppState {
+    /// Loads state with the columnar worker running, so mounted sources get imported.
+    fn started_with_worker(root: &Path, registry: &[Value], projects: &[Value]) -> AppState {
         let dirs = dirs(root);
         write(&dirs.registry_file(), &json!(registry).to_string());
         write(&dirs.projects_file(), &json!(projects).to_string());
         AppState::load(dirs).unwrap()
+    }
+
+    /// Loads state with the worker already stopped, so a finished import cannot drop an engine
+    /// while a test counts them.
+    fn started(root: &Path, registry: &[Value], projects: &[Value]) -> AppState {
+        let state = started_with_worker(root, registry, projects);
+        state.shutdown();
+        state
     }
 
     fn failure<T>(result: ApiResult<T>) -> (u16, String) {
@@ -1073,5 +1161,140 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(ids(state.project_sources("b").unwrap()), ["b1"]);
+    }
+
+    const WAIT: Duration = Duration::from_secs(60);
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn cache_files(dirs: &Dirs) -> Vec<PathBuf> {
+        fs::read_dir(dirs.columnar())
+            .unwrap()
+            .flatten()
+            .map(|item| item.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "duckdb"))
+            .collect()
+    }
+
+    /// The rows of the project's mounted view as text, and how that view is defined.
+    fn read_view(state: &AppState, view_sql: &str) -> (Vec<String>, String) {
+        let engine = state.engine_for_node("project_p").unwrap();
+        let inner = engine.lock();
+        let rows = inner
+            .conn
+            .prepare(&format!(
+                "SELECT CAST(t AS VARCHAR) FROM ({view_sql}) t ORDER BY 1"
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let definition = inner
+            .conn
+            .query_row(
+                "SELECT sql FROM duckdb_views() WHERE schema_name LIKE 'source_%' AND view_name = 'data'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (rows, definition)
+    }
+
+    /// Mounts the one source of project `p` and waits until its import has replaced the engine.
+    fn mount_and_wait_for_cache(state: &AppState, caches: usize) -> Vec<ViewInfo> {
+        let views = state.project_views("p").unwrap();
+        wait_until("the import", || cache_files(&state.0.dirs).len() == caches);
+        wait_until("the engine swap", || state.catalog().engines.is_empty());
+        views
+    }
+
+    #[test]
+    fn views_switch_to_cache_with_identical_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let state = started_with_worker(root.path(), &sources, &[project("p")]);
+
+        let live = state.project_views("p").unwrap();
+        let (live_rows, _) = read_view(&state, &live[0].sql);
+        wait_until("the engine swap", || state.catalog().engines.is_empty());
+        let cached = state.project_views("p").unwrap();
+        let (cached_rows, definition) = read_view(&state, &cached[0].sql);
+
+        assert_eq!(cached, live);
+        assert_eq!(live_rows.len(), 2);
+        assert_eq!(cached_rows, live_rows);
+        assert!(definition.contains("cache_"), "{definition}");
+        state.shutdown();
+    }
+
+    #[test]
+    fn restart_mounts_cache_directly() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let first = started_with_worker(root.path(), &sources, &[project("p")]);
+        mount_and_wait_for_cache(&first, 1);
+        first.shutdown();
+
+        let second = AppState::load(dirs(root.path())).unwrap();
+        let views = second.project_views("p").unwrap();
+        let (rows, definition) = read_view(&second, &views[0].sql);
+
+        assert_eq!(rows.len(), 2);
+        assert!(definition.contains("cache_"), "{definition}");
+        assert_eq!(cache_files(&second.0.dirs).len(), 1);
+        assert_eq!(second.catalog().engines.len(), 1);
+        second.shutdown();
+    }
+
+    #[test]
+    fn edited_source_gets_a_new_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let first = started_with_worker(root.path(), &sources, &[project("p")]);
+        mount_and_wait_for_cache(&first, 1);
+        let views = first.project_views("p").unwrap();
+        let (_, old_definition) = read_view(&first, &views[0].sql);
+        first.shutdown();
+        write(&root.path().join("s.csv"), "a,b\n1,x\n2,y\n3,z\n");
+
+        let second = AppState::load(dirs(root.path())).unwrap();
+        let views = second.project_views("p").unwrap();
+        let (rows, _) = read_view(&second, &views[0].sql);
+        assert_eq!(rows.len(), 3);
+        mount_and_wait_for_cache(&second, 2);
+        let views = second.project_views("p").unwrap();
+        let (rows, new_definition) = read_view(&second, &views[0].sql);
+
+        assert_eq!(rows.len(), 3);
+        assert!(new_definition.contains("cache_"), "{new_definition}");
+        assert_ne!(new_definition, old_definition);
+        second.shutdown();
+    }
+
+    #[test]
+    fn purged_cache_falls_back_to_live() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let first = started_with_worker(root.path(), &sources, &[project("p")]);
+        mount_and_wait_for_cache(&first, 1);
+        first.shutdown();
+        for file in cache_files(&first.0.dirs) {
+            fs::remove_file(file).unwrap();
+        }
+
+        let second = AppState::load(dirs(root.path())).unwrap();
+        let views = second.project_views("p").unwrap();
+        let (rows, _) = read_view(&second, &views[0].sql);
+
+        assert_eq!(rows.len(), 2);
+        wait_until("a new import", || cache_files(&second.0.dirs).len() == 1);
+        second.shutdown();
     }
 }

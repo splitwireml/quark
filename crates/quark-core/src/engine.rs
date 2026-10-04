@@ -1,6 +1,6 @@
 //! Data and cache folders, spill configuration and DuckDB lockdown.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -11,10 +11,11 @@ use anyhow::{Context, bail};
 use duckdb::{AccessMode, Config, Connection, InterruptHandle, ToSql};
 use serde::Serialize;
 
+use crate::cache::columnar::ColumnarKey;
 use crate::cache::results::ResultCache;
 use crate::cache::stats::StatsCache;
 use crate::ids::dataset_id;
-use crate::mount::ViewInfo;
+use crate::mount::{ViewInfo, attach_cache, import_job};
 use crate::query::ColumnMeta;
 use crate::registry::SourceRecord;
 use crate::sql::{quote_ident, scan_expression, sql_string};
@@ -141,6 +142,8 @@ pub struct Engine {
     /// Ticket of the query running now, if any (see `cancel`).
     pub(crate) active: Mutex<Option<u64>>,
     pub(crate) next_ticket: AtomicU64,
+    /// Cache files that were ready when this workspace opened, so its allow-list covers them.
+    pub(crate) caches: HashMap<ColumnarKey, PathBuf>,
 }
 
 impl Engine {
@@ -152,6 +155,7 @@ impl Engine {
             inner: Mutex::new(EngineInner::new(conn)),
             active: Mutex::new(None),
             next_ticket: AtomicU64::new(0),
+            caches: HashMap::new(),
         }
     }
 
@@ -188,7 +192,14 @@ impl Engine {
                 let conn = Connection::open_in_memory()?;
                 configure_spill(&conn, dirs)?;
                 let name = quote_ident(source.dataset_name.as_deref().unwrap_or("data"));
-                conn.execute_batch(&format!("CREATE VIEW {name} AS SELECT * FROM {scan}"))
+                let origin = match import_job(source).filter(|job| job.key.is_ready(&dirs.cache)) {
+                    Some(job) => {
+                        let file = job.key.final_path(&dirs.cache);
+                        attach_cache(&conn, &job.key, &file).context("could not read cache")?
+                    }
+                    None => scan,
+                };
+                conn.execute_batch(&format!("CREATE VIEW {name} AS SELECT * FROM {origin}"))
                     .context("could not read source")?;
                 let parent = source.source.parent().unwrap_or(&source.source);
                 lock_down_dirs(&conn, &[parent.to_string_lossy().into_owned()])?;
@@ -204,12 +215,15 @@ impl Engine {
 
 /// Lists user tables and views, ordered by schema then name.
 pub fn datasets(conn: &Connection) -> duckdb::Result<Vec<DatasetInfo>> {
+    // The attached columnar caches hold the same rows as the views over them.
     let mut statement = conn.prepare(
         "SELECT schema_name, table_name, 'TABLE' FROM duckdb_tables()
          WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog')
+           AND NOT regexp_full_match(database_name, 'cache_[0-9a-f]{16}')
          UNION ALL
          SELECT schema_name, view_name, 'VIEW' FROM duckdb_views()
          WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog')
+           AND NOT regexp_full_match(database_name, 'cache_[0-9a-f]{16}')
          ORDER BY 1, 2",
     )?;
     statement
