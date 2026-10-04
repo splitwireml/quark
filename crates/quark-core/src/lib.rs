@@ -7,6 +7,7 @@ pub mod ids;
 pub mod literal;
 pub mod mount;
 pub mod naming;
+pub mod page;
 pub mod query;
 pub mod registry;
 pub mod sql;
