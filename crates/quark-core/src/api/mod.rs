@@ -1,10 +1,13 @@
-//! The loopback HTTP API: routes, request parsing and panic handling.
+//! The loopback HTTP API: routes, request parsing, request logging and panic handling.
 
 use std::any::Any;
+use std::time::Instant;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{FromRequest, Request};
 use axum::http::Uri;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -26,7 +29,38 @@ pub fn router(state: AppState) -> Router {
             .fallback(unknown_route)
             .method_not_allowed_fallback(unknown_route),
     )
+    .layer(middleware::from_fn(log_request))
     .with_state(state)
+}
+
+/// Error bodies are a short `{"detail": ...}`; anything larger is not read back for logging.
+const ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+/// Logs method, path (never the query string), status and duration; failures also log their `detail`.
+async fn log_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = started.elapsed().as_millis();
+    tracing::info!(%method, %path, status = status.as_u16(), elapsed_ms, "request");
+    if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, ERROR_BODY_LIMIT).await else {
+        return Response::from_parts(parts, Body::empty());
+    };
+    if let Ok(error) = serde_json::from_slice::<ErrorBody>(&bytes) {
+        tracing::warn!(%path, status = status.as_u16(), detail = %error.detail, "request failed");
+    }
+    Response::from_parts(parts, Body::from(bytes))
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    detail: String,
 }
 
 fn guarded<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Router<S> {
@@ -82,7 +116,84 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::sync::Once;
     use tower::ServiceExt;
+
+    thread_local! {
+        static CAPTURED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Writes log output into the current thread's buffer, so parallel tests never see each other's lines.
+    struct ThreadCapture;
+
+    impl Write for ThreadCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            CAPTURED.with_borrow_mut(|buffer| buffer.extend_from_slice(bytes));
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A process-wide subscriber: a thread-scoped one loses callsites that other threads registered first.
+    fn capture_logs() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(|| ThreadCapture)
+                    .finish(),
+            )
+            .unwrap();
+        });
+        CAPTURED.with_borrow_mut(Vec::clear);
+    }
+
+    #[tokio::test]
+    async fn requests_are_logged_without_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::engine::Dirs {
+            data: root.path().join("data"),
+            cache: root.path().join("cache"),
+        };
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        let file = root.path().join("legacy.csv");
+        std::fs::write(&file, "a,b\n1,x\n").unwrap();
+        let registry = serde_json::json!([
+            {"id": "legacy", "name": "LEGACY", "kind": "csv", "source": file.to_string_lossy()}
+        ]);
+        std::fs::write(dirs.registry_file(), registry.to_string()).unwrap();
+        std::fs::write(dirs.projects_file(), "[]").unwrap();
+        let app = router(AppState::load(dirs).unwrap());
+        capture_logs();
+
+        let missing = "/api/nodes/legacy/datasets/bm9wZQ/query";
+        for (method, path, status) in [("GET", "/api/nodes", 200), ("POST", missing, 404)] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("Authorization", "Bearer secret-token")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), status);
+        }
+
+        let logged = String::from_utf8(CAPTURED.with_borrow(Clone::clone)).unwrap();
+        for expected in ["/api/nodes ", missing, "200", "404", "Dataset not found"] {
+            assert!(
+                logged.contains(expected),
+                "missing {expected:?} in {logged}"
+            );
+        }
+        assert!(!logged.contains("secret-token"), "{logged}");
+    }
 
     #[tokio::test]
     async fn panicking_handler_becomes_internal_error() {
