@@ -11,6 +11,7 @@ use anyhow::{Context, bail};
 use duckdb::{AccessMode, Config, Connection, InterruptHandle, ToSql};
 use serde::Serialize;
 
+use crate::cache::results::ResultCache;
 use crate::cache::stats::StatsCache;
 use crate::ids::dataset_id;
 use crate::mount::ViewInfo;
@@ -114,6 +115,7 @@ pub struct EngineInner {
     /// Views mounted so far, by source id.
     pub mounted: BTreeMap<String, Vec<ViewInfo>>,
     pub stats: StatsCache,
+    pub results: ResultCache,
     #[doc(hidden)]
     pub counters: Counters,
 }
@@ -124,6 +126,7 @@ impl EngineInner {
             conn,
             mounted: BTreeMap::new(),
             stats: StatsCache::default(),
+            results: ResultCache::default(),
             counters: Counters::default(),
         }
     }
