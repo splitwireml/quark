@@ -6,7 +6,7 @@ use std::time::Instant;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{FromRequest, Request};
-use axum::http::Uri;
+use axum::http::{StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
@@ -92,7 +92,7 @@ where
     })?
 }
 
-/// A JSON body whose every rejection (syntax, content type, schema) is a 422.
+/// A JSON body whose rejections (syntax, content type, schema) are 422s; an over-limit body stays a 413.
 pub(crate) struct ApiJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for ApiJson<T>
@@ -106,7 +106,12 @@ where
         axum::Json::<T>::from_request(request, state)
             .await
             .map(|axum::Json(value)| Self(value))
-            .map_err(|rejection| ApiError::unprocessable(rejection.body_text()))
+            .map_err(|rejection| match rejection.status() {
+                StatusCode::PAYLOAD_TOO_LARGE => {
+                    ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, rejection.body_text())
+                }
+                _ => ApiError::unprocessable(rejection.body_text()),
+            })
     }
 }
 

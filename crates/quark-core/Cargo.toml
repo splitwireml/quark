@@ -24,7 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 chrono-tz = "0.10"
-http-body-util = "0.1"
+http-body-util = { version = "0.1", features = ["channel"] }
 tempfile.workspace = true
 tower.workspace = true
 

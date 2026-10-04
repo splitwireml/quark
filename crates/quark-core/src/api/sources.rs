@@ -144,12 +144,13 @@ mod tests {
     use super::super::router;
     use super::*;
     use crate::engine::Dirs;
-    use axum::body::Body;
+    use axum::body::{Body, Bytes};
     use axum::http::{Method, Request};
-    use http_body_util::BodyExt;
+    use http_body_util::{BodyExt, Channel};
     use serde_json::{Value, json};
     use std::fs;
     use std::path::Path;
+    use std::time::{Duration, Instant};
     use tower::ServiceExt;
 
     const BOUNDARY: &str = "quark-test-boundary";
@@ -275,6 +276,57 @@ mod tests {
         assert_eq!(node["project_id"], "p");
         let (_, sources) = send(&app, Method::GET, "/api/projects/p/sources", None).await;
         assert_eq!(sources[0]["id"], node["id"]);
+    }
+
+    #[tokio::test]
+    async fn aborted_upload_leaves_no_file() {
+        let root = tempfile::tempdir().unwrap();
+        let (app, state) = app(root.path());
+        let mut head = form(&[("file", Some("cut.csv"), &[b'x'; 64 * 1024])]);
+        head.truncate(head.len() - 64);
+        let (mut sender, body) = Channel::<Bytes, std::io::Error>::new(1);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/nodes/upload")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::new(body))
+            .unwrap();
+        let uploads = state.0.dirs.uploads();
+        let client = tokio::spawn(async move {
+            sender.send_data(Bytes::from(head)).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while fs::read_dir(&uploads).unwrap().next().is_none() {
+                assert!(Instant::now() < deadline, "the partial file never appeared");
+                tokio::task::yield_now().await;
+            }
+            sender.abort(std::io::Error::other("connection lost"));
+        });
+
+        let response = app.oneshot(request).await.unwrap();
+        client.await.unwrap();
+
+        assert!(response.status().is_client_error());
+        assert!(uploaded_files(&state).is_empty());
+    }
+
+    #[tokio::test]
+    async fn json_routes_keep_the_two_megabyte_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let (app, _) = app(root.path());
+        let padding = " ".repeat(2 * 1024 * 1024 + 1);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/nodes/legacy/sql")
+            .header("content-type", "application/json")
+            .body(Body::from(format!("{{\"sql\":\"SELECT 1\"{padding}}}")))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status().as_u16(), 413);
     }
 
     #[tokio::test]
