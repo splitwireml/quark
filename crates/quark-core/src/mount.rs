@@ -431,6 +431,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_allow_list_is_exact() {
+        let root = tempfile::tempdir().unwrap();
+        let flat = record(&csv(root.path(), "claims.csv"), None);
+        let database = root.path().join("x.duckdb");
+        Connection::open(&database)
+            .unwrap()
+            .execute_batch("CREATE TABLE items (a INTEGER)")
+            .unwrap();
+        let other = SourceRecord {
+            id: "s2".to_owned(),
+            source: database.clone(),
+            ..record(&database, None)
+        };
+        let key = build_cache(&flat, root.path());
+        let cache = key.final_path(&dirs_in(root.path()).cache);
+        let relative = |file: &str| {
+            let name = root.path().file_name().unwrap().to_str().unwrap();
+            let file = file.replace('\\', "/");
+            file.split_once(name).unwrap().1.to_owned()
+        };
+        let mut expected: Vec<String> = [
+            flat.source.to_string_lossy().into_owned(),
+            database.to_string_lossy().into_owned(),
+            format!("{}.wal", database.display()),
+            cache.to_string_lossy().into_owned(),
+            format!("{}.wal", cache.display()),
+        ]
+        .iter()
+        .map(|file| relative(file))
+        .collect();
+        expected.sort();
+
+        let sources = [flat, other];
+        let engine =
+            Engine::open_workspace(&project(), &sources, &dirs_in(root.path()), 1).unwrap();
+        let mut allowed: Vec<String> = engine
+            .lock()
+            .conn
+            .prepare("SELECT unnest(current_setting('allowed_paths'))")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|file| relative(&file.unwrap()))
+            .collect();
+        // DuckDB keeps the list as a set, so only its contents are observable.
+        allowed.sort();
+
+        assert_eq!(allowed, expected);
+    }
+
     fn build_cache(source: &SourceRecord, root: &Path) -> ColumnarKey {
         let job = import_job(source).unwrap();
         let dirs = dirs_in(root);
