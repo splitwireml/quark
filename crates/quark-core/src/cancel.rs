@@ -60,6 +60,12 @@ impl Engine {
     }
 }
 
+impl Ticket {
+    pub fn is_cancelled(&self) -> bool {
+        self.is_cancelled.load(Ordering::SeqCst)
+    }
+}
+
 impl CancelGuard {
     pub fn ticket(&self) -> Ticket {
         self.ticket.clone()

@@ -8,7 +8,8 @@ use axum::{Json, Router};
 
 use super::{ApiJson, blocking};
 use crate::arrow::ARROW_MEDIA_TYPE;
-use crate::error::ApiResult;
+use crate::cancel::Cancelled;
+use crate::error::{ApiError, ApiResult};
 use crate::page::{Format, PageBody, PageTarget, run_page};
 use crate::query::{QueryRequest, SqlQueryRequest};
 use crate::state::AppState;
@@ -69,12 +70,22 @@ async fn page(
     } else {
         Format::Json
     };
-    let body = blocking(move || {
-        let engine = state.engine_for_node(&node_id)?;
-        let mut inner = engine.lock();
-        run_page(&mut inner, &target, &request, format)
+    let engine = blocking(move || state.engine_for_node(&node_id)).await?;
+    // Dropping this future (the client left) drops the armed guard, which interrupts the query.
+    let mut guard = engine.guard();
+    let ticket = guard.ticket();
+    let outcome = blocking(move || {
+        let outcome =
+            engine.run_guarded(&ticket, |inner| run_page(inner, &target, &request, format));
+        if ticket.is_cancelled() {
+            tracing::debug!("discarded a page for a client that went away");
+        }
+        Ok(outcome)
     })
-    .await?;
+    .await;
+    guard.disarm();
+    // The guard is armed whenever this future is alive, so only an abandoned request is cancelled.
+    let body = outcome?.map_err(|Cancelled| ApiError::internal("Internal error"))??;
     Ok(match body {
         PageBody::Json(value) => Json(value).into_response(),
         PageBody::Arrow(bytes) => (
