@@ -13,12 +13,14 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
 mod read;
+mod sources;
 
 /// Every route the desktop build serves. Other `/api/*` requests, including a wrong method on a known path, answer 501; the rest 404.
 pub fn router(state: AppState) -> Router {
     guarded(
         Router::new()
             .merge(read::routes())
+            .merge(sources::routes())
             .fallback(unknown_route)
             .method_not_allowed_fallback(unknown_route),
     )

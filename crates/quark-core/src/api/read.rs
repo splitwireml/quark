@@ -265,7 +265,7 @@ mod tests {
             (status, body),
             (501, json!({"detail": "Not in the desktop build yet"}))
         );
-        let (status, _) = send(&app, Method::POST, "/api/nodes/upload", Some("{}")).await;
+        let (status, _) = send(&app, Method::GET, "/api/nodes/upload", None).await;
         assert_eq!(status, 501);
         let (status, body) = send(
             &app,
