@@ -4,20 +4,23 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt::Write;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use duckdb::{Connection, InterruptHandle};
 use sha2::{Digest, Sha256};
 
 use crate::engine::{Dirs, configure_spill, lock_down_paths};
+
+/// The most the columnar folder may hold before the least recently used files go.
+const CACHE_CAP: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Content-addressed name of a columnar cache file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -69,6 +72,26 @@ impl ColumnarKey {
     pub fn is_ready(&self, cache_dir: &Path) -> bool {
         self.final_path(cache_dir).is_file()
     }
+
+    /// Marks the cache file as just used, so eviction keeps it longest.
+    pub fn touch(&self, cache_dir: &Path) {
+        let mut options = File::options();
+        #[cfg(windows)]
+        {
+            // Attribute access alone cannot clash with the handle DuckDB holds on the file.
+            use std::os::windows::fs::OpenOptionsExt;
+            options.access_mode(0x0100); // FILE_WRITE_ATTRIBUTES
+        }
+        #[cfg(not(windows))]
+        options.write(true);
+        if let Err(error) = options
+            .open(self.final_path(cache_dir))
+            .and_then(|file| file.set_modified(SystemTime::now()))
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::debug!(%error, "could not mark a columnar file as used");
+        }
+    }
 }
 
 /// One flat file to import into the columnar cache.
@@ -103,14 +126,25 @@ pub struct ColumnarWorker {
 }
 
 impl ColumnarWorker {
-    /// Clears stray `*.partial` files, then starts the worker thread.
+    /// Clears stray `*.partial` files, evicts down to the cap, then starts the worker thread.
     /// `on_ready` is called with the source id after each import lands.
     pub fn start(
         cache_dir: &Path,
         spill_dir: &Path,
         on_ready: Box<dyn Fn(String) + Send>,
     ) -> ColumnarWorker {
+        Self::with_cap(CACHE_CAP, cache_dir, spill_dir, on_ready)
+    }
+
+    /// Like `start`, with the folder capped at `cap` bytes instead of 10 GB.
+    pub fn with_cap(
+        cap: u64,
+        cache_dir: &Path,
+        spill_dir: &Path,
+        on_ready: Box<dyn Fn(String) + Send>,
+    ) -> ColumnarWorker {
         remove_stray_partials(&cache_dir.join("columnar"));
+        evict(&cache_dir.join("columnar"), cap);
         let (sender, receiver) = mpsc::channel();
         let shared = Arc::new(Shared::default());
         let context = WorkerContext {
@@ -121,6 +155,7 @@ impl ColumnarWorker {
                 cache: spill_dir.parent().unwrap_or(spill_dir).to_owned(),
             },
             shared: Arc::clone(&shared),
+            cap,
             on_ready,
         };
         let thread = thread::spawn(move || context.run(&receiver));
@@ -160,6 +195,7 @@ struct WorkerContext {
     cache_dir: PathBuf,
     spill_dirs: Dirs,
     shared: Arc<Shared>,
+    cap: u64,
     on_ready: Box<dyn Fn(String) + Send>,
 }
 
@@ -176,7 +212,10 @@ impl WorkerContext {
             let outcome = self.import(&job);
             *self.shared.running() = None;
             match outcome {
-                Ok(()) => (self.on_ready)(job.source_id),
+                Ok(()) => {
+                    evict(&self.cache_dir.join("columnar"), self.cap);
+                    (self.on_ready)(job.source_id);
+                }
                 Err(error) => {
                     remove_partial(&job.key.partial_path(&self.cache_dir));
                     if !self.shared.is_stopping() {
@@ -228,6 +267,37 @@ fn remove_partial(partial: &Path) {
     }
 }
 
+/// Deletes the least recently used cache files until the folder fits in `cap` bytes.
+/// The newest file stays even when it alone is over the cap: deleting it would make
+/// the next mount import it again. A file the system refuses to delete (Windows keeps
+/// an attached one) waits for the next pass.
+fn evict(columnar_dir: &Path, cap: u64) {
+    let Ok(entries) = fs::read_dir(columnar_dir) else {
+        return;
+    };
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "duckdb"))
+        .filter_map(|path| {
+            let metadata = path.metadata().ok()?;
+            Some((metadata.modified().ok()?, metadata.len(), path))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
+    files.sort();
+    files.pop();
+    for (_, len, path) in files {
+        if total <= cap {
+            break;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => total -= len,
+            Err(error) => tracing::debug!(%error, "columnar file in use; keeping it for now"),
+        }
+    }
+}
+
 fn remove_stray_partials(columnar_dir: &Path) {
     let Ok(entries) = fs::read_dir(columnar_dir) else {
         return;
@@ -250,7 +320,7 @@ mod tests {
     use super::*;
     use crate::sql::scan_expression;
     use std::fs::File;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     const SCAN: &str = "read_csv_auto('x.csv')";
     const VERSION: &str = "v1.5.4";
@@ -345,6 +415,15 @@ mod tests {
         (worker, ready)
     }
 
+    fn start_with_cap(cache: &Path, cap: u64) -> (ColumnarWorker, Receiver<String>) {
+        let (sender, ready) = mpsc::channel();
+        let on_ready = Box::new(move |source_id: String| {
+            sender.send(source_id).unwrap();
+        });
+        let worker = ColumnarWorker::with_cap(cap, cache, &cache.join("duckdb-tmp"), on_ready);
+        (worker, ready)
+    }
+
     fn job(dir: &Path, name: &str, body: &str) -> ColumnarJob {
         let file = dir.join(name);
         fs::write(&file, body).unwrap();
@@ -434,6 +513,49 @@ mod tests {
         worker.shutdown();
 
         assert!(!wal.exists());
+    }
+
+    /// A 10-byte stand-in cache file last used `age` ago.
+    fn cache_file(dir: &Path, cache: &Path, name: &str, age: Duration) -> ColumnarKey {
+        let source = dir.join(name);
+        fs::write(&source, "a\n1\n").unwrap();
+        let key = key(&source, name, VERSION);
+        fs::create_dir_all(cache.join("columnar")).unwrap();
+        fs::write(key.final_path(cache), b"0123456789").unwrap();
+        File::options()
+            .write(true)
+            .open(key.final_path(cache))
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+        key
+    }
+
+    #[test]
+    fn eviction_removes_least_recent_over_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let day = Duration::from_secs(86_400);
+        let oldest = cache_file(dir.path(), &cache, "a.csv", 3 * day);
+        let middle = cache_file(dir.path(), &cache, "b.csv", 2 * day);
+        let newest = cache_file(dir.path(), &cache, "c.csv", day);
+        oldest.touch(&cache);
+
+        let (mut worker, ready) = start_with_cap(&cache, 25);
+        assert!(oldest.is_ready(&cache), "mounting made it the most recent");
+        assert!(!middle.is_ready(&cache), "startup evicts the least recent");
+        assert!(newest.is_ready(&cache));
+
+        let job = job(dir.path(), "d.csv", "a\n1\n");
+        let imported = job.key.clone();
+        worker.enqueue(job);
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), "d.csv");
+        worker.shutdown();
+        assert!(!oldest.is_ready(&cache) && !newest.is_ready(&cache));
+        assert!(
+            imported.is_ready(&cache),
+            "the newest file stays over the cap"
+        );
     }
 
     #[test]

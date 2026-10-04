@@ -15,10 +15,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::cache::columnar::ColumnarWorker;
+use crate::cache::columnar::{ColumnarKey, ColumnarWorker};
 use crate::engine::{DatasetInfo, Dirs, Engine, describe};
 use crate::error::{ApiError, ApiResult};
-use crate::mount::{ViewInfo, import_job};
+use crate::mount::{ViewInfo, database_paths, import_job};
 use crate::naming::dataset_name;
 use crate::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, default_project, load_projects,
@@ -182,6 +182,7 @@ impl AppState {
             return;
         };
         if job.key.is_ready(&self.0.dirs.cache) {
+            job.key.touch(&self.0.dirs.cache);
             return;
         }
         let columnar = self
@@ -443,7 +444,7 @@ impl AppState {
     ) -> ApiResult<Value> {
         let result = self.add_upload(project_id, node_id, original_name, path);
         if result.is_err() {
-            remove_upload(path);
+            remove_with_retry(path);
         }
         result
     }
@@ -519,7 +520,7 @@ impl AppState {
 
     /// Removes a source from its project. The engines go first so Windows lets the file go.
     pub fn delete_source(&self, project_id: &str, node_id: &str) -> ApiResult<()> {
-        let (source, engines) = {
+        let (source, engines, cache) = {
             let mut catalog = self.catalog();
             let workspace_id = catalog.project(project_id)?.node_id.clone();
             let index = catalog
@@ -532,11 +533,22 @@ impl AppState {
                 catalog.engines.remove(node_id),
                 catalog.engines.remove(&workspace_id),
             ];
-            (source, engines)
+            // Sources over the same file share one cache file: it stays while any of them is left.
+            let cache = import_job(&source).map(|job| job.key).filter(|key| {
+                !catalog
+                    .sources
+                    .iter()
+                    .filter_map(import_job)
+                    .any(|other| other.key == *key)
+            });
+            (source, engines, cache)
         };
         drop(engines);
+        if let Some(key) = cache {
+            remove_cache_files(&key, &self.0.dirs.cache);
+        }
         if source.kind == "upload" {
-            remove_upload(&source.source);
+            remove_with_retry(&source.source);
         }
         let mut catalog = self.catalog();
         catalog
@@ -561,9 +573,16 @@ impl AppState {
     }
 }
 
-/// Deletes an upload, retrying once after 100 ms because Windows may still hold the file.
-/// A file that stays behind is an orphan, which the next startup deletes.
-fn remove_upload(path: &Path) {
+/// Deletes a columnar cache file and its write-ahead log. One that stays behind is evicted later.
+fn remove_cache_files(key: &ColumnarKey, cache_dir: &Path) {
+    for path in database_paths(&key.final_path(cache_dir)) {
+        remove_with_retry(Path::new(&path));
+    }
+}
+
+/// Deletes a file, retrying once after 100 ms because Windows may still hold it.
+/// An upload that stays behind is an orphan the next startup deletes; a cache file is evicted.
+fn remove_with_retry(path: &Path) {
     let remove = || match fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
@@ -571,7 +590,7 @@ fn remove_upload(path: &Path) {
     if remove().is_err() {
         thread::sleep(Duration::from_millis(100));
         if let Err(error) = remove() {
-            tracing::warn!(path = %path.display(), %error, "could not delete upload; leaving it for startup cleanup");
+            tracing::warn!(path = %path.display(), %error, "could not delete file; leaving it for later cleanup");
         }
     }
 }
@@ -603,7 +622,7 @@ mod tests {
     use super::*;
     use crate::engine::EngineKind;
     use serde_json::json;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
 
     fn dirs(root: &Path) -> Dirs {
         Dirs {
@@ -1231,6 +1250,58 @@ mod tests {
         assert_eq!(live_rows.len(), 2);
         assert_eq!(cached_rows, live_rows);
         assert!(definition.contains("cache_"), "{definition}");
+        state.shutdown();
+    }
+
+    #[test]
+    fn deleting_source_removes_cache_files() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let state = started_with_worker(root.path(), &sources, &[project("p")]);
+        mount_and_wait_for_cache(&state, 1);
+
+        state.delete_source("p", "s").unwrap();
+
+        assert!(cache_files(&state.0.dirs).is_empty());
+        state.shutdown();
+    }
+
+    #[test]
+    fn cache_shared_with_another_source_survives_a_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let first = entry(root.path(), "s", Some("p"));
+        let mut second = first.clone();
+        second["id"] = json!("t");
+        let state = started_with_worker(root.path(), &[first, second], &[project("p")]);
+        mount_and_wait_for_cache(&state, 1);
+
+        state.delete_source("p", "s").unwrap();
+        assert_eq!(cache_files(&state.0.dirs).len(), 1);
+        state.delete_source("p", "t").unwrap();
+
+        assert!(cache_files(&state.0.dirs).is_empty());
+        state.shutdown();
+    }
+
+    #[test]
+    fn mounting_touches_the_cache_file() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let state = started_with_worker(root.path(), &sources, &[project("p")]);
+        mount_and_wait_for_cache(&state, 1);
+        let file = cache_files(&state.0.dirs).remove(0);
+        let day = Duration::from_secs(86_400);
+        let old = SystemTime::now() - 3 * day;
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        state.project_views("p").unwrap();
+
+        assert!(fs::metadata(&file).unwrap().modified().unwrap() > old + day);
         state.shutdown();
     }
 
