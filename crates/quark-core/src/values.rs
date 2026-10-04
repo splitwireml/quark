@@ -35,11 +35,10 @@ const NATIVE: [&str; 14] = [
     "BLOB",
 ];
 
-/// True when the uppercased type starts with one of the scalar prefixes.
-/// List and array types such as `INTEGER[]` are never scalar.
+/// True when the uppercased type starts with one of the prefixes.
 fn has_prefix(type_: &str, prefixes: &[&str]) -> bool {
     let upper = type_.to_ascii_uppercase();
-    !upper.ends_with(']') && prefixes.iter().any(|prefix| upper.starts_with(prefix))
+    prefixes.iter().any(|prefix| upper.starts_with(prefix))
 }
 
 pub fn is_numeric(type_: &str) -> bool {
@@ -79,7 +78,8 @@ mod tests {
             ("ENUM('a', 'b')", false, Some("categorical"), false),
             ("BOOLEAN", false, Some("categorical"), true),
             ("TIMESTAMP WITH TIME ZONE", false, Some("date"), false),
-            ("INTEGER[]", false, None, false),
+            ("INTEGER[]", true, Some("numeric"), false),
+            ("VARCHAR[]", false, Some("categorical"), false),
             ("INTERVAL", false, None, false),
             ("BLOB", false, None, true),
             ("HUGEINT", true, Some("numeric"), false),
