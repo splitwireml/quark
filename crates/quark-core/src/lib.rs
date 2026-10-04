@@ -11,6 +11,7 @@ pub mod naming;
 pub mod page;
 pub mod query;
 pub mod registry;
+pub mod secure;
 pub mod sql;
 pub mod state;
 pub mod values;

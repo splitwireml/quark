@@ -3164,11 +3164,15 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "duckdb",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tower-http",
  "tracing",
 ]
 
