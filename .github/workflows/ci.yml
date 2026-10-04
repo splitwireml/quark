@@ -87,6 +87,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.key }}
+          save-if: false
       - run: npx --yes @tauri-apps/cli@^2.12 build ${{ matrix.args }}
       - uses: actions/upload-artifact@v4
         with:
