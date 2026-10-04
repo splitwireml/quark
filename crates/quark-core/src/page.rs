@@ -10,11 +10,12 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::arrow::encode_page;
+use crate::cache::stats::{StatsEntry, stats_key};
 use crate::engine::{EngineInner, datasets, describe};
 use crate::error::{ApiError, ApiResult};
 use crate::guard::check_select;
 use crate::naming::page_count;
-use crate::query::{BuiltQuery, ColumnMeta, QueryRequest, build_query};
+use crate::query::{ColumnMeta, QueryRequest, build_query};
 use crate::sql::quote_ident;
 use crate::values::{cell_json, is_numeric, profile_kind};
 
@@ -140,32 +141,26 @@ fn resolve(conn: &Connection, target: &PageTarget) -> ApiResult<Resolved> {
     }
 }
 
-/// The page's Arrow schema and batches, the total row count and each column's null fraction.
+/// The page's Arrow schema and batches.
 struct Fetched {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
-    total_rows: u64,
-    null_fractions: Vec<f64>,
 }
 
-fn fetch(
+/// Counts the relation's rows and measures each column's null fraction.
+fn compute_stats(
     conn: &Connection,
-    built: &BuiltQuery,
+    relation: &str,
     columns: &[ColumnMeta],
-    lead: &[Value],
-    request: &QueryRequest,
-) -> duckdb::Result<Fetched> {
-    let mut params = lead.to_vec();
-    params.extend(built.params.iter().cloned());
-    let relation = &built.relation;
-
+    params: &[Value],
+) -> duckdb::Result<StatsEntry> {
     let total_rows = conn.query_row(
         &format!("SELECT count(*) FROM {relation}"),
-        bind(&params),
+        bind(params),
         |row| row.get(0),
     )?;
 
-    let null_fractions = if columns.is_empty() {
+    let null_fractions: Vec<f64> = if columns.is_empty() {
         Vec::new()
     } else {
         let averages: Vec<String> = columns
@@ -179,7 +174,7 @@ fn fetch(
             .collect();
         conn.query_row(
             &format!("SELECT {} FROM {relation}", averages.join(", ")),
-            bind(&params),
+            bind(params),
             |row| {
                 (0..columns.len())
                     .map(|index| Ok(row.get::<_, Option<f64>>(index)?.unwrap_or(0.0)))
@@ -188,23 +183,40 @@ fn fetch(
         )?
     };
 
+    let columns = columns
+        .iter()
+        .zip(null_fractions)
+        .map(|(meta, null_fraction)| ColumnSummary {
+            name: meta.name.clone(),
+            type_name: meta.type_name.clone(),
+            numeric: is_numeric(&meta.type_name),
+            profile_kind: profile_kind(&meta.type_name),
+            null_fraction,
+        })
+        .collect();
+    Ok(StatsEntry {
+        columns,
+        total_rows,
+    })
+}
+
+fn fetch_page(
+    conn: &Connection,
+    ordered: &str,
+    mut params: Vec<Value>,
+    request: &QueryRequest,
+) -> duckdb::Result<Fetched> {
     params.push(Value::from(request.page_size));
     params.push(Value::from(
         (request.page - 1).saturating_mul(request.page_size),
     ));
     let mut statement = conn.prepare(&format!(
-        "SELECT * FROM ({}) AS result LIMIT ? OFFSET ?",
-        built.ordered
+        "SELECT * FROM ({ordered}) AS result LIMIT ? OFFSET ?"
     ))?;
     let arrow = statement.query_arrow(bind(&params))?;
     let schema = arrow.get_schema();
     let batches = arrow.collect();
-    Ok(Fetched {
-        schema,
-        batches,
-        total_rows,
-        null_fractions,
-    })
+    Ok(Fetched { schema, batches })
 }
 
 fn rows_json(batches: &[RecordBatch], columns: &[ColumnMeta]) -> Vec<Value> {
@@ -242,8 +254,23 @@ pub fn run_page(
         &resolved.columns,
         request,
     )?;
-    let fetched = fetch(conn, &built, &resolved.columns, &resolved.lead, request)
-        .map_err(|error| ApiError::unprocessable(format!("{}{error}", resolved.error_prefix)))?;
+    let unprocessable =
+        |error: duckdb::Error| ApiError::unprocessable(format!("{}{error}", resolved.error_prefix));
+
+    let mut params = resolved.lead.clone();
+    params.extend(built.params.iter().cloned());
+    let key = stats_key(&built.relation, &params);
+    let stats = match inner.stats.get(&key) {
+        Some(stats) => stats,
+        None => {
+            inner.counters.count_queries += 1;
+            let stats = compute_stats(conn, &built.relation, &resolved.columns, &params)
+                .map_err(unprocessable)?;
+            inner.stats.insert(key, stats.clone());
+            stats
+        }
+    };
+    let fetched = fetch_page(conn, &built.ordered, params, request).map_err(unprocessable)?;
 
     let has_controls = !request.filters.is_empty()
         || !request.sorts.is_empty()
@@ -252,25 +279,13 @@ pub fn run_page(
         Some(plain) if !has_controls => plain,
         _ => built.display,
     };
-    let columns = resolved
-        .columns
-        .iter()
-        .zip(&fetched.null_fractions)
-        .map(|(meta, &null_fraction)| ColumnSummary {
-            name: meta.name.clone(),
-            type_name: meta.type_name.clone(),
-            numeric: is_numeric(&meta.type_name),
-            profile_kind: profile_kind(&meta.type_name),
-            null_fraction,
-        })
-        .collect();
     let meta = PageMeta {
-        columns,
+        columns: stats.columns,
         page: request.page,
         page_size: request.page_size,
-        total_rows: fetched.total_rows,
+        total_rows: stats.total_rows,
         // validate() guarantees page_size >= 1.
-        total_pages: page_count(fetched.total_rows, request.page_size.unsigned_abs()),
+        total_pages: page_count(stats.total_rows, request.page_size.unsigned_abs()),
         elapsed_ms: (started.elapsed().as_secs_f64() * 1_000_000.0).round() / 1000.0,
         sql,
     };
@@ -298,16 +313,12 @@ mod tests {
     use arrow::ipc::reader::StreamReader;
     use duckdb::Connection;
     use serde_json::json;
-    use std::collections::BTreeMap;
     use std::io::Cursor;
 
     fn inner(setup: &str) -> EngineInner {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(setup).unwrap();
-        EngineInner {
-            conn,
-            mounted: BTreeMap::new(),
-        }
+        EngineInner::new(conn)
     }
 
     fn dataset(name: &str) -> PageTarget {
@@ -368,6 +379,99 @@ mod tests {
             json_body(run_page(&mut inner, &dataset("t"), &sorted(4), Format::Json).unwrap());
         assert_eq!(beyond["rows"], json!([]));
         assert_eq!(beyond["total_rows"], 250);
+    }
+
+    fn count_queries(inner: &EngineInner) -> u64 {
+        inner.counters.count_queries
+    }
+
+    fn page_of(page: i64, sorts: Vec<Sort>, filters: Vec<Filter>) -> QueryRequest {
+        QueryRequest {
+            page,
+            sorts,
+            filters,
+            ..QueryRequest::default()
+        }
+    }
+
+    fn sort_a(direction: Direction) -> Vec<Sort> {
+        vec![Sort {
+            column: "a".to_owned(),
+            direction,
+        }]
+    }
+
+    #[test]
+    fn second_page_skips_count_and_nulls() {
+        let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(250)");
+        let run = |inner: &mut EngineInner, page| {
+            json_body(
+                run_page(
+                    inner,
+                    &dataset("t"),
+                    &page_of(page, sort_a(Direction::Asc), Vec::new()),
+                    Format::Json,
+                )
+                .unwrap(),
+            )
+        };
+
+        let first = run(&mut inner, 1);
+        let second = run(&mut inner, 2);
+
+        assert_eq!(count_queries(&inner), 1);
+        assert_eq!(second["total_rows"], 250);
+        assert_eq!(second["columns"], first["columns"]);
+        assert_eq!(second["rows"][0], json!({"a": 100}));
+    }
+
+    #[test]
+    fn sort_change_reuses_stats() {
+        let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(10)");
+        let run = |inner: &mut EngineInner, sorts| {
+            json_body(
+                run_page(
+                    inner,
+                    &dataset("t"),
+                    &page_of(1, sorts, Vec::new()),
+                    Format::Json,
+                )
+                .unwrap(),
+            )
+        };
+
+        let ascending = run(&mut inner, sort_a(Direction::Asc));
+        let descending = run(&mut inner, sort_a(Direction::Desc));
+
+        assert_eq!(count_queries(&inner), 1);
+        assert_eq!(ascending["rows"][0], json!({"a": 0}));
+        assert_eq!(descending["rows"][0], json!({"a": 9}));
+        assert_eq!(descending["total_rows"], 10);
+    }
+
+    #[test]
+    fn filter_change_misses() {
+        let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(10)");
+        let run = |inner: &mut EngineInner, bound| {
+            json_body(
+                run_page(
+                    inner,
+                    &dataset("t"),
+                    &page_of(1, Vec::new(), vec![filter("a", ">", json!(bound))]),
+                    Format::Json,
+                )
+                .unwrap(),
+            )
+        };
+
+        let above_two = run(&mut inner, 2);
+        let above_six = run(&mut inner, 6);
+        let above_six_again = run(&mut inner, 6);
+
+        assert_eq!(count_queries(&inner), 2);
+        assert_eq!(above_two["total_rows"], 7);
+        assert_eq!(above_six["total_rows"], 3);
+        assert_eq!(above_six_again["total_rows"], 3);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use anyhow::{Context, bail};
 use duckdb::{AccessMode, Config, Connection, InterruptHandle, ToSql};
 use serde::Serialize;
 
+use crate::cache::stats::StatsCache;
 use crate::ids::dataset_id;
 use crate::mount::ViewInfo;
 use crate::query::ColumnMeta;
@@ -102,10 +103,30 @@ pub enum EngineKind {
     Node { node_id: String },
 }
 
+/// Work done so far, so tests can tell a cache hit from a recomputation.
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub count_queries: u64,
+}
+
 pub struct EngineInner {
     pub conn: Connection,
     /// Views mounted so far, by source id.
     pub mounted: BTreeMap<String, Vec<ViewInfo>>,
+    pub stats: StatsCache,
+    #[doc(hidden)]
+    pub counters: Counters,
+}
+
+impl EngineInner {
+    pub fn new(conn: Connection) -> Self {
+        Self {
+            conn,
+            mounted: BTreeMap::new(),
+            stats: StatsCache::default(),
+            counters: Counters::default(),
+        }
+    }
 }
 
 pub struct Engine {
@@ -125,10 +146,7 @@ impl Engine {
             kind,
             generation,
             interrupt: conn.interrupt_handle(),
-            inner: Mutex::new(EngineInner {
-                conn,
-                mounted: BTreeMap::new(),
-            }),
+            inner: Mutex::new(EngineInner::new(conn)),
             active: Mutex::new(None),
             next_ticket: AtomicU64::new(0),
         }
