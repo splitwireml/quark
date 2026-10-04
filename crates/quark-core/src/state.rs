@@ -95,6 +95,14 @@ impl Catalog {
             .filter(move |source| source.project() == project_id)
     }
 
+    /// Whether an active source reads the cache file `key` names.
+    fn uses_cache(&self, key: &ColumnarKey) -> bool {
+        self.sources
+            .iter()
+            .filter_map(import_job)
+            .any(|job| job.key == *key)
+    }
+
     fn summary(&self, project: &ProjectRecord) -> ProjectSummary {
         ProjectSummary {
             project: project.clone(),
@@ -153,9 +161,9 @@ impl AppState {
 
         let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
             let weak = weak.clone();
-            let on_ready = Box::new(move |source_id: String| {
+            let on_ready = Box::new(move |source_id: String, key: ColumnarKey| {
                 if let Some(shared) = weak.upgrade() {
-                    Self(shared).drop_engines_of(&source_id);
+                    Self(shared).cache_ready(&source_id, &key);
                 }
             });
             let worker = ColumnarWorker::start(&dirs.cache, &spill, on_ready);
@@ -196,11 +204,17 @@ impl AppState {
     }
 
     /// Forgets the engines that mount `source_id`, so the next request mounts its new cache.
-    /// Work already running finishes on the old engine.
-    fn drop_engines_of(&self, source_id: &str) {
+    /// Work already running finishes on the old engine. A source deleted during its import
+    /// left a cache nobody needs: it goes, unless another source reads the same file.
+    fn cache_ready(&self, source_id: &str, key: &ColumnarKey) {
         let engines = {
             let mut catalog = self.catalog();
             let Some(source) = catalog.sources.iter().find(|source| source.id == source_id) else {
+                let is_orphan = !catalog.uses_cache(key);
+                drop(catalog);
+                if is_orphan {
+                    remove_cache_files(key, &self.0.dirs.cache);
+                }
                 return;
             };
             let workspace = catalog
@@ -534,13 +548,9 @@ impl AppState {
                 catalog.engines.remove(&workspace_id),
             ];
             // Sources over the same file share one cache file: it stays while any of them is left.
-            let cache = import_job(&source).map(|job| job.key).filter(|key| {
-                !catalog
-                    .sources
-                    .iter()
-                    .filter_map(import_job)
-                    .any(|other| other.key == *key)
-            });
+            let cache = import_job(&source)
+                .map(|job| job.key)
+                .filter(|key| !catalog.uses_cache(key));
             (source, engines, cache)
         };
         drop(engines);
@@ -1226,11 +1236,31 @@ mod tests {
         (rows, definition)
     }
 
-    /// Mounts the one source of project `p` and waits until its import has replaced the engine.
+    /// How many of the project's source views are defined over an attached cache.
+    fn cached_view_count(state: &AppState) -> usize {
+        let engine = state.engine_for_node("project_p").unwrap();
+        let inner = engine.lock();
+        let count: i64 = inner
+            .conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_views()
+                 WHERE schema_name LIKE 'source_%' AND contains(sql, 'cache_')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        usize::try_from(count).unwrap()
+    }
+
+    /// Mounts the sources of project `p` again and again until `caches` cache files exist and
+    /// every view reads from one. Waiting for the engines to empty instead misses a swap that
+    /// happened before the first mount.
     fn mount_and_wait_for_cache(state: &AppState, caches: usize) -> Vec<ViewInfo> {
-        let views = state.project_views("p").unwrap();
-        wait_until("the import", || cache_files(&state.0.dirs).len() == caches);
-        wait_until("the engine swap", || state.catalog().engines.is_empty());
+        let mut views = Vec::new();
+        wait_until("the import and the engine swap", || {
+            views = state.project_views("p").unwrap();
+            cache_files(&state.0.dirs).len() == caches && cached_view_count(state) == views.len()
+        });
         views
     }
 
@@ -1242,8 +1272,7 @@ mod tests {
 
         let live = state.project_views("p").unwrap();
         let (live_rows, _) = read_view(&state, &live[0].sql);
-        wait_until("the engine swap", || state.catalog().engines.is_empty());
-        let cached = state.project_views("p").unwrap();
+        let cached = mount_and_wait_for_cache(&state, 1);
         let (cached_rows, definition) = read_view(&state, &cached[0].sql);
 
         assert_eq!(cached, live);
@@ -1264,6 +1293,47 @@ mod tests {
 
         assert!(cache_files(&state.0.dirs).is_empty());
         state.shutdown();
+    }
+
+    /// Deletes source `s` of project `p`, then publishes its cache as an import still running would.
+    fn publish_cache_after_delete(state: &AppState) -> ColumnarKey {
+        let key = state
+            .catalog()
+            .sources
+            .iter()
+            .find_map(import_job)
+            .unwrap()
+            .key;
+        state.delete_source("p", "s").unwrap();
+        write(&key.final_path(&state.0.dirs.cache), "");
+        key
+    }
+
+    #[test]
+    fn ready_cache_for_deleted_source_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let sources = [entry(root.path(), "s", Some("p"))];
+        let state = started(root.path(), &sources, &[project("p")]);
+        let key = publish_cache_after_delete(&state);
+        assert_eq!(cache_files(&state.0.dirs).len(), 1);
+
+        state.cache_ready("s", &key);
+
+        assert!(!key.is_ready(&state.0.dirs.cache));
+    }
+
+    #[test]
+    fn ready_cache_for_deleted_source_stays_while_another_source_uses_it() {
+        let root = tempfile::tempdir().unwrap();
+        let first = entry(root.path(), "s", Some("p"));
+        let mut second = first.clone();
+        second["id"] = json!("t");
+        let state = started(root.path(), &[first, second], &[project("p")]);
+        let key = publish_cache_after_delete(&state);
+
+        state.cache_ready("s", &key);
+
+        assert!(key.is_ready(&state.0.dirs.cache));
     }
 
     #[test]
@@ -1339,8 +1409,7 @@ mod tests {
         let views = second.project_views("p").unwrap();
         let (rows, _) = read_view(&second, &views[0].sql);
         assert_eq!(rows.len(), 3);
-        mount_and_wait_for_cache(&second, 2);
-        let views = second.project_views("p").unwrap();
+        let views = mount_and_wait_for_cache(&second, 2);
         let (rows, new_definition) = read_view(&second, &views[0].sql);
 
         assert_eq!(rows.len(), 3);

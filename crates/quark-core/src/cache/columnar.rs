@@ -127,11 +127,11 @@ pub struct ColumnarWorker {
 
 impl ColumnarWorker {
     /// Clears stray `*.partial` files, evicts down to the cap, then starts the worker thread.
-    /// `on_ready` is called with the source id after each import lands.
+    /// `on_ready` is called with the source id and cache key after each import lands.
     pub fn start(
         cache_dir: &Path,
         spill_dir: &Path,
-        on_ready: Box<dyn Fn(String) + Send>,
+        on_ready: Box<dyn Fn(String, ColumnarKey) + Send>,
     ) -> ColumnarWorker {
         Self::with_cap(CACHE_CAP, cache_dir, spill_dir, on_ready)
     }
@@ -141,7 +141,7 @@ impl ColumnarWorker {
         cap: u64,
         cache_dir: &Path,
         spill_dir: &Path,
-        on_ready: Box<dyn Fn(String) + Send>,
+        on_ready: Box<dyn Fn(String, ColumnarKey) + Send>,
     ) -> ColumnarWorker {
         remove_stray_partials(&cache_dir.join("columnar"));
         evict(&cache_dir.join("columnar"), cap);
@@ -196,7 +196,7 @@ struct WorkerContext {
     spill_dirs: Dirs,
     shared: Arc<Shared>,
     cap: u64,
-    on_ready: Box<dyn Fn(String) + Send>,
+    on_ready: Box<dyn Fn(String, ColumnarKey) + Send>,
 }
 
 impl WorkerContext {
@@ -214,7 +214,7 @@ impl WorkerContext {
             match outcome {
                 Ok(()) => {
                     evict(&self.cache_dir.join("columnar"), self.cap);
-                    (self.on_ready)(job.source_id);
+                    (self.on_ready)(job.source_id, job.key);
                 }
                 Err(error) => {
                     remove_partial(&job.key.partial_path(&self.cache_dir));
@@ -408,7 +408,7 @@ mod tests {
 
     fn start(cache: &Path) -> (ColumnarWorker, Receiver<String>) {
         let (sender, ready) = mpsc::channel();
-        let on_ready = Box::new(move |source_id: String| {
+        let on_ready = Box::new(move |source_id: String, _key: ColumnarKey| {
             sender.send(source_id).unwrap();
         });
         let worker = ColumnarWorker::start(cache, &cache.join("duckdb-tmp"), on_ready);
@@ -417,7 +417,7 @@ mod tests {
 
     fn start_with_cap(cache: &Path, cap: u64) -> (ColumnarWorker, Receiver<String>) {
         let (sender, ready) = mpsc::channel();
-        let on_ready = Box::new(move |source_id: String| {
+        let on_ready = Box::new(move |source_id: String, _key: ColumnarKey| {
             sender.send(source_id).unwrap();
         });
         let worker = ColumnarWorker::with_cap(cap, cache, &cache.join("duckdb-tmp"), on_ready);
