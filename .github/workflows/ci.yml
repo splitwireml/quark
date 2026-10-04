@@ -25,7 +25,6 @@ jobs:
       - run: cargo test -p quark-core --locked
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
-      - run: cargo build -p quark-core --bin quark-dev-server --locked
       - run: uv run pytest -m skeleton -q
         env:
           QUARK_TEST_BACKEND: rust
