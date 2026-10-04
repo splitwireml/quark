@@ -3,13 +3,22 @@
 //! Keys are built with `stats_key(ordered_sql, params)`: the ordered SQL plus the JSON of its parameters.
 
 use std::fmt::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
+use duckdb::Connection;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::mount::ViewInfo;
+use crate::page::bind;
 use crate::query::QueryRequest;
 
 const CAPACITY: usize = 4;
+/// How often a running build checks that its entry is still wanted.
+const WATCH_INTERVAL: Duration = Duration::from_millis(10);
 
 /// What to do with a request for a query the cache may have seen before.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +36,15 @@ enum State {
     Failed,
 }
 
-#[derive(Debug)]
+type Entries = Vec<(String, State)>;
+
 pub struct ResultCache {
     capacity: usize,
-    /// Keys with their state, from least to most recently used.
-    entries: Vec<(String, State)>,
+    /// Keys with their state, from least to most recently used. The build thread updates it too.
+    entries: Arc<Mutex<Entries>>,
     dropped: Vec<String>,
+    /// The newest build's thread; older builds were interrupted and finish on their own.
+    build: Option<JoinHandle<()>>,
 }
 
 impl Default for ResultCache {
@@ -56,40 +68,144 @@ pub fn drop_statement(table: &str) -> String {
     format!("DROP TABLE IF EXISTS quark_results.{table}")
 }
 
+fn lock(entries: &Mutex<Entries>) -> MutexGuard<'_, Entries> {
+    entries.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Moves a Building entry to `state`; false when it was superseded or evicted meanwhile.
+fn finish(entries: &Mutex<Entries>, key: &str, state: State) -> bool {
+    let mut entries = lock(entries);
+    let building = entries
+        .iter_mut()
+        .find(|(known, current)| known == key && *current == State::Building);
+    building.map(|(_, current)| *current = state).is_some()
+}
+
+fn is_building(entries: &Mutex<Entries>, key: &str) -> bool {
+    lock(entries)
+        .iter()
+        .any(|(known, state)| known == key && *state == State::Building)
+}
+
+/// One build runs per engine: a newer trigger marks any running build Failed, so it is never retried
+/// and its watcher interrupts it.
+fn supersede_builds(entries: &mut Entries) {
+    for (_, state) in entries {
+        if *state == State::Building {
+            *state = State::Failed;
+        }
+    }
+}
+
+fn run_build(
+    conn: &Connection,
+    entries: &Mutex<Entries>,
+    key: &str,
+    table: &str,
+    ordered_sql: &str,
+    params: &[Value],
+) {
+    let interrupt = conn.interrupt_handle();
+    let is_done = AtomicBool::new(false);
+    let created = thread::scope(|scope| {
+        // An interrupt sent before the statement starts is lost, so keep checking until it ends.
+        scope.spawn(|| {
+            while !is_done.load(Ordering::SeqCst) {
+                if !is_building(entries, key) {
+                    interrupt.interrupt();
+                }
+                thread::sleep(WATCH_INTERVAL);
+            }
+        });
+        let created = conn.execute(
+            &format!("CREATE TABLE quark_results.{table} AS {ordered_sql}"),
+            bind(params),
+        );
+        is_done.store(true, Ordering::SeqCst);
+        created
+    });
+    // DuckDB's error text can quote cell values, so only the table is logged.
+    if created.is_err() {
+        tracing::debug!(table, "result build failed or was interrupted");
+    }
+    let state = if created.is_ok() {
+        State::Ready
+    } else {
+        State::Failed
+    };
+    if !finish(entries, key, state)
+        && created.is_ok()
+        && let Err(error) = conn.execute_batch(&drop_statement(table))
+    {
+        tracing::warn!(table, %error, "could not drop an unused result table");
+    }
+}
+
 impl ResultCache {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             capacity,
-            entries: Vec::with_capacity(capacity),
+            entries: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
             dropped: Vec::new(),
+            build: None,
         }
     }
 
     pub fn note_request(&mut self, key: &str) -> ResultAction {
-        let Some(index) = self.entries.iter().position(|(known, _)| known == key) else {
-            self.insert(key);
+        let shared = Arc::clone(&self.entries);
+        let mut entries = lock(&shared);
+        let Some(index) = entries.iter().position(|(known, _)| known == key) else {
+            self.insert(&mut entries, key);
             return ResultAction::ServeDirect;
         };
-        let (key, state) = self.entries.remove(index);
+        let (key, state) = entries.remove(index);
         let (state, action) = match state {
             State::Seen => {
-                self.supersede_builds();
+                supersede_builds(&mut entries);
                 let table = table_name(&key);
                 (State::Building, ResultAction::StartBuild(table))
             }
             State::Ready => (State::Ready, ResultAction::ServeFrom(table_name(&key))),
             state => (state, ResultAction::ServeDirect),
         };
-        self.entries.push((key, state));
+        entries.push((key, state));
         action
     }
 
     pub fn mark_ready(&mut self, key: &str) {
-        self.set_state(key, State::Ready);
+        finish(&self.entries, key, State::Ready);
     }
 
     pub fn mark_failed(&mut self, key: &str) {
-        self.set_state(key, State::Failed);
+        finish(&self.entries, key, State::Failed);
+    }
+
+    /// Builds `quark_results.<table>` from `ordered_sql` on a clone of `conn` and its own thread.
+    /// The entry becomes Ready when the table lands and Failed otherwise, so it is never retried.
+    pub fn start_build(
+        &mut self,
+        conn: &Connection,
+        key: &str,
+        table: &str,
+        ordered_sql: &str,
+        params: Vec<Value>,
+    ) {
+        let clone = conn
+            .execute_batch("CREATE SCHEMA IF NOT EXISTS quark_results")
+            .and_then(|()| conn.try_clone());
+        let clone = match clone {
+            Ok(clone) => clone,
+            Err(error) => {
+                tracing::debug!(table, %error, "result build could not start");
+                self.mark_failed(key);
+                return;
+            }
+        };
+        let entries = Arc::clone(&self.entries);
+        let (key, table, sql) = (key.to_owned(), table.to_owned(), ordered_sql.to_owned());
+        self.build = Some(thread::spawn(move || {
+            run_build(&clone, &entries, &key, &table, &sql, &params);
+        }));
     }
 
     /// Tables of evicted entries since the last call; run [`drop_statement`] for each.
@@ -97,28 +213,25 @@ impl ResultCache {
         std::mem::take(&mut self.dropped)
     }
 
-    fn insert(&mut self, key: &str) {
-        if self.entries.len() >= self.capacity {
-            let (oldest, state) = self.entries.remove(0);
+    fn insert(&mut self, entries: &mut Entries, key: &str) {
+        if entries.len() >= self.capacity {
+            let (oldest, state) = entries.remove(0);
             if matches!(state, State::Building | State::Ready) {
                 self.dropped.push(table_name(&oldest));
             }
         }
-        self.entries.push((key.to_owned(), State::Seen));
+        entries.push((key.to_owned(), State::Seen));
     }
+}
 
-    /// One build runs per engine: a newer trigger marks any running build Failed so it is never retried.
-    fn supersede_builds(&mut self) {
-        for (_, state) in &mut self.entries {
-            if *state == State::Building {
-                *state = State::Failed;
-            }
-        }
-    }
-
-    fn set_state(&mut self, key: &str, state: State) {
-        if let Some((_, known)) = self.entries.iter_mut().find(|(known, _)| known == key) {
-            *known = state;
+/// Dropping an engine stops its build, and waits until the build's connection is closed.
+impl Drop for ResultCache {
+    fn drop(&mut self) {
+        supersede_builds(&mut lock(&self.entries));
+        if let Some(build) = self.build.take()
+            && build.join().is_err()
+        {
+            tracing::warn!("result build thread panicked");
         }
     }
 }
@@ -142,6 +255,10 @@ mod tests {
     use crate::cache::stats::stats_key;
     use crate::query::{Connector, Filter};
     use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    /// Runs for far longer than any test, so it only ends when interrupted.
+    const LONG_BUILD: &str = "SELECT sum(i) AS total FROM range(1000000000000) t(i)";
 
     fn key(sql: &str) -> String {
         stats_key(sql, &[json!(1)])
@@ -250,5 +367,111 @@ mod tests {
         assert!(is_plain_scan(&plain, "SELECT * FROM sales", &views));
         assert!(!is_plain_scan(&plain, "SELECT 2", &views));
         assert!(!is_plain_scan(&filtered, "SELECT * FROM sales", &views));
+    }
+
+    fn wait_until(mut is_done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !is_done() {
+            assert!(Instant::now() < deadline, "timed out waiting");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn state_of(cache: &ResultCache, key: &str) -> Option<State> {
+        lock(&cache.entries)
+            .iter()
+            .find(|(known, _)| known == key)
+            .map(|(_, state)| *state)
+    }
+
+    fn result_tables(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'quark_results'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Two requests for `key`: the second one's table name.
+    fn trigger(cache: &mut ResultCache, key: &str) -> String {
+        cache.note_request(key);
+        let ResultAction::StartBuild(table) = cache.note_request(key) else {
+            panic!("second request should start a build");
+        };
+        table
+    }
+
+    #[test]
+    fn second_request_builds_while_pages_stay_direct() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut cache = ResultCache::default();
+        let sql = "SELECT i, hash(i) AS h FROM range(3000000) t(i) WHERE i < ? ORDER BY h";
+        let params = vec![json!(2_999_990)];
+        let k = stats_key(sql, &params);
+        let table = trigger(&mut cache, &k);
+
+        cache.start_build(&conn, &k, &table, sql, params);
+
+        assert_eq!(cache.note_request(&k), ResultAction::ServeDirect);
+        wait_until(|| cache.note_request(&k) == ResultAction::ServeFrom(table.clone()));
+        let rows: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM quark_results.{table}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2_999_990);
+    }
+
+    #[test]
+    fn superseded_build_is_interrupted() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut cache = ResultCache::default();
+        let (a, b) = (key("a"), key("b"));
+        cache.note_request(&b);
+        let table_a = trigger(&mut cache, &a);
+        cache.start_build(&conn, &a, &table_a, LONG_BUILD, Vec::new());
+        let ResultAction::StartBuild(table_b) = cache.note_request(&b) else {
+            panic!("second request should start a build");
+        };
+        cache.start_build(&conn, &b, &table_b, LONG_BUILD, Vec::new());
+
+        assert_eq!(state_of(&cache, &a), Some(State::Failed));
+        // The cache and build `b` hold the entries; build `a` lets go once interrupted.
+        wait_until(|| Arc::strong_count(&cache.entries) == 2);
+        assert_eq!(state_of(&cache, &b), Some(State::Building));
+        assert_eq!(result_tables(&conn), 0);
+    }
+
+    #[test]
+    fn dropping_the_cache_interrupts_a_running_build() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut cache = ResultCache::default();
+        let k = key("long");
+        let table = trigger(&mut cache, &k);
+        cache.start_build(&conn, &k, &table, LONG_BUILD, Vec::new());
+        let entries = Arc::clone(&cache.entries);
+
+        drop(cache);
+
+        assert_eq!(Arc::strong_count(&entries), 1);
+    }
+
+    #[test]
+    fn failed_build_is_not_retried() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut cache = ResultCache::default();
+        let k = key("missing");
+        let table = trigger(&mut cache, &k);
+
+        cache.start_build(&conn, &k, &table, "SELECT * FROM missing_table", Vec::new());
+
+        wait_until(|| state_of(&cache, &k) == Some(State::Failed));
+        for _ in 0..3 {
+            assert_eq!(cache.note_request(&k), ResultAction::ServeDirect);
+        }
+        assert_eq!(result_tables(&conn), 0);
     }
 }

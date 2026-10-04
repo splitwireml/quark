@@ -77,7 +77,7 @@ impl ToSql for Param<'_> {
     }
 }
 
-fn bind(params: &[Value]) -> impl duckdb::Params {
+pub(crate) fn bind(params: &[Value]) -> impl duckdb::Params {
     params_from_iter(params.iter().map(Param))
 }
 
