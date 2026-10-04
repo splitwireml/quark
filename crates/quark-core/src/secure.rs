@@ -1,5 +1,6 @@
 //! Request guards for the loopback API: CORS, Host and bearer-token checks.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,11 +15,21 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::error::ApiError;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SecurityConfig {
     pub port: u16,
     pub token: String,
     pub allowed_origins: Vec<HeaderValue>,
+}
+
+impl fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field("port", &self.port)
+            .field("token", &"<redacted>")
+            .field("allowed_origins", &self.allowed_origins)
+            .finish()
+    }
 }
 
 /// 32 random bytes as 64 lowercase hex characters.
@@ -113,6 +124,18 @@ mod tests {
             Router::new().route("/ping", get(|| async { "pong" })),
             config,
         )
+    }
+
+    #[test]
+    fn debug_output_redacts_the_token() {
+        let config = SecurityConfig {
+            port: 4242,
+            token: "0123456789abcdef".into(),
+            allowed_origins: desktop_origins(false),
+        };
+        let output = format!("{config:?}");
+        assert!(output.contains("<redacted>"));
+        assert!(!output.contains("0123456789abcdef"));
     }
 
     fn get_request(host: &str, origin: Option<&str>, bearer: Option<&str>) -> Request<Body> {
