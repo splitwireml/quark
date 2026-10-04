@@ -83,7 +83,7 @@ pub fn is_native(type_: &str) -> bool {
 }
 
 /// Converts one cell to JSON; `type_name` is DuckDB's name for the column type.
-/// Types not handled yet give `Null`.
+/// Nested children convert with an empty type name. Types not handled yet give `Null`.
 pub fn cell_json<Tz: TimeZone>(array: &dyn Array, row: usize, type_name: &str, zone: &Tz) -> Value {
     if array.is_null(row) {
         return Value::Null;
@@ -132,6 +132,24 @@ pub fn cell_json<Tz: TimeZone>(array: &dyn Array, row: usize, type_name: &str, z
         DataType::Interval(IntervalUnit::MonthDayNano) => {
             interval_json(value::<IntervalMonthDayNanoType>(array, row))
         }
+        DataType::List(_) => list_json(array.as_list::<i32>().value(row).as_ref(), zone),
+        DataType::LargeList(_) => list_json(array.as_list::<i64>().value(row).as_ref(), zone),
+        DataType::FixedSizeList(..) => {
+            list_json(array.as_fixed_size_list().value(row).as_ref(), zone)
+        }
+        DataType::Struct(fields) => Value::Object(
+            fields
+                .iter()
+                .zip(array.as_struct().columns())
+                .map(|(field, column)| {
+                    (
+                        field.name().clone(),
+                        cell_json(column.as_ref(), row, "", zone),
+                    )
+                })
+                .collect(),
+        ),
+        DataType::Map(..) => map_json(array.as_map().value(row).columns(), zone),
         DataType::Dictionary(..) => downcast_dictionary_array!(
             array => array
                 .key(row)
@@ -140,6 +158,32 @@ pub fn cell_json<Tz: TimeZone>(array: &dyn Array, row: usize, type_name: &str, z
         ),
         _ => Value::Null,
     }
+}
+
+fn list_json<Tz: TimeZone>(items: &dyn Array, zone: &Tz) -> Value {
+    Value::Array(
+        (0..items.len())
+            .map(|index| cell_json(items, index, "", zone))
+            .collect(),
+    )
+}
+
+/// `entries` holds the key and value columns; each converted key is stringified.
+fn map_json<Tz: TimeZone>(entries: &[duckdb::arrow::array::ArrayRef], zone: &Tz) -> Value {
+    let [keys, values] = entries else {
+        return Value::Null;
+    };
+    Value::Object(
+        (0..keys.len())
+            .map(|index| {
+                let key = match cell_json(keys.as_ref(), index, "", zone) {
+                    Value::String(text) => text,
+                    other => other.to_string(),
+                };
+                (key, cell_json(values.as_ref(), index, "", zone))
+            })
+            .collect(),
+    )
 }
 
 fn value<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
@@ -494,6 +538,37 @@ mod tests {
         assert_eq!(
             cells("SELECT INTERVAL '2 days'", "INTERVAL"),
             [json!(172800.0)]
+        );
+    }
+
+    #[test]
+    fn lists_structs_maps() {
+        for (sql, expected) in [
+            ("[1, NULL]", "[1,null]"),
+            ("{'x': 1}", r#"{"x":1}"#),
+            ("MAP([1,2],['a','b'])", r#"{"1":"a","2":"b"}"#),
+            ("[DATE '2024-01-05']", r#"["2024-01-05"]"#),
+            ("[1, 2]::INTEGER[2]", "[1,2]"),
+            (
+                "{'b': 1, 'a': {'d': [2.5], 'c': NULL}}",
+                r#"{"b":1,"a":{"d":[2.5],"c":null}}"#,
+            ),
+            (
+                "[{'id': 1, 'tag': 'a'}, {'id': 2, 'tag': NULL}]",
+                r#"[{"id":1,"tag":"a"},{"id":2,"tag":null}]"#,
+            ),
+            ("[9007199254740993]", r#"["9007199254740993"]"#),
+            ("MAP(['k'],[[1]])", r#"{"k":[1]}"#),
+        ] {
+            let cells = cells(&format!("SELECT {sql}"), "");
+            assert_eq!(cells[0].to_string(), expected, "{sql}");
+        }
+        assert_eq!(
+            cells(
+                "SELECT * FROM (VALUES ([1]), (NULL), ([])) t(v)",
+                "INTEGER[]"
+            ),
+            [json!([1]), Value::Null, json!([])]
         );
     }
 
