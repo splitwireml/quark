@@ -4,10 +4,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, bail};
-use duckdb::{AccessMode, Config, Connection, ToSql};
+use duckdb::{AccessMode, Config, Connection, InterruptHandle, ToSql};
 use serde::Serialize;
 
 use crate::ids::dataset_id;
@@ -112,6 +113,10 @@ pub struct Engine {
     pub generation: u64,
     // ponytail: one query at a time per engine; parallel reads are the upgrade path (sub-project 2).
     inner: Mutex<EngineInner>,
+    pub(crate) interrupt: Arc<InterruptHandle>,
+    /// Ticket of the query running now, if any (see `cancel`).
+    pub(crate) active: Mutex<Option<u64>>,
+    pub(crate) next_ticket: AtomicU64,
 }
 
 impl Engine {
@@ -119,10 +124,13 @@ impl Engine {
         Self {
             kind,
             generation,
+            interrupt: conn.interrupt_handle(),
             inner: Mutex::new(EngineInner {
                 conn,
                 mounted: BTreeMap::new(),
             }),
+            active: Mutex::new(None),
+            next_ticket: AtomicU64::new(0),
         }
     }
 
