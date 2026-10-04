@@ -3,21 +3,25 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::engine::{DatasetInfo, Dirs, Engine, describe};
 use crate::error::{ApiError, ApiResult};
 use crate::mount::ViewInfo;
+use crate::naming::dataset_name;
 use crate::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, default_project, load_projects,
-    load_registry, save_projects,
+    load_registry, save_projects, save_registry,
 };
 use crate::sql::quote_ident;
 
@@ -94,6 +98,15 @@ impl Catalog {
             source_count: self.sources_of(&project.id).count(),
         }
     }
+}
+
+fn cannot_open(error: impl Display) -> ApiError {
+    ApiError::bad_request(format!("Could not open source: {error}"))
+}
+
+fn registry_not_saved(error: io::Error) -> ApiError {
+    tracing::error!(%error, "could not save registry");
+    ApiError::internal("Internal error")
 }
 
 /// Python's global DuckDB error handler answers every engine failure with this 422.
@@ -347,10 +360,141 @@ impl AppState {
         Ok(views)
     }
 
+    /// Where an upload with this id and extension (with its dot) is stored.
+    pub fn upload_path(&self, node_id: &str, ext: &str) -> PathBuf {
+        self.0.dirs.uploads().join(format!("{node_id}{ext}"))
+    }
+
+    /// Adds the saved upload at `path` to the catalog, or deletes the file when that fails.
+    pub fn register_upload(
+        &self,
+        project_id: Option<&str>,
+        node_id: &str,
+        original_name: &str,
+        path: &Path,
+    ) -> ApiResult<Value> {
+        let result = self.add_upload(project_id, node_id, original_name, path);
+        if result.is_err() {
+            remove_upload(path);
+        }
+        result
+    }
+
+    fn add_upload(
+        &self,
+        project_id: Option<&str>,
+        node_id: &str,
+        original_name: &str,
+        path: &Path,
+    ) -> ApiResult<Value> {
+        let workspace_id = self
+            .catalog()
+            .project(project_id.unwrap_or(DEFAULT_PROJECT_ID))?
+            .node_id
+            .clone();
+        let name = Path::new(original_name)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let is_database = path.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("duckdb") || ext.eq_ignore_ascii_case("db")
+        });
+        let source = SourceRecord {
+            id: node_id.to_owned(),
+            name,
+            kind: "upload".to_owned(),
+            source: path.to_owned(),
+            project_id: project_id.map(str::to_owned),
+            dataset_name: (!is_database).then(|| dataset_name(original_name)),
+            sheets: None,
+        };
+
+        let generation = self.0.next_generation.fetch_add(1, Ordering::Relaxed);
+        let engine = Engine::open_node(&source, &self.0.dirs, generation)
+            .map_err(|error| cannot_open(format!("{error:#}")))?;
+        crate::engine::datasets(&engine.lock().conn).map_err(cannot_open)?;
+
+        let mut record = RawRecord::new();
+        record.insert("id".into(), source.id.clone().into());
+        record.insert("name".into(), source.name.clone().into());
+        record.insert("kind".into(), source.kind.clone().into());
+        record.insert("source".into(), path.to_string_lossy().into());
+        if let Some(project) = project_id {
+            record.insert("project_id".into(), project.into());
+        }
+        if let Some(dataset) = &source.dataset_name {
+            record.insert("dataset_name".into(), dataset.clone().into());
+        }
+        let public = match project_id {
+            Some(project) => {
+                json!({"id": node_id, "name": source.name, "kind": "upload", "project_id": project})
+            }
+            None => {
+                json!({"id": node_id, "name": source.name, "kind": "upload", "source": path.to_string_lossy()})
+            }
+        };
+
+        let mut catalog = self.catalog();
+        catalog.registry.push(record);
+        if let Err(error) = save_registry(&self.0.dirs.registry_file(), &catalog.registry) {
+            catalog.registry.pop();
+            return Err(registry_not_saved(error));
+        }
+        catalog.engines.remove(&workspace_id);
+        if source.project() == DEFAULT_PROJECT_ID {
+            catalog.engines.insert(node_id.to_owned(), Arc::new(engine));
+        }
+        catalog.sources.push(source);
+        Ok(public)
+    }
+
+    /// Removes a source from its project. The engines go first so Windows lets the file go.
+    pub fn delete_source(&self, project_id: &str, node_id: &str) -> ApiResult<()> {
+        let (source, engines) = {
+            let mut catalog = self.catalog();
+            let workspace_id = catalog.project(project_id)?.node_id.clone();
+            let index = catalog
+                .sources
+                .iter()
+                .position(|source| source.id == node_id && source.project() == project_id)
+                .ok_or_else(|| ApiError::not_found("Node not found"))?;
+            let source = catalog.sources.remove(index);
+            let engines = [
+                catalog.engines.remove(node_id),
+                catalog.engines.remove(&workspace_id),
+            ];
+            (source, engines)
+        };
+        drop(engines);
+        if source.kind == "upload" {
+            remove_upload(&source.source);
+        }
+        let mut catalog = self.catalog();
+        catalog
+            .registry
+            .retain(|record| record.get("id").and_then(Value::as_str) != Some(node_id));
+        save_registry(&self.0.dirs.registry_file(), &catalog.registry).map_err(registry_not_saved)
+    }
+
     /// Drops every engine, closing its connection.
     pub fn shutdown(&self) {
         let engines = std::mem::take(&mut self.catalog().engines);
         drop(engines);
+    }
+}
+
+/// Deletes an upload, retrying once after 100 ms because Windows may still hold the file.
+/// A file that stays behind is an orphan, which the next startup deletes.
+fn remove_upload(path: &Path) {
+    let remove = || match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    if remove().is_err() {
+        thread::sleep(Duration::from_millis(100));
+        if let Err(error) = remove() {
+            tracing::warn!(path = %path.display(), %error, "could not delete upload; leaving it for startup cleanup");
+        }
     }
 }
 
@@ -724,5 +868,210 @@ mod tests {
         let (status, detail) = failure(state.engine_for_node("text"));
         assert_eq!(status, 400);
         assert!(detail.starts_with("Could not open source: "), "{detail}");
+    }
+
+    fn ids(sources: Vec<SourceSummary>) -> Vec<String> {
+        sources.into_iter().map(|source| source.id).collect()
+    }
+
+    fn keys(record: &RawRecord) -> Vec<&str> {
+        record.keys().map(String::as_str).collect()
+    }
+
+    fn make_database(path: &Path) {
+        duckdb::Connection::open(path)
+            .unwrap()
+            .execute_batch("CREATE TABLE items (a INTEGER)")
+            .unwrap();
+    }
+
+    #[test]
+    fn upload_registers_and_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let state = started(root.path(), &[], &[project("p")]);
+        assert_eq!(
+            state.upload_path("abc", ".csv"),
+            state.0.dirs.uploads().join("abc.csv")
+        );
+
+        let path = state.upload_path("n1", ".csv");
+        fs::write(&path, "a,b\n1,x\n").unwrap();
+        state.project_views("default").unwrap();
+        assert!(state.catalog().engines.contains_key("project_default"));
+        let public = state
+            .register_upload(None, "n1", "reports/Sales Data.csv", &path)
+            .unwrap();
+        assert_eq!(
+            public,
+            json!({"id": "n1", "name": "Sales Data.csv", "kind": "upload", "source": path.to_string_lossy()})
+        );
+        assert_eq!(
+            keys(public.as_object().unwrap()),
+            ["id", "name", "kind", "source"]
+        );
+        {
+            let catalog = state.catalog();
+            assert!(catalog.engines.contains_key("n1"));
+            assert!(!catalog.engines.contains_key("project_default"));
+        }
+        assert_eq!(ids(state.project_sources("default").unwrap()), ["n1"]);
+        assert_eq!(state.legacy_nodes()[0].id, "n1");
+        let views = state.project_views("default").unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].source_id, "n1");
+
+        let path = state.upload_path("n2", ".csv");
+        fs::write(&path, "a,b\n1,x\n").unwrap();
+        let public = state
+            .register_upload(Some("p"), "n2", "Other.csv", &path)
+            .unwrap();
+        assert_eq!(
+            public,
+            json!({"id": "n2", "name": "Other.csv", "kind": "upload", "project_id": "p"})
+        );
+        assert_eq!(
+            keys(public.as_object().unwrap()),
+            ["id", "name", "kind", "project_id"]
+        );
+        assert!(!state.catalog().engines.contains_key("n2"));
+        assert_eq!(ids(state.project_sources("p").unwrap()), ["n2"]);
+        assert_eq!(ids(state.project_sources("default").unwrap()), ["n1"]);
+
+        let path = state.upload_path("n3", ".DB");
+        make_database(&path);
+        state
+            .register_upload(Some("p"), "n3", "Facts.DB", &path)
+            .unwrap();
+
+        let saved = load_registry(&state.0.dirs.registry_file());
+        let key_lists: Vec<_> = saved.iter().map(keys).collect();
+        assert_eq!(
+            key_lists,
+            [
+                vec!["id", "name", "kind", "source", "dataset_name"],
+                vec!["id", "name", "kind", "source", "project_id", "dataset_name"],
+                vec!["id", "name", "kind", "source", "project_id"],
+            ]
+        );
+        assert_eq!(saved[0]["dataset_name"], "sales_data");
+
+        let path = state.upload_path("n4", ".csv");
+        fs::write(&path, "a\n1\n").unwrap();
+        assert_eq!(
+            failure(state.register_upload(Some("nope"), "n4", "x.csv", &path)),
+            (404, "Project not found".to_owned())
+        );
+        assert!(!path.exists());
+        assert_eq!(state.catalog().registry.len(), 3);
+    }
+
+    #[test]
+    fn unreadable_upload_is_rejected_and_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let state = started(root.path(), &[], &[]);
+        for (ext, bytes) in [(".duckdb", "not a database"), (".txt", "hello")] {
+            let path = state.upload_path("bad", ext);
+            fs::write(&path, bytes).unwrap();
+
+            let (status, detail) =
+                failure(state.register_upload(None, "bad", &format!("bad{ext}"), &path));
+
+            assert_eq!(status, 400, "{ext}");
+            assert!(detail.starts_with("Could not open source: "), "{detail}");
+            assert!(!path.exists(), "{ext}");
+        }
+        let catalog = state.catalog();
+        assert!(catalog.registry.is_empty() && catalog.sources.is_empty());
+        assert!(catalog.engines.is_empty());
+        assert!(load_registry(&state.0.dirs.registry_file()).is_empty());
+    }
+
+    #[test]
+    fn delete_releases_and_removes_file() {
+        let root = tempfile::tempdir().unwrap();
+        let state = started(root.path(), &[], &[project("p")]);
+        let database = state.upload_path("db", ".duckdb");
+        make_database(&database);
+        state
+            .register_upload(None, "db", "facts.duckdb", &database)
+            .unwrap();
+        let sheet = state.upload_path("csv", ".csv");
+        fs::write(&sheet, "a\n1\n").unwrap();
+        state
+            .register_upload(Some("p"), "csv", "sheet.csv", &sheet)
+            .unwrap();
+        state.project_views("default").unwrap();
+        state.project_views("p").unwrap();
+        state.engine_for_node("db").unwrap();
+        assert_eq!(state.catalog().engines.len(), 3);
+
+        state.delete_source("default", "db").unwrap();
+
+        assert!(!database.exists());
+        {
+            let catalog = state.catalog();
+            let open: Vec<_> = catalog.engines.keys().map(String::as_str).collect();
+            assert_eq!(open, ["project_p"]);
+            assert_eq!(catalog.registry.len(), 1);
+        }
+        state.delete_source("p", "csv").unwrap();
+        assert!(!sheet.exists());
+        assert!(state.catalog().engines.is_empty());
+        assert!(load_registry(&state.0.dirs.registry_file()).is_empty());
+    }
+
+    #[test]
+    fn delete_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let mut gone = entry(root.path(), "gone", Some("a"));
+        gone["source"] = json!(root.path().join("missing.csv").to_string_lossy());
+        let mut kept = entry(root.path(), "b1", Some("b"));
+        kept["future"] = json!({"x": [1]});
+        let legacy = entry(root.path(), "legacy", None);
+        let attached = entry(root.path(), "a1", Some("a"));
+        let attached_file = PathBuf::from(attached["source"].as_str().unwrap());
+        let state = started(
+            root.path(),
+            &[legacy, attached, kept, gone],
+            &[project("a"), project("b")],
+        );
+
+        let node_missing = (404, "Node not found".to_owned());
+        assert_eq!(
+            failure(state.delete_source("nope", "a1")),
+            (404, "Project not found".to_owned())
+        );
+        for (project, node) in [
+            ("a", "nope"),
+            ("b", "a1"),
+            ("default", "a1"),
+            ("a", "gone"),
+            ("a", "legacy"),
+        ] {
+            assert_eq!(
+                failure(state.delete_source(project, node)),
+                node_missing,
+                "{project}/{node}"
+            );
+        }
+        assert_eq!(state.catalog().registry.len(), 4);
+
+        state.delete_source("a", "a1").unwrap();
+
+        assert!(attached_file.exists(), "only uploads lose their file");
+        assert_eq!(failure(state.delete_source("a", "a1")), node_missing);
+        state.delete_source("default", "legacy").unwrap();
+        let saved = load_registry(&state.0.dirs.registry_file());
+        let left: Vec<_> = saved
+            .iter()
+            .map(|record| record["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(left, ["b1", "gone"]);
+        assert_eq!(saved[0]["future"], json!({"x": [1]}));
+        assert_eq!(
+            ids(state.project_sources("a").unwrap()),
+            Vec::<String>::new()
+        );
+        assert_eq!(ids(state.project_sources("b").unwrap()), ["b1"]);
     }
 }
