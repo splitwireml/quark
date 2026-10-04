@@ -106,8 +106,8 @@ pub fn cell_json<Tz: TimeZone>(array: &dyn Array, row: usize, type_name: &str, z
         DataType::Utf8 => string_json(array.as_string::<i32>().value(row)),
         DataType::LargeUtf8 => string_json(array.as_string::<i64>().value(row)),
         DataType::Utf8View => string_json(array.as_string_view().value(row)),
-        DataType::Binary => hex_json(array.as_binary::<i32>().value(row)),
-        DataType::LargeBinary => hex_json(array.as_binary::<i64>().value(row)),
+        DataType::Binary => binary_json(array.as_binary::<i32>().value(row), type_name),
+        DataType::LargeBinary => binary_json(array.as_binary::<i64>().value(row), type_name),
         DataType::BinaryView => hex_json(array.as_binary_view().value(row)),
         DataType::FixedSizeBinary(_) => hex_json(array.as_fixed_size_binary().value(row)),
         DataType::Date32 => date_json(value::<Date32Type>(array, row)),
@@ -323,6 +323,23 @@ fn string_json(text: &str) -> Value {
     Value::String(text.to_owned())
 }
 
+/// DuckDB exports BIT as Binary: the first byte counts the padding bits that lead the rest.
+fn binary_json(bytes: &[u8], type_name: &str) -> Value {
+    let is_bit = type_name
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("BIT"));
+    match bytes.split_first() {
+        Some((&padding, bits)) if is_bit => Value::String(
+            bits.iter()
+                .flat_map(|byte| (0..8).rev().map(move |shift| byte >> shift & 1))
+                .skip(usize::from(padding))
+                .map(|bit| if bit == 1 { '1' } else { '0' })
+                .collect(),
+        ),
+        _ => hex_json(bytes),
+    }
+}
+
 fn hex_json(bytes: &[u8]) -> Value {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -435,6 +452,16 @@ mod tests {
             cells("SELECT '{\"a\":1}'::JSON", "JSON"),
             [json!("{\"a\":1}")]
         );
+    }
+
+    #[test]
+    fn bits_render_like_python() {
+        assert_eq!(cells("SELECT '0101'::BIT", "BIT"), [json!("0101")]);
+        assert_eq!(
+            cells("SELECT '10101010101'::BIT", "BIT"),
+            [json!("10101010101")]
+        );
+        assert_eq!(cells("SELECT NULL::BIT", "BIT"), [Value::Null]);
     }
 
     #[test]
