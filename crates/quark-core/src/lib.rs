@@ -1,5 +1,6 @@
 //! Quark core: the DuckDB-backed data engine behind the desktop app.
 
+pub mod api;
 pub mod arrow;
 pub mod cache;
 pub mod cancel;
