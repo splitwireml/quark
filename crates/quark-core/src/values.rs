@@ -1,14 +1,17 @@
 //! Classification of DuckDB column types and JSON conversion of Arrow cells, mirroring the Python backend.
 
-use chrono::TimeZone;
+use chrono::{DateTime, NaiveTime, Offset, TimeZone, Timelike};
 use duckdb::arrow::array::{
     Array, ArrowPrimitiveType, AsArray, PrimitiveArray, downcast_dictionary_array,
 };
 use duckdb::arrow::datatypes::{
-    DataType, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    DataType, Date32Type, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int8Type,
+    Int16Type, Int32Type, Int64Type, IntervalMonthDayNanoType, IntervalUnit, Time64MicrosecondType,
+    Time64NanosecondType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use serde_json::{Number, Value};
+use std::fmt::Write;
 
 /// Largest integer a JSON consumer can hold exactly (2^53 - 1).
 const MAX_SAFE_INTEGER: u128 = (1 << 53) - 1;
@@ -81,12 +84,7 @@ pub fn is_native(type_: &str) -> bool {
 
 /// Converts one cell to JSON; `type_name` is DuckDB's name for the column type.
 /// Types not handled yet give `Null`.
-pub fn cell_json<Tz: TimeZone>(
-    array: &dyn Array,
-    row: usize,
-    type_name: &str,
-    _zone: &Tz,
-) -> Value {
+pub fn cell_json<Tz: TimeZone>(array: &dyn Array, row: usize, type_name: &str, zone: &Tz) -> Value {
     if array.is_null(row) {
         return Value::Null;
     }
@@ -111,10 +109,33 @@ pub fn cell_json<Tz: TimeZone>(
         DataType::LargeBinary => hex_json(array.as_binary::<i64>().value(row)),
         DataType::BinaryView => hex_json(array.as_binary_view().value(row)),
         DataType::FixedSizeBinary(_) => hex_json(array.as_fixed_size_binary().value(row)),
+        DataType::Date32 => date_json(value::<Date32Type>(array, row)),
+        DataType::Time64(TimeUnit::Microsecond) => {
+            time_json(split(value::<Time64MicrosecondType>(array, row), 1_000_000))
+        }
+        DataType::Time64(TimeUnit::Nanosecond) => time_json(split(
+            value::<Time64NanosecondType>(array, row),
+            1_000_000_000,
+        )),
+        DataType::Timestamp(unit, time_zone) => {
+            let (ticks, per_second) = match unit {
+                TimeUnit::Second => (value::<TimestampSecondType>(array, row), 1),
+                TimeUnit::Millisecond => (value::<TimestampMillisecondType>(array, row), 1_000),
+                TimeUnit::Microsecond => (value::<TimestampMicrosecondType>(array, row), 1_000_000),
+                TimeUnit::Nanosecond => {
+                    (value::<TimestampNanosecondType>(array, row), 1_000_000_000)
+                }
+            };
+            let zone = time_zone.is_some().then_some(zone);
+            timestamp_json(split(ticks, per_second), zone)
+        }
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            interval_json(value::<IntervalMonthDayNanoType>(array, row))
+        }
         DataType::Dictionary(..) => downcast_dictionary_array!(
             array => array
                 .key(row)
-                .map_or(Value::Null, |key| cell_json(array.values().as_ref(), key, type_name, _zone)),
+                .map_or(Value::Null, |key| cell_json(array.values().as_ref(), key, type_name, zone)),
             _ => Value::Null
         ),
         _ => Value::Null,
@@ -135,6 +156,68 @@ fn integer_json(number: i128) -> Value {
 
 fn float_json(number: f64) -> Value {
     Number::from_f64(number).map_or(Value::Null, Value::Number)
+}
+
+/// Splits `ticks` of `1 / per_second` seconds into whole seconds and microseconds.
+/// Rounds toward negative infinity, so sub-microsecond ticks are dropped, never rounded.
+fn split(ticks: i64, per_second: i64) -> (i64, u32) {
+    let micros = ticks.rem_euclid(per_second) * 1_000_000 / per_second;
+    (ticks.div_euclid(per_second), micros as u32)
+}
+
+/// `HH:MM:SS`, then `.ffffff` only when the microseconds are non-zero.
+fn write_time(text: &mut String, time: NaiveTime) {
+    let _ = write!(text, "{}", time.format("%H:%M:%S"));
+    let micros = time.nanosecond() / 1000;
+    if micros != 0 {
+        let _ = write!(text, ".{micros:06}");
+    }
+}
+
+fn date_json(days: i32) -> Value {
+    DateTime::from_timestamp(i64::from(days) * 86_400, 0).map_or(Value::Null, |date| {
+        Value::String(date.date_naive().to_string())
+    })
+}
+
+fn time_json((seconds, micros): (i64, u32)) -> Value {
+    u32::try_from(seconds)
+        .ok()
+        .and_then(|seconds| NaiveTime::from_num_seconds_from_midnight_opt(seconds, micros * 1000))
+        .map_or(Value::Null, |time| {
+            let mut text = String::with_capacity(15);
+            write_time(&mut text, time);
+            Value::String(text)
+        })
+}
+
+/// `zone` is `Some` for timestamps with a time zone, which render in it with a `±HH:MM` suffix.
+fn timestamp_json<Tz: TimeZone>((seconds, micros): (i64, u32), zone: Option<&Tz>) -> Value {
+    let Some(instant) = DateTime::from_timestamp(seconds, micros * 1000) else {
+        return Value::Null;
+    };
+    let (naive, offset) = match zone {
+        Some(zone) => {
+            let local = instant.with_timezone(zone);
+            (local.naive_local(), Some(local.offset().fix()))
+        }
+        None => (instant.naive_utc(), None),
+    };
+    let mut text = String::with_capacity(32);
+    let _ = write!(text, "{}T", naive.date());
+    write_time(&mut text, naive.time());
+    if let Some(offset) = offset {
+        let _ = write!(text, "{offset}");
+    }
+    Value::String(text)
+}
+
+/// Total seconds, counting a month as 30 days.
+fn interval_json(interval: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native) -> Value {
+    let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(interval);
+    let micros =
+        (i128::from(months) * 30 + i128::from(days)) * 86_400_000_000 + i128::from(nanos / 1000);
+    float_json(micros as f64 / 1e6)
 }
 
 /// DuckDB exports HUGEINT as Decimal128(38, 0) and UHUGEINT as the same bits reinterpreted.
@@ -186,8 +269,12 @@ mod tests {
     use duckdb::Connection;
     use serde_json::json;
 
-    /// Every value of the first column of `sql`, converted with `cell_json`.
+    /// Every value of the first column of `sql`, converted with `cell_json` in UTC.
     fn cells(sql: &str, type_name: &str) -> Vec<Value> {
+        cells_in(sql, type_name, &Utc)
+    }
+
+    fn cells_in<Tz: TimeZone>(sql: &str, type_name: &str, zone: &Tz) -> Vec<Value> {
         let conn = Connection::open_in_memory().unwrap();
         let mut statement = conn.prepare(sql).unwrap();
         statement
@@ -196,7 +283,7 @@ mod tests {
             .flat_map(|batch| {
                 let column = batch.column(0).clone();
                 (0..column.len())
-                    .map(|row| cell_json(column.as_ref(), row, type_name, &Utc))
+                    .map(|row| cell_json(column.as_ref(), row, type_name, zone))
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -321,6 +408,93 @@ mod tests {
             assert_eq!(profile_kind(type_), kind, "profile_kind({type_})");
             assert_eq!(is_native(type_), native, "is_native({type_})");
         }
+    }
+
+    #[test]
+    fn dates_and_times_match_python_isoformat() {
+        for (sql, type_name, expected) in [
+            ("DATE '2024-01-05'", "DATE", "2024-01-05"),
+            ("TIME '10:30:00.5'", "TIME", "10:30:00.500000"),
+            ("TIME '10:30:00'", "TIME", "10:30:00"),
+            (
+                "TIMESTAMP '2024-01-05 10:30:00'",
+                "TIMESTAMP",
+                "2024-01-05T10:30:00",
+            ),
+            (
+                "TIMESTAMP '2024-01-05 10:30:00.000123'",
+                "TIMESTAMP",
+                "2024-01-05T10:30:00.000123",
+            ),
+            (
+                "TIMESTAMP_NS '2024-01-05 10:30:00.123456789'",
+                "TIMESTAMP_NS",
+                "2024-01-05T10:30:00.123456",
+            ),
+            (
+                "TIMESTAMP_MS '1969-12-31 23:59:59.999'",
+                "TIMESTAMP_MS",
+                "1969-12-31T23:59:59.999000",
+            ),
+            (
+                "TIMESTAMP_NS '1969-12-31 23:59:59.999999999'",
+                "TIMESTAMP_NS",
+                "1969-12-31T23:59:59.999999",
+            ),
+        ] {
+            assert_eq!(
+                cells(&format!("SELECT {sql}"), type_name),
+                [json!(expected)],
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamptz_uses_given_zone() {
+        let zone = chrono::FixedOffset::east_opt(5 * 3600 + 1800).unwrap();
+        assert_eq!(
+            cells_in(
+                "SELECT TIMESTAMPTZ '2024-01-05 10:30:00+00'",
+                "TIMESTAMP WITH TIME ZONE",
+                &zone
+            ),
+            [json!("2024-01-05T16:00:00+05:30")]
+        );
+    }
+
+    #[test]
+    fn timestamptz_crosses_dst() {
+        let zone = chrono_tz::America::New_York;
+        for (instant, expected) in [
+            ("2024-03-10 06:59:59+00", "2024-03-10T01:59:59-05:00"),
+            ("2024-03-10 07:00:00+00", "2024-03-10T03:00:00-04:00"),
+        ] {
+            assert_eq!(
+                cells_in(
+                    &format!("SELECT TIMESTAMPTZ '{instant}'"),
+                    "TIMESTAMP WITH TIME ZONE",
+                    &zone
+                ),
+                [json!(expected)],
+                "{instant}"
+            );
+        }
+    }
+
+    #[test]
+    fn interval_is_total_seconds() {
+        assert_eq!(
+            cells(
+                "SELECT INTERVAL 1 MONTH + INTERVAL 2 DAY + INTERVAL 3 SECOND",
+                "INTERVAL"
+            ),
+            [json!(2764803.0)]
+        );
+        assert_eq!(
+            cells("SELECT INTERVAL '2 days'", "INTERVAL"),
+            [json!(172800.0)]
+        );
     }
 
     #[test]
