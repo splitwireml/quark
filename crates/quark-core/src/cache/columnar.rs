@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::engine::{Dirs, configure_spill, lock_down_paths};
 
 /// The most the columnar folder may hold before the least recently used files go.
+// ponytail: fixed 10 GB cap; becomes a setting only if users need it.
 const CACHE_CAP: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Content-addressed name of a columnar cache file.
@@ -320,7 +321,7 @@ mod tests {
     use super::*;
     use crate::sql::scan_expression;
     use std::fs::File;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     const SCAN: &str = "read_csv_auto('x.csv')";
     const VERSION: &str = "v1.5.4";
@@ -586,6 +587,48 @@ mod tests {
         assert_eq!(ready.recv_timeout(WAIT).unwrap(), "second.csv");
         worker.shutdown();
         assert!(!failed_key.is_ready(&cache));
+        assert!(ready.try_recv().is_err());
+    }
+
+    #[test]
+    fn default_cap_is_ten_gibibytes() {
+        assert_eq!(CACHE_CAP, 10 * 1024_u64.pow(3));
+    }
+
+    #[test]
+    fn shutdown_interrupts_a_running_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let csv = dir.path().join("big.csv");
+        Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (SELECT * FROM range(20000000)) TO '{}' (HEADER, FORMAT csv)",
+                csv.to_string_lossy()
+            ))
+            .unwrap();
+        let scan = scan_expression(&csv.to_string_lossy()).unwrap();
+        let key = key(&csv, &scan, VERSION);
+        let (mut worker, ready) = start(&cache);
+        worker.enqueue(ColumnarJob {
+            source_id: "big.csv".to_owned(),
+            key: key.clone(),
+            source_path: csv,
+            scan_expression: scan,
+        });
+        let started = Instant::now();
+        while !key.partial_path(&cache).exists() {
+            assert!(started.elapsed() < WAIT, "the import never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(300));
+
+        let stopping = Instant::now();
+        worker.shutdown();
+
+        assert!(stopping.elapsed() < Duration::from_secs(2));
+        assert!(!key.is_ready(&cache));
+        assert!(!key.partial_path(&cache).exists());
         assert!(ready.try_recv().is_err());
     }
 }
