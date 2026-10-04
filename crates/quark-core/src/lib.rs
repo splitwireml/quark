@@ -5,6 +5,7 @@ pub mod error;
 pub mod guard;
 pub mod ids;
 pub mod literal;
+pub mod naming;
 pub mod query;
 pub mod registry;
 pub mod sql;
