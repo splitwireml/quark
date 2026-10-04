@@ -16,11 +16,15 @@ use crate::mount::ViewInfo;
 use crate::page::bind;
 use crate::query::QueryRequest;
 
+/// Result tables per engine: only Building and Ready entries take a slot.
 const CAPACITY: usize = 4;
 /// Result tables live in a private in-memory database, so read-only sources can have them too.
 /// `(READ_WRITE)` is needed because a read-only main database refuses a default in-memory attach.
 const MEMORY_DATABASE: &str = "quark_mem";
 pub const RESULTS_SCHEMA: &str = "quark_mem.quark_results";
+/// Keys seen once, or failed, that are remembered apart from the slots so one-off queries never evict a result.
+// ponytail: 64 keys is a guess at a working set of repeated queries; raise it if repeats slip through.
+const SEEN_CAPACITY: usize = 64;
 /// How often a running build checks that its entry is still wanted.
 const WATCH_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -42,9 +46,15 @@ enum State {
 
 type Entries = Vec<(String, State)>;
 
+/// True for the states that hold a result slot.
+fn has_slot(state: State) -> bool {
+    matches!(state, State::Building | State::Ready)
+}
+
 pub struct ResultCache {
     capacity: usize,
     /// Keys with their state, from least to most recently used. The build thread updates it too.
+    /// Building and Ready entries are capped at `capacity`; Seen and Failed ones at [`SEEN_CAPACITY`].
     entries: Arc<Mutex<Entries>>,
     dropped: Vec<String>,
     /// The newest build's thread; older builds were interrupted and finish on their own.
@@ -89,6 +99,20 @@ fn is_building(entries: &Mutex<Entries>, key: &str) -> bool {
     lock(entries)
         .iter()
         .any(|(known, state)| known == key && *state == State::Building)
+}
+
+/// Forgets the least recently used Seen or Failed keys beyond [`SEEN_CAPACITY`].
+fn trim_seen(entries: &mut Entries) {
+    let mut excess = entries
+        .iter()
+        .filter(|(_, state)| !has_slot(*state))
+        .count()
+        .saturating_sub(SEEN_CAPACITY);
+    entries.retain(|(_, state)| {
+        let is_forgotten = excess > 0 && !has_slot(*state);
+        excess -= usize::from(is_forgotten);
+        !is_forgotten
+    });
 }
 
 /// One build runs per engine: a newer trigger marks any running build Failed, so it is never retried
@@ -149,7 +173,7 @@ impl ResultCache {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             capacity,
-            entries: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            entries: Arc::new(Mutex::new(Vec::with_capacity(capacity + SEEN_CAPACITY))),
             dropped: Vec::new(),
             build: None,
         }
@@ -159,13 +183,15 @@ impl ResultCache {
         let shared = Arc::clone(&self.entries);
         let mut entries = lock(&shared);
         let Some(index) = entries.iter().position(|(known, _)| known == key) else {
-            self.insert(&mut entries, key);
+            entries.push((key.to_owned(), State::Seen));
+            trim_seen(&mut entries);
             return ResultAction::ServeDirect;
         };
         let (key, state) = entries.remove(index);
         let (state, action) = match state {
             State::Seen => {
                 supersede_builds(&mut entries);
+                self.make_room(&mut entries);
                 let table = table_name(&key);
                 (State::Building, ResultAction::StartBuild(table))
             }
@@ -173,6 +199,7 @@ impl ResultCache {
             state => (state, ResultAction::ServeDirect),
         };
         entries.push((key, state));
+        trim_seen(&mut entries);
         action
     }
 
@@ -220,14 +247,16 @@ impl ResultCache {
         std::mem::take(&mut self.dropped)
     }
 
-    fn insert(&mut self, entries: &mut Entries, key: &str) {
-        if entries.len() >= self.capacity {
-            let (oldest, state) = entries.remove(0);
-            if matches!(state, State::Building | State::Ready) {
-                self.dropped.push(table_name(&oldest));
-            }
+    /// Evicts the least recently used slot entries until one slot is free, noting their tables as dropped.
+    /// A Building entry that is evicted is no longer found by its build, which then interrupts itself.
+    fn make_room(&mut self, entries: &mut Entries) {
+        while entries.iter().filter(|(_, state)| has_slot(*state)).count() >= self.capacity {
+            let Some(oldest) = entries.iter().position(|(_, state)| has_slot(*state)) else {
+                return;
+            };
+            let (key, _) = entries.remove(oldest);
+            self.dropped.push(table_name(&key));
         }
-        entries.push((key.to_owned(), State::Seen));
     }
 }
 
@@ -341,20 +370,70 @@ mod tests {
     fn capacity_evicts_and_returns_dropped_table() {
         let mut cache = ResultCache::with_capacity(2);
         let (a, b, c, d) = (key("a"), key("b"), key("c"), key("d"));
-        cache.note_request(&a);
-        cache.note_request(&a);
+        trigger(&mut cache, &a);
         cache.mark_ready(&a);
-        cache.note_request(&b);
-
-        cache.note_request(&c);
-        assert_eq!(cache.take_dropped(), vec![table_name(&a)]);
-
-        cache.note_request(&d);
+        trigger(&mut cache, &b);
+        cache.mark_ready(&b);
         assert!(cache.take_dropped().is_empty());
+
+        trigger(&mut cache, &c);
+        assert_eq!(cache.take_dropped(), vec![table_name(&a)]);
+        cache.mark_ready(&c);
+
+        trigger(&mut cache, &d);
+        assert_eq!(cache.take_dropped(), vec![table_name(&b)]);
         assert_eq!(
             drop_statement(&table_name(&a)),
             format!("DROP TABLE IF EXISTS {RESULTS_SCHEMA}.{}", table_name(&a))
         );
+    }
+
+    #[test]
+    fn one_off_queries_do_not_evict_results() {
+        let mut cache = ResultCache::default();
+        let kept: Vec<String> = (0..4).map(|i| key(&format!("kept {i}"))).collect();
+        for k in &kept {
+            trigger(&mut cache, k);
+            cache.mark_ready(k);
+        }
+
+        for i in 0..10 {
+            assert_eq!(
+                cache.note_request(&key(&format!("one-off {i}"))),
+                ResultAction::ServeDirect
+            );
+        }
+
+        assert!(cache.take_dropped().is_empty());
+        for k in &kept {
+            assert_eq!(
+                cache.note_request(k),
+                ResultAction::ServeFrom(table_name(k))
+            );
+        }
+    }
+
+    #[test]
+    fn default_capacity_is_four() {
+        let mut cache = ResultCache::default();
+        let keys: Vec<String> = (0..5).map(|i| key(&format!("result {i}"))).collect();
+        for k in &keys[..4] {
+            trigger(&mut cache, k);
+            cache.mark_ready(k);
+        }
+        assert!(cache.take_dropped().is_empty());
+
+        trigger(&mut cache, &keys[4]);
+        cache.mark_ready(&keys[4]);
+
+        assert_eq!(cache.take_dropped(), vec![table_name(&keys[0])]);
+        for k in &keys[1..] {
+            assert_eq!(
+                cache.note_request(k),
+                ResultAction::ServeFrom(table_name(k))
+            );
+        }
+        assert_eq!(cache.note_request(&keys[0]), ResultAction::ServeDirect);
     }
 
     #[test]
@@ -480,5 +559,38 @@ mod tests {
             assert_eq!(cache.note_request(&k), ResultAction::ServeDirect);
         }
         assert_eq!(result_tables(&conn), 0);
+    }
+
+    #[test]
+    fn evicting_a_building_entry_interrupts_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut cache = ResultCache::with_capacity(1);
+        let (a, b) = (key("a"), key("b"));
+        let table_a = trigger(&mut cache, &a);
+        cache.start_build(&conn, &a, &table_a, LONG_BUILD, Vec::new());
+        assert_eq!(state_of(&cache, &a), Some(State::Building));
+
+        trigger(&mut cache, &b);
+
+        assert_ne!(state_of(&cache, &a), Some(State::Building));
+        // Only the cache still holds the entries once build `a` lets go.
+        wait_until(|| Arc::strong_count(&cache.entries) == 1);
+        assert_eq!(result_tables(&conn), 0);
+    }
+
+    #[test]
+    fn seen_keys_beyond_the_cap_are_forgotten() {
+        let mut cache = ResultCache::default();
+        let first = key("first");
+        cache.note_request(&first);
+        for i in 0..SEEN_CAPACITY {
+            cache.note_request(&key(&format!("one-off {i}")));
+        }
+
+        assert_eq!(cache.note_request(&first), ResultAction::ServeDirect);
+        assert_eq!(
+            cache.note_request(&first),
+            ResultAction::StartBuild(table_name(&first))
+        );
     }
 }

@@ -343,7 +343,7 @@ pub fn run_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::results::ResultCache;
+    use crate::cache::results::{ResultCache, table_name};
     use crate::engine::{Dirs, Engine};
     use crate::ids::dataset_id;
     use crate::query::{Direction, Filter, Sort};
@@ -857,8 +857,19 @@ mod tests {
 
         let descending = sorted_by_id(1, Direction::Desc);
         run_page(&mut inner, &dataset("t"), &descending, Format::Json).unwrap();
+        assert_eq!(result_tables(&inner.conn), 1);
+        run_page(&mut inner, &dataset("t"), &descending, Format::Json).unwrap();
 
-        assert_eq!(result_tables(&inner.conn), 0);
+        let ascending_table = table_name(&id_key("t", "ASC"));
+        assert_eq!(
+            count(
+                &inner.conn,
+                &format!(
+                    "SELECT count(*) FROM duckdb_tables() WHERE table_name = '{ascending_table}'"
+                ),
+            ),
+            0
+        );
     }
 
     #[test]
