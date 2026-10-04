@@ -1353,6 +1353,20 @@ mod tests {
         state.shutdown();
     }
 
+    /// Rewinds a file's mtime the way `ColumnarKey::touch` writes it, so a file DuckDB holds open
+    /// stays reachable on Windows.
+    fn set_modified_time(path: &Path, time: SystemTime) {
+        let mut options = fs::File::options();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.access_mode(0x0100); // FILE_WRITE_ATTRIBUTES
+        }
+        #[cfg(not(windows))]
+        options.write(true);
+        options.open(path).unwrap().set_modified(time).unwrap();
+    }
+
     #[test]
     fn mounting_touches_the_cache_file() {
         let root = tempfile::tempdir().unwrap();
@@ -1362,12 +1376,7 @@ mod tests {
         let file = cache_files(&state.0.dirs).remove(0);
         let day = Duration::from_secs(86_400);
         let old = SystemTime::now() - 3 * day;
-        fs::File::options()
-            .write(true)
-            .open(&file)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
+        set_modified_time(&file, old);
 
         state.project_views("p").unwrap();
 
