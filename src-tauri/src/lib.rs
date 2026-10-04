@@ -6,9 +6,14 @@ use quark_core::api::router;
 use quark_core::engine::Dirs;
 use quark_core::secure::{SecurityConfig, desktop_origins, generate_token, secure};
 use quark_core::state::AppState;
+use tauri::webview::PageLoadEvent;
 use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
+
+mod self_test;
+
+use self_test::SelfTest;
 
 type SetupResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -48,8 +53,13 @@ fn start(app: &mut App) -> SetupResult {
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = generate_token()?;
+    let self_test = SelfTest::from_env();
+    let mut api = router(state);
+    if let Some(test) = &self_test {
+        api = test.mount(api);
+    }
     let api = secure(
-        router(state),
+        api,
         SecurityConfig {
             port,
             token: token.clone(),
@@ -63,7 +73,10 @@ fn start(app: &mut App) -> SetupResult {
         }
     });
 
-    open_window(app, port, &token)?;
+    open_window(app, port, &token, self_test.is_some())?;
+    if let Some(test) = self_test {
+        test.watch(app.handle().clone());
+    }
     tracing::info!("listening on 127.0.0.1:{port}");
     Ok(())
 }
@@ -85,7 +98,7 @@ fn init_logging(folder: &Path) -> SetupResult<WorkerGuard> {
     Ok(guard)
 }
 
-fn open_window(app: &App, port: u16, token: &str) -> SetupResult {
+fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupResult {
     let script = format!(
         "window.__QUARK_API__ = Object.freeze({{ base: {}, token: {} }});",
         serde_json::json!(format!("http://127.0.0.1:{port}")),
@@ -97,6 +110,11 @@ fn open_window(app: &App, port: u16, token: &str) -> SetupResult {
         .inner_size(1440.0, 900.0)
         .min_inner_size(1024.0, 680.0)
         .initialization_script(script)
+        .on_page_load(move |window, payload| {
+            if is_self_test && payload.event() == PageLoadEvent::Finished {
+                self_test::run_in(&window);
+            }
+        })
         .on_navigation(move |url| {
             let origin = format!("{}://{}", url.scheme(), url.authority());
             origins
