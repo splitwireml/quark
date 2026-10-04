@@ -10,4 +10,5 @@ pub mod naming;
 pub mod query;
 pub mod registry;
 pub mod sql;
+pub mod state;
 pub mod values;
