@@ -55,7 +55,7 @@ Every unit's requirements include this section.
   - Read only what your card or assignment names. For anything CodeGraph doesn't cover, in a file longer than about 1,000 lines, use `rg -n` and read line ranges.
   - Never read these in full: `tests/test_backend.py`, `frontend/src/App.svelte`, `backend/app.py`, the plan, the spec.
   - Prefix every shell command with `rtk`.
-- **Worktree:** work only inside your own worktree (section 1.6). Commit subjects follow Conventional Commits with scopes `core`, `desktop`, `ui`, `tests`, `ci` or `build`. Every commit message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- **Worktree:** work only inside your own worktree (section 1.6). Commit subjects follow Conventional Commits with scopes `core`, `desktop`, `ui`, `tests`, `ci` or `build`. Every commit message ends with a `Co-Authored-By: Claude <model> 5.5 <noreply@anthropic.com>` trailer naming the model that wrote it (workers: Sonnet 5.5). Do not report trailer model names as findings.
 - **Tauri CLI:** `cargo tauri <command>` (after `cargo install tauri-cli --version "^2.12" --locked`) and `npx --yes @tauri-apps/cli@^2.12 <command>`, run from the worktree root, are interchangeable. Agents and CI use `npx`.
 
 **Toolchain and build**
