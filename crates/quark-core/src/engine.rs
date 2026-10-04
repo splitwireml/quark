@@ -180,7 +180,8 @@ impl Engine {
                 let conn = Connection::open_with_flags(&source.source, config)
                     .context("could not open database")?;
                 configure_spill(&conn, dirs)?;
-                conn.execute_batch("SET enable_external_access = false")?;
+                let parent = source.source.parent().unwrap_or(&source.source);
+                lock_down_dirs(&conn, &[parent.to_string_lossy().into_owned()])?;
                 conn
             }
             Some("xlsx") => bail!("Excel sources are not in the desktop build yet"),
@@ -433,12 +434,14 @@ mod tests {
     #[test]
     fn duckdb_sources_are_read_only() {
         let root = tempfile::tempdir().unwrap();
-        let database = root.path().join("x.db");
+        fs::create_dir_all(root.path().join("db")).unwrap();
+        let database = root.path().join("db").join("x.db");
         Connection::open(&database)
             .unwrap()
             .execute_batch("CREATE TABLE items (a INTEGER)")
             .unwrap();
-        let outside = root.path().join("outside.csv");
+        let outside = root.path().join("elsewhere").join("outside.csv");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
         fs::write(&outside, "a\n1\n").unwrap();
 
         let engine = open(&database, None, root.path()).unwrap();
@@ -456,6 +459,30 @@ mod tests {
                 .execute_batch("CREATE TABLE more (a INTEGER)")
                 .is_err()
         );
+        assert!(count_rows(&guard.conn, &outside).is_err());
+    }
+
+    #[test]
+    fn database_node_allows_its_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("db");
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        let database = folder.join("x.duckdb");
+        Connection::open(&database)
+            .unwrap()
+            .execute_batch("CREATE TABLE items (a INTEGER)")
+            .unwrap();
+        let beside = folder.join("beside.csv");
+        let outside = elsewhere.join("outside.csv");
+        fs::write(&beside, "a\n1\n2\n").unwrap();
+        fs::write(&outside, "a\n1\n").unwrap();
+
+        let engine = open(&database, None, root.path()).unwrap();
+        let guard = engine.lock();
+
+        assert_eq!(count_rows(&guard.conn, &beside).unwrap(), 2);
         assert!(count_rows(&guard.conn, &outside).is_err());
     }
 

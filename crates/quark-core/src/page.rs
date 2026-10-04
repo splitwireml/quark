@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::arrow::encode_page;
-use crate::cache::results::{ResultAction, drop_statement, is_plain_scan};
+use crate::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
 use crate::cache::stats::{StatsEntry, stats_key};
 use crate::engine::{EngineInner, datasets, describe};
 use crate::error::{ApiError, ApiResult};
@@ -280,7 +280,7 @@ pub fn run_page(
         }
     }
     let saved = match &action {
-        ResultAction::ServeFrom(table) => Some(format!("quark_results.{table}")),
+        ResultAction::ServeFrom(table) => Some(format!("{RESULTS_SCHEMA}.{table}")),
         _ => None,
     };
     let saved_scan = saved.as_ref().map(|table| format!("SELECT * FROM {table}"));
@@ -898,5 +898,46 @@ mod tests {
 
         assert_eq!(count_queries(&inner), 1);
         assert_eq!(result_tables(&inner.conn), 0);
+    }
+
+    #[test]
+    fn database_node_builds_result_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("rows.duckdb");
+        Connection::open(&database)
+            .unwrap()
+            .execute_batch(ROWS)
+            .unwrap();
+        let record = SourceRecord {
+            id: "s1".to_owned(),
+            name: "rows".to_owned(),
+            kind: "file".to_owned(),
+            source: database,
+            project_id: None,
+            dataset_name: None,
+            sheets: None,
+        };
+        let dirs = Dirs {
+            data: root.path().join("data"),
+            cache: root.path().join("cache"),
+        };
+        let engine = Engine::open_node(&record, &dirs, 1).unwrap();
+        let mut inner = engine.lock();
+        let request = sorted_by_id(1, Direction::Asc);
+        let first = run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+        run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+
+        wait_until_ready(&mut inner, &id_key("t", "ASC"));
+
+        assert_eq!(result_tables(&inner.conn), 1);
+        let third = run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+        assert_eq!(without_elapsed(third), without_elapsed(first));
+        assert_eq!(count_queries(&inner), 1);
+        let names: Vec<String> = datasets(&inner.conn)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.name)
+            .collect();
+        assert_eq!(names, ["t"]);
     }
 }

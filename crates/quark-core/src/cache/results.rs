@@ -17,6 +17,10 @@ use crate::page::bind;
 use crate::query::QueryRequest;
 
 const CAPACITY: usize = 4;
+/// Result tables live in a private in-memory database, so read-only sources can have them too.
+/// `(READ_WRITE)` is needed because a read-only main database refuses a default in-memory attach.
+const MEMORY_DATABASE: &str = "quark_mem";
+pub const RESULTS_SCHEMA: &str = "quark_mem.quark_results";
 /// How often a running build checks that its entry is still wanted.
 const WATCH_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -65,7 +69,7 @@ pub fn table_name(key: &str) -> String {
 }
 
 pub fn drop_statement(table: &str) -> String {
-    format!("DROP TABLE IF EXISTS quark_results.{table}")
+    format!("DROP TABLE IF EXISTS {RESULTS_SCHEMA}.{table}")
 }
 
 fn lock(entries: &Mutex<Entries>) -> MutexGuard<'_, Entries> {
@@ -118,7 +122,7 @@ fn run_build(
             }
         });
         let created = conn.execute(
-            &format!("CREATE TABLE quark_results.{table} AS {ordered_sql}"),
+            &format!("CREATE TABLE {RESULTS_SCHEMA}.{table} AS {ordered_sql}"),
             bind(params),
         );
         is_done.store(true, Ordering::SeqCst);
@@ -180,7 +184,7 @@ impl ResultCache {
         finish(&self.entries, key, State::Failed);
     }
 
-    /// Builds `quark_results.<table>` from `ordered_sql` on a clone of `conn` and its own thread.
+    /// Builds `quark_mem.quark_results.<table>` from `ordered_sql` on a clone of `conn` and its own thread.
     /// The entry becomes Ready when the table lands and Failed otherwise, so it is never retried.
     pub fn start_build(
         &mut self,
@@ -191,7 +195,10 @@ impl ResultCache {
         params: Vec<Value>,
     ) {
         let clone = conn
-            .execute_batch("CREATE SCHEMA IF NOT EXISTS quark_results")
+            .execute_batch(&format!(
+                "ATTACH IF NOT EXISTS ':memory:' AS {MEMORY_DATABASE} (READ_WRITE);
+                 CREATE SCHEMA IF NOT EXISTS {RESULTS_SCHEMA}"
+            ))
             .and_then(|()| conn.try_clone());
         let clone = match clone {
             Ok(clone) => clone,
@@ -346,7 +353,7 @@ mod tests {
         assert!(cache.take_dropped().is_empty());
         assert_eq!(
             drop_statement(&table_name(&a)),
-            format!("DROP TABLE IF EXISTS quark_results.{}", table_name(&a))
+            format!("DROP TABLE IF EXISTS {RESULTS_SCHEMA}.{}", table_name(&a))
         );
     }
 
@@ -417,7 +424,7 @@ mod tests {
         wait_until(|| cache.note_request(&k) == ResultAction::ServeFrom(table.clone()));
         let rows: i64 = conn
             .query_row(
-                &format!("SELECT count(*) FROM quark_results.{table}"),
+                &format!("SELECT count(*) FROM {RESULTS_SCHEMA}.{table}"),
                 [],
                 |row| row.get(0),
             )
