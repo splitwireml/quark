@@ -2,8 +2,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::Duration;
 
 use crate::engine::{Engine, EngineInner};
+
+/// How often a cancelled query is interrupted again until it stops.
+const REINTERRUPT_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, thiserror::Error)]
 #[error("request cancelled")]
@@ -83,9 +88,31 @@ impl Drop for CancelGuard {
             return;
         }
         self.ticket.is_cancelled.store(true, Ordering::SeqCst);
-        let active = lock_active(&self.engine.active);
-        if *active == Some(self.ticket.id) {
+        {
+            let active = lock_active(&self.engine.active);
+            if *active != Some(self.ticket.id) {
+                return;
+            }
             self.engine.interrupt.interrupt();
+        }
+        // DuckDB drops an interrupt that lands between statements, so keep interrupting until
+        // `run_guarded` clears `active`. Ids are unique, so this never hits another query.
+        let engine = Arc::clone(&self.engine);
+        let id = self.ticket.id;
+        let spawned = thread::Builder::new()
+            .name("quark-interrupt".to_owned())
+            .spawn(move || {
+                loop {
+                    thread::sleep(REINTERRUPT_INTERVAL);
+                    let active = lock_active(&engine.active);
+                    if *active != Some(id) {
+                        break;
+                    }
+                    engine.interrupt.interrupt();
+                }
+            });
+        if spawned.is_err() {
+            tracing::warn!("could not start the interrupt thread; the query gets one interrupt");
         }
     }
 }
@@ -159,6 +186,35 @@ mod tests {
         let outcome = done_rx.recv_timeout(Duration::from_millis(500)).unwrap();
 
         assert!(dropped_at.elapsed() < Duration::from_millis(500));
+        let error = outcome.unwrap().unwrap_err();
+        assert!(error.to_string().contains("INTERRUPT"), "{error}");
+    }
+
+    #[test]
+    fn interrupt_between_statements_still_stops_the_next_one() {
+        let engine = engine();
+        let guard = engine.guard();
+        let ticket = guard.ticket();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let runner = Arc::clone(&engine);
+        thread::spawn(move || {
+            let outcome = runner.run_guarded(&ticket, |inner| {
+                started_tx.send(()).unwrap();
+                // No statement is running while the guard drops.
+                thread::sleep(Duration::from_millis(100));
+                inner
+                    .conn
+                    .query_row(LONG_QUERY, [], |row| row.get::<_, f64>(0))
+            });
+            done_tx.send(outcome).unwrap();
+        });
+        started_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(20));
+
+        drop(guard);
+        let outcome = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
         let error = outcome.unwrap().unwrap_err();
         assert!(error.to_string().contains("INTERRUPT"), "{error}");
     }

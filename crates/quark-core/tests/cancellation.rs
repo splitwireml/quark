@@ -125,3 +125,29 @@ fn rapid_aborts_leave_engine_healthy() {
 
     assert_eq!(server.status_of(QUICK_SQL), 200);
 }
+
+#[test]
+fn rapid_aborts_under_parallel_load() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(root.path());
+
+    thread::scope(|scope| {
+        for client in 0..8 {
+            let server = &server;
+            scope.spawn(move || {
+                for cycle in 0..10 {
+                    let slow = server.send_sql(SLOW_SQL);
+                    thread::sleep(Duration::from_millis((client + cycle) % 5 * 10));
+                    drop(slow);
+                }
+            });
+        }
+    });
+
+    let started_at = Instant::now();
+    let status = server.status_of("SELECT 1");
+    let waited = started_at.elapsed();
+
+    assert_eq!(status, 200);
+    assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+}
