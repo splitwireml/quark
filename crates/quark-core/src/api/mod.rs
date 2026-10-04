@@ -12,6 +12,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
+mod query;
 mod read;
 mod sources;
 
@@ -21,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         Router::new()
             .merge(read::routes())
             .merge(sources::routes())
+            .merge(query::routes())
             .fallback(unknown_route)
             .method_not_allowed_fallback(unknown_route),
     )
