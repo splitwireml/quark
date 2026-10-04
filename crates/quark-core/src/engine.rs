@@ -218,11 +218,11 @@ pub fn datasets(conn: &Connection) -> duckdb::Result<Vec<DatasetInfo>> {
     // The attached columnar caches hold the same rows as the views over them.
     let mut statement = conn.prepare(
         "SELECT schema_name, table_name, 'TABLE' FROM duckdb_tables()
-         WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog')
+         WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog', 'quark_results')
            AND NOT regexp_full_match(database_name, 'cache_[0-9a-f]{16}')
          UNION ALL
          SELECT schema_name, view_name, 'VIEW' FROM duckdb_views()
-         WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog')
+         WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog', 'quark_results')
            AND NOT regexp_full_match(database_name, 'cache_[0-9a-f]{16}')
          ORDER BY 1, 2",
     )?;

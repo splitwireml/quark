@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::arrow::encode_page;
+use crate::cache::results::{ResultAction, drop_statement, is_plain_scan};
 use crate::cache::stats::{StatsEntry, stats_key};
 use crate::engine::{EngineInner, datasets, describe};
 use crate::error::{ApiError, ApiResult};
@@ -203,13 +204,14 @@ fn compute_stats(
 fn fetch_page(
     conn: &Connection,
     ordered: &str,
-    mut params: Vec<Value>,
+    params: &[Value],
     request: &QueryRequest,
 ) -> duckdb::Result<Fetched> {
-    params.push(Value::from(request.page_size));
-    params.push(Value::from(
-        (request.page - 1).saturating_mul(request.page_size),
-    ));
+    let paging = [
+        Value::from(request.page_size),
+        Value::from((request.page - 1).saturating_mul(request.page_size)),
+    ];
+    let params: Vec<Value> = params.iter().cloned().chain(paging).collect();
     let mut statement = conn.prepare(&format!(
         "SELECT * FROM ({ordered}) AS result LIMIT ? OFFSET ?"
     ))?;
@@ -246,8 +248,7 @@ pub fn run_page(
 ) -> ApiResult<PageBody> {
     let started = Instant::now();
     request.validate()?;
-    let conn = &inner.conn;
-    let resolved = resolve(conn, target)?;
+    let resolved = resolve(&inner.conn, target)?;
     let built = build_query(
         &resolved.table,
         &resolved.display_table,
@@ -259,22 +260,58 @@ pub fn run_page(
 
     let mut params = resolved.lead.clone();
     params.extend(built.params.iter().cloned());
+    let has_controls = !request.filters.is_empty()
+        || !request.sorts.is_empty()
+        || !request.dedupe_columns.is_empty();
+    // A scan with no controls reads its table or view as it is; a result table would only copy it.
+    let is_plain = match &resolved.plain_sql {
+        Some(sql) => is_plain_scan(request, sql, inner.mounted.values().flatten()),
+        None => !has_controls,
+    };
+    let result_key = stats_key(&built.ordered, &params);
+    let action = if is_plain {
+        ResultAction::ServeDirect
+    } else {
+        inner.results.note_request(&result_key)
+    };
+    for table in inner.results.take_dropped() {
+        if let Err(error) = inner.conn.execute_batch(&drop_statement(&table)) {
+            tracing::warn!(table, %error, "could not drop an evicted result table");
+        }
+    }
+    let saved = match &action {
+        ResultAction::ServeFrom(table) => Some(format!("quark_results.{table}")),
+        _ => None,
+    };
+    let saved_scan = saved.as_ref().map(|table| format!("SELECT * FROM {table}"));
+    let (relation, ordered, bound) = match (&saved, &saved_scan) {
+        (Some(table), Some(scan)) => (table.as_str(), scan.as_str(), [].as_slice()),
+        _ => (
+            built.relation.as_str(),
+            built.ordered.as_str(),
+            params.as_slice(),
+        ),
+    };
+
+    let conn = &inner.conn;
     let key = stats_key(&built.relation, &params);
     let stats = match inner.stats.get(&key) {
         Some(stats) => stats,
         None => {
             inner.counters.count_queries += 1;
-            let stats = compute_stats(conn, &built.relation, &resolved.columns, &params)
-                .map_err(unprocessable)?;
+            let stats =
+                compute_stats(conn, relation, &resolved.columns, bound).map_err(unprocessable)?;
             inner.stats.insert(key, stats.clone());
             stats
         }
     };
-    let fetched = fetch_page(conn, &built.ordered, params, request).map_err(unprocessable)?;
+    let fetched = fetch_page(conn, ordered, bound, request).map_err(unprocessable)?;
+    if let ResultAction::StartBuild(table) = &action {
+        inner
+            .results
+            .start_build(conn, &result_key, table, &built.ordered, params);
+    }
 
-    let has_controls = !request.filters.is_empty()
-        || !request.sorts.is_empty()
-        || !request.dedupe_columns.is_empty();
     let sql = match resolved.plain_sql {
         Some(plain) if !has_controls => plain,
         _ => built.display,
@@ -306,6 +343,7 @@ pub fn run_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::results::ResultCache;
     use crate::engine::{Dirs, Engine};
     use crate::ids::dataset_id;
     use crate::query::{Direction, Filter, Sort};
@@ -314,6 +352,8 @@ mod tests {
     use duckdb::Connection;
     use serde_json::json;
     use std::io::Cursor;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn inner(setup: &str) -> EngineInner {
         let conn = Connection::open_in_memory().unwrap();
@@ -690,5 +730,173 @@ mod tests {
 
         assert_eq!(error.status(), 404);
         assert_eq!(error.detail(), "Dataset not found");
+    }
+
+    const ROWS: &str = "CREATE TABLE t AS SELECT range AS id, range * 7 AS h FROM range(1000)";
+
+    fn sorted_by_id(page: i64, direction: Direction) -> QueryRequest {
+        QueryRequest {
+            page,
+            page_size: 10,
+            sorts: vec![Sort {
+                column: "id".to_owned(),
+                direction,
+            }],
+            ..QueryRequest::default()
+        }
+    }
+
+    fn without_elapsed(body: PageBody) -> Value {
+        let mut body = json_body(body);
+        body.as_object_mut().unwrap().remove("elapsed_ms");
+        body
+    }
+
+    /// The ordered SQL of `sorted_by_id` over `main.<table>`, which keys the result cache.
+    fn id_key(table: &str, direction: &str) -> String {
+        stats_key(
+            &format!(r#"SELECT * FROM (SELECT * FROM "main"."{table}") ORDER BY "id" {direction}"#),
+            &[],
+        )
+    }
+
+    fn wait_until_ready(inner: &mut EngineInner, key: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(inner.results.note_request(key), ResultAction::ServeFrom(_)) {
+            assert!(Instant::now() < deadline, "the result never became ready");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn result_tables(conn: &Connection) -> i64 {
+        count(
+            conn,
+            "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'quark_results'",
+        )
+    }
+
+    fn has_results_schema(conn: &Connection) -> bool {
+        count(
+            conn,
+            "SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'quark_results'",
+        ) > 0
+    }
+
+    #[test]
+    fn pages_from_results_equal_direct_pages() {
+        let pages = [1, 2, 100];
+        let direct: Vec<Value> = pages
+            .iter()
+            .map(|page| {
+                let mut fresh = inner(ROWS);
+                let request = sorted_by_id(*page, Direction::Asc);
+                without_elapsed(
+                    run_page(&mut fresh, &dataset("t"), &request, Format::Json).unwrap(),
+                )
+            })
+            .collect();
+        let mut inner = inner(ROWS);
+        let first = sorted_by_id(1, Direction::Asc);
+        run_page(&mut inner, &dataset("t"), &first, Format::Json).unwrap();
+        run_page(&mut inner, &dataset("t"), &first, Format::Json).unwrap();
+        wait_until_ready(&mut inner, &id_key("t", "ASC"));
+        // Direct reads now see different values, so equal pages must come from the result table.
+        inner.conn.execute_batch("UPDATE t SET h = -1").unwrap();
+
+        for (page, expected) in pages.iter().zip(direct) {
+            let request = sorted_by_id(*page, Direction::Asc);
+            let body = run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+            assert_eq!(without_elapsed(body), expected, "page {page}");
+        }
+        assert_eq!(count_queries(&inner), 1);
+    }
+
+    #[test]
+    fn result_tables_are_not_datasets() {
+        let mut inner = inner(ROWS);
+        let request = sorted_by_id(1, Direction::Asc);
+        run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+        run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+        wait_until_ready(&mut inner, &id_key("t", "ASC"));
+        assert_eq!(result_tables(&inner.conn), 1);
+
+        let names: Vec<String> = datasets(&inner.conn)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.name)
+            .collect();
+
+        assert_eq!(names, ["t"]);
+    }
+
+    #[test]
+    fn plain_scans_build_no_result() {
+        let mut inner = inner(ROWS);
+
+        for _ in 0..3 {
+            let request = QueryRequest::default();
+            run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();
+        }
+
+        assert!(!has_results_schema(&inner.conn));
+    }
+
+    #[test]
+    fn evicted_results_are_dropped() {
+        let mut inner = inner(ROWS);
+        inner.results = ResultCache::with_capacity(1);
+        let ascending = sorted_by_id(1, Direction::Asc);
+        run_page(&mut inner, &dataset("t"), &ascending, Format::Json).unwrap();
+        run_page(&mut inner, &dataset("t"), &ascending, Format::Json).unwrap();
+        wait_until_ready(&mut inner, &id_key("t", "ASC"));
+        assert_eq!(result_tables(&inner.conn), 1);
+
+        let descending = sorted_by_id(1, Direction::Desc);
+        run_page(&mut inner, &dataset("t"), &descending, Format::Json).unwrap();
+
+        assert_eq!(result_tables(&inner.conn), 0);
+    }
+
+    #[test]
+    fn engine_rebuild_drops_results() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("rows.csv");
+        let csv: String = (0..50).map(|id| format!("{id}\n")).collect();
+        std::fs::write(&file, format!("id\n{csv}")).unwrap();
+        let record = SourceRecord {
+            id: "s1".to_owned(),
+            name: "rows".to_owned(),
+            kind: "file".to_owned(),
+            source: file,
+            project_id: None,
+            dataset_name: Some("rows".to_owned()),
+            sheets: None,
+        };
+        let dirs = Dirs {
+            data: root.path().join("data"),
+            cache: root.path().join("cache"),
+        };
+        let request = sorted_by_id(1, Direction::Asc);
+        let first = Engine::open_node(&record, &dirs, 1).unwrap();
+        {
+            let mut inner = first.lock();
+            run_page(&mut inner, &dataset("rows"), &request, Format::Json).unwrap();
+            run_page(&mut inner, &dataset("rows"), &request, Format::Json).unwrap();
+            wait_until_ready(&mut inner, &id_key("rows", "ASC"));
+            assert_eq!(result_tables(&inner.conn), 1);
+        }
+
+        drop(first);
+        let second = Engine::open_node(&record, &dirs, 2).unwrap();
+        let mut inner = second.lock();
+        assert_eq!(result_tables(&inner.conn), 0);
+        run_page(&mut inner, &dataset("rows"), &request, Format::Json).unwrap();
+
+        assert_eq!(count_queries(&inner), 1);
+        assert_eq!(result_tables(&inner.conn), 0);
     }
 }
