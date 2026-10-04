@@ -23,6 +23,12 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - run: cargo test -p quark-core --locked
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: cargo build -p quark-core --bin quark-dev-server --locked
+      - run: uv run pytest -m skeleton -q
+        env:
+          QUARK_TEST_BACKEND: rust
 
   lint:
     runs-on: ubuntu-22.04
@@ -55,16 +61,19 @@ jobs:
             key: universal-apple-darwin
             args: --target universal-apple-darwin
             artifacts: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            app: target/universal-apple-darwin/release/bundle/macos/Quark.app/Contents/MacOS/quark
           - os: windows-latest
             key: windows-latest
             args: ""
             artifacts: |
               target/release/bundle/nsis/*.exe
               target/release/bundle/msi/*.msi
+            app: target/release/quark.exe
           - os: ubuntu-22.04
             key: ubuntu-22.04
             args: ""
             artifacts: target/release/bundle/deb/*.deb
+            app: xvfb-run -a target/release/quark
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +85,7 @@ jobs:
         run: >
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
-          libssl-dev libayatana-appindicator3-dev librsvg2-dev
+          libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -89,6 +98,13 @@ jobs:
           key: ${{ matrix.key }}
           save-if: false
       - run: npx --yes @tauri-apps/cli@^2.12 build ${{ matrix.args }}
+      - name: Self-test the built app
+        shell: bash
+        timeout-minutes: 5
+        env:
+          QUARK_SELF_TEST: "1"
+          QUARK_DATA_DIR: ${{ runner.temp }}/quark-self-test
+        run: ${{ matrix.app }}
       - uses: actions/upload-artifact@v4
         with:
           name: quark-${{ matrix.key }}
