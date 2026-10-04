@@ -207,6 +207,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wrong_host_without_token_is_forbidden() {
+        let response = guarded()
+            .oneshot(get_request("evil.example:1234", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(detail(response).await, "Forbidden host");
+    }
+
+    #[tokio::test]
     async fn missing_or_wrong_token_is_401_with_cors_headers() {
         for bearer in [None, Some("wrong"), Some("secre"), Some("secrets")] {
             let response = guarded()
