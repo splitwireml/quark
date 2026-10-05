@@ -134,7 +134,7 @@
   let renamingColumn = $state<{ original: string; value: string } | null>(null);
   let tableScroll = $state<HTMLDivElement | null>(null);
   let gridApi = $state<{ scrollToAbsoluteRow: (absolute: number, onlyIfOutside?: boolean) => void; requestPin: (column: ColumnInfo) => void } | null>(null);
-  type CachedPage = { page: number; rows: TableRows };
+  type CachedPage = { page: number; rows: TableRows; elapsed_ms: number };
   // One previous page, at most two incoming pages, and one viewport preview.
   let neighborCache = $state.raw<CachedPage | null>(null);
   let aheadCache = $state.raw<CachedPage[]>([]);
@@ -2616,8 +2616,8 @@
   }
   function promotePage(cache: CachedPage) {
     if (!result || cache.page === result.page) return;
-    const left = { page: result.page, rows: result.rows };
-    result = { ...result, rows: cache.rows, page: cache.page };
+    const left = { page: result.page, rows: result.rows, elapsed_ms: result.elapsed_ms };
+    result = { ...result, rows: cache.rows, page: cache.page, elapsed_ms: cache.elapsed_ms };
     neighborCache = left;
     aheadCache = aheadCache.filter((entry) => entry.page !== cache.page);
     selectedCell = null;
@@ -2644,7 +2644,7 @@
       const next = await api.querySql(context.targetNodeId, { sql: context.sql, page, page_size: result.page_size, filters: context.filters, sorts: context.sorts, dedupe_columns: context.dedupe_columns }, controller.signal);
       if (controller.signal.aborted || context.generation !== requestId || context.key !== currentQueryKey() || !result) return;
       latencyMs = latencyEma(latencyMs, performance.now() - started);
-      aheadCache = [...aheadCache.filter((entry) => entry.page !== next.page), { page: next.page, rows: next.rows }].slice(-2);
+      aheadCache = [...aheadCache.filter((entry) => entry.page !== next.page), { page: next.page, rows: next.rows, elapsed_ms: next.elapsed_ms }].slice(-2);
       fetchFailures.delete(page);
     } catch (reason) {
       if (!controller.signal.aborted && context.generation === requestId && context.key === currentQueryKey()) {
