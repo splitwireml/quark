@@ -194,7 +194,8 @@
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
-    z-index: 12;
+    /* Above the query condition bar (z-index 16), which it drops over. */
+    z-index: 20;
     width: 244px;
     overflow: hidden;
     border: 1px solid var(--line-strong);
