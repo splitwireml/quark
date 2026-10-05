@@ -194,6 +194,13 @@ test('formats linear and forked version labels', () => {
   assert.equal(versionLabel({ number: 2, fork: 2 }), 'f2 v2');
 });
 
+test('stages change details held in a reactive proxy', () => {
+  // Svelte $state arrays are proxies, which structuredClone refuses.
+  const columns = new Proxy(['make', 'model'], {});
+  const staged = stageVersionChange(createSourceHistory(source), { kind: 'dedupe', summary: 'Dedupe by make, model', details: { columns } });
+  assert.deepEqual(staged.pendingChanges[0].details, { columns: ['make', 'model'] });
+});
+
 test('does nothing when finalizing without staged changes', () => {
   const history = createSourceHistory(source);
   assert.strictEqual(finalizeVersion(history, source), history);

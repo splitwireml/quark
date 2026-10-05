@@ -39,7 +39,9 @@ function copyChange(change: VersionChange): VersionChange {
   return {
     kind: change.kind,
     summary: change.summary,
-    ...(change.details ? { details: structuredClone(change.details) } : {})
+    // Details are JSON by type; a JSON round trip also copies Svelte $state
+    // proxies, which structuredClone rejects with a DataCloneError.
+    ...(change.details ? { details: JSON.parse(JSON.stringify(change.details)) } : {})
   };
 }
 
