@@ -12,7 +12,7 @@
   import { columnFormulas } from './lib/column-formulas';
   import { absoluteRowToPage, clampAbsoluteRow, safeTotalRows } from './lib/row-scrollbar';
   import { criticalPages, latencyEma, pagesForRange, snapshotWindow } from './lib/scroll-prefetch';
-  import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
+  import { LEGACY_STORAGE_KEY, LEGACY_VERSIONING_STORAGE_KEY, VERSIONING_STORAGE_KEY, activateVersion, copyControls, createSourceHistory, createView, finalizeVersion, matchColumnsByRegex, migrateDatasetHistories, migrateSavedQueries, rebindLegacyHistories, stageVersionChange, versionDiff, versionLabel as formatVersionLabel } from './lib/versioning';
   import { applyRoles, chartRoles, classifyColumn, filtersFromMark, metricCardOp, suggestCharts } from './lib/visualize';
   import { chartTitle, sameQuery, nextDashboardName, clampPlacement, composeFilters, DASHBOARD_STORAGE_KEY, DEFAULT_TILE, METRIC_TILE, emptyDashboardDataset, filtersForChart, readDashboards, selectionChartIdAtFilterIndex, updateActiveDashboardTab, updatePlacedChart, withoutSelections } from './lib/dashboard';
   import { chartThemeCssVariables, defaultChartThemePreferences, isChartPalette, readChartThemePreferences, serializeChartThemePreferences, type ChartPalette, type ChartThemePreferences } from './lib/chartThemes';
@@ -1475,6 +1475,7 @@
       || !Array.isArray(value.changes) || value.parentId !== undefined && typeof value.parentId !== 'string') return null;
     const changes = value.changes.map(cleanChange).filter((change): change is VersionChange => change !== null);
     const join = value.join === undefined ? undefined : cleanJoin(value.join);
+    const controls = copyControls(value.controls);
     if (changes.length !== value.changes.length || value.join !== undefined && !join) return null;
     return {
       id: value.id,
@@ -1488,7 +1489,8 @@
       hiddenColumns: [...value.hiddenColumns],
       timestamp: value.timestamp,
       changes,
-      ...(join ? { join } : {})
+      ...(join ? { join } : {}),
+      ...(controls ? { controls } : {})
     };
   }
 
@@ -1804,7 +1806,9 @@
     return true;
   }
 
-  async function replayStored(sql: string, nodeId: string, join?: JoinWorkspaceRequest, columns?: string[], hidden: string[] = []): Promise<boolean> {
+  // With keepControls, `sql` is the base SQL and the current filters, sorts and
+  // dedupe keys run on top of it, as they did when the Version was recorded.
+  async function replayStored(sql: string, nodeId: string, join?: JoinWorkspaceRequest, columns?: string[], hidden: string[] = [], keepControls = false): Promise<boolean> {
     const replayId = ++replayRequestId;
     page = 1;
     pageInput = '1';
@@ -1816,7 +1820,8 @@
       return false;
     }
     if (replayId !== replayRequestId) return false;
-    if (!await runSql(sql, false, false, targetNodeId)) return false;
+    if (keepControls) { sqlBase = sql; clearAggregateDraft(); }
+    if (!await runSql(sql, keepControls, false, targetNodeId)) return false;
     activeJoin = join;
     if (result) reconcileColumns(result, columns);
     hiddenColumns = hidden.filter((column) => columnOrder.includes(column));
@@ -1825,22 +1830,24 @@
   }
 
   async function replayVersionSnapshot(version: Version): Promise<boolean> {
+    // Versions recorded before controls were stored replay their baked SQL with no controls.
+    const controls = copyControls(version.controls);
     dashboardSelections = [];
     dashboardChartStates = {};
-    filters = [];
-    sorts = [];
-    dedupeColumns = [];
-    dedupeDraft = [];
+    filters = controls?.filters ?? [];
+    sorts = controls?.sorts ?? [];
+    dedupeColumns = controls?.dedupeColumns ?? [];
+    dedupeDraft = [...dedupeColumns];
     page = 1;
     pageInput = '1';
-    return replayStored(version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns);
+    return replayStored(controls?.sql ?? version.sql, version.nodeId, version.join, version.columns, version.hiddenColumns, !!controls);
   }
 
   async function restoreVersion(version: Version, preserveRedo = false) {
     if (!discardPending()) return;
     const before = undoPoint();
     if (!await replayVersionSnapshot(version)) {
-      filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns;
+      filters = before.filters; sorts = before.sorts; dedupeColumns = before.dedupeColumns; sqlBase = before.sqlBase;
       dashboardSelections = before.dashboardSelections;
       dedupeDraft = [...before.dedupeColumns]; page = before.page; pageInput = String(page);
       recordingNotice = sqlError || 'Could not open this Version.';
@@ -1877,7 +1884,8 @@
       columns: [...columnOrder],
       hiddenColumns: [...hiddenColumns],
       timestamp: new Date().toISOString(),
-      ...(activeJoin ? { join: activeJoin } : {})
+      ...(activeJoin ? { join: activeJoin } : {}),
+      ...(sqlBase ? { controls: { sql: sqlBase, filters, sorts, dedupeColumns } } : {})
     });
     if (!replaceHistory(next)) return;
     undoStack = [];

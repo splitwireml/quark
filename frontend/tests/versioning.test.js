@@ -6,6 +6,7 @@ import {
   LEGACY_VERSIONING_STORAGE_KEY,
   VERSIONING_STORAGE_KEY,
   activateVersion,
+  copyControls,
   createSourceHistory,
   createView,
   finalizeVersion,
@@ -199,6 +200,38 @@ test('stages change details held in a reactive proxy', () => {
   const columns = new Proxy(['make', 'model'], {});
   const staged = stageVersionChange(createSourceHistory(source), { kind: 'dedupe', summary: 'Dedupe by make, model', details: { columns } });
   assert.deepEqual(staged.pendingChanges[0].details, { columns: ['make', 'model'] });
+});
+
+test('stores the base SQL and live controls with a finalized Version', () => {
+  // The controls arrive as Svelte $state proxies.
+  const controls = new Proxy({
+    sql: 'SELECT * FROM cars',
+    filters: [{ column: 'make', operator: 'in', value: new Proxy(['BMW'], {}) }],
+    sorts: new Proxy([{ column: 'model', direction: 'desc' }], {}),
+    dedupeColumns: new Proxy(['make'], {})
+  }, {});
+  const history = finalizeVersion(stageVersionChange(createSourceHistory(source), { kind: 'dedupe', summary: 'Dedupe by make' }), {
+    sql: 'SELECT DISTINCT ON (make) * FROM cars WHERE make IN (\'BMW\') ORDER BY model DESC',
+    columns: ['make', 'model'],
+    hiddenColumns: [],
+    timestamp: '2026-10-05T08:00:00.000Z',
+    controls
+  });
+  assert.deepEqual(history.versions[1].controls, {
+    sql: 'SELECT * FROM cars',
+    filters: [{ column: 'make', operator: 'in', value: ['BMW'] }],
+    sorts: [{ column: 'model', direction: 'desc' }],
+    dedupeColumns: ['make']
+  });
+  assert.equal(history.versions[0].controls, undefined, 'Version 1 has no controls to restore');
+});
+
+test('drops malformed stored controls so the baked SQL is replayed', () => {
+  const valid = { sql: 'SELECT 1', filters: [], sorts: [], dedupeColumns: [] };
+  assert.deepEqual(copyControls(valid), valid);
+  for (const broken of [undefined, { ...valid, sql: '' }, { ...valid, sorts: [{ column: 'a', direction: 'up' }] }, { ...valid, filters: [{ column: 'a' }] }, { ...valid, dedupeColumns: [1] }]) {
+    assert.equal(copyControls(broken), undefined);
+  }
 });
 
 test('does nothing when finalizing without staged changes', () => {

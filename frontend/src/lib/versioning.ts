@@ -8,6 +8,7 @@ import type {
   Version,
   VersionChange,
   VersionDiff,
+  VersionControls,
   VersionRestoreMetadata,
   View,
   ViewHistory,
@@ -19,7 +20,7 @@ export const LEGACY_STORAGE_KEY = 'quark.savedQueries';
 export const LEGACY_VERSIONING_STORAGE_KEY = 'quark.versioning.v1';
 export const VERSIONING_STORAGE_KEY = 'quark.versioning.v2';
 
-type SnapshotInput = Pick<Version, 'sql' | 'columns' | 'hiddenColumns' | 'timestamp' | 'join'>;
+type SnapshotInput = Pick<Version, 'sql' | 'columns' | 'hiddenColumns' | 'timestamp' | 'join' | 'controls'>;
 type SourceInput = SnapshotInput & Pick<Version, 'nodeId' | 'dataset'> & Partial<Pick<ViewHistory, 'id' | 'projectId' | 'name' | 'sourceId'>>;
 type ViewInput = SnapshotInput & Pick<Version, 'nodeId' | 'dataset'> & Pick<ViewHistory, 'id' | 'projectId' | 'name'> & Partial<Pick<ViewHistory, 'sourceId'>>;
 
@@ -45,7 +46,17 @@ function copyChange(change: VersionChange): VersionChange {
   };
 }
 
+// Validates and deep-copies stored controls; anything malformed falls back to the
+// Version's baked SQL. The JSON copy also unwraps Svelte $state proxies.
+export function copyControls(value: unknown): VersionControls | undefined {
+  if (!isRecord(value) || !isNonEmptyString(value.sql) || !isStringArray(value.dedupeColumns)
+    || !Array.isArray(value.filters) || !value.filters.every((item) => isRecord(item) && typeof item.column === 'string' && typeof item.operator === 'string')
+    || !Array.isArray(value.sorts) || !value.sorts.every((item) => isRecord(item) && typeof item.column === 'string' && (item.direction === 'asc' || item.direction === 'desc'))) return undefined;
+  return JSON.parse(JSON.stringify({ sql: value.sql, filters: value.filters, sorts: value.sorts, dedupeColumns: value.dedupeColumns }));
+}
+
 function copyVersion(version: Version): Version {
+  const controls = copyControls(version.controls);
   return {
     id: version.id,
     ...(version.parentId ? { parentId: version.parentId } : {}),
@@ -58,7 +69,8 @@ function copyVersion(version: Version): Version {
     hiddenColumns: [...version.hiddenColumns],
     timestamp: version.timestamp,
     changes: version.changes.map(copyChange),
-    ...(version.join ? { join: copyJoin(version.join) } : {})
+    ...(version.join ? { join: copyJoin(version.join) } : {}),
+    ...(controls ? { controls } : {})
   };
 }
 
@@ -146,6 +158,7 @@ export function finalizeVersion(history: ViewHistory, snapshot: SnapshotInput): 
   const existing = children.find((version) => sameSnapshot(version, snapshot));
   if (existing) return { ...history, activeVersionId: existing.id, pendingParentId: null, pendingChanges: [] };
   const number = parent.number + 1;
+  const controls = copyControls(snapshot.controls);
   const fork = children.length ? Math.max(1, ...history.versions.map((version) => version.fork ?? 1)) + 1 : parent.fork;
   const id = fork ? `f${fork}-v${number}` : `v${number}`;
   const version: Version = {
@@ -160,7 +173,8 @@ export function finalizeVersion(history: ViewHistory, snapshot: SnapshotInput): 
     hiddenColumns: [...snapshot.hiddenColumns],
     timestamp: snapshot.timestamp,
     changes: history.pendingChanges.map(copyChange),
-    ...(snapshot.join ? { join: copyJoin(snapshot.join) } : {})
+    ...(snapshot.join ? { join: copyJoin(snapshot.join) } : {}),
+    ...(controls ? { controls } : {})
   };
   return {
     ...history,
@@ -464,8 +478,10 @@ export function rebindLegacyHistories(histories: ViewHistory[], baseViews: BaseV
         left_keys: [...version.join.left_keys],
         right_keys: [...version.join.right_keys]
       } : undefined;
+      // Rebinding rewrites only the baked SQL, so stored controls would point at the old relations.
+      const { controls: _controls, ...copy } = copyVersion(version);
       return {
-        ...copyVersion(version),
+        ...copy,
         nodeId: project.node_id,
         dataset: primary.base.name,
         sql: rebindRelationSql(version.sql, relationBindings, aliases),

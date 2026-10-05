@@ -399,6 +399,15 @@ export interface VersionChange {
   details?: Record<string, SerializableValue>;
 }
 
+// The base SQL and the controls applied on top of it, so restoring a Version
+// brings back live filters, sorts and dedupe keys instead of baked-in SQL.
+export interface VersionControls {
+  sql: string;
+  filters: FilterCondition[];
+  sorts: SortCondition[];
+  dedupeColumns: string[];
+}
+
 export interface Version {
   id: string;
   parentId?: string;
@@ -412,6 +421,7 @@ export interface Version {
   timestamp: string;
   changes: VersionChange[];
   join?: JoinWorkspaceRequest;
+  controls?: VersionControls;
 }
 
 export interface View {
