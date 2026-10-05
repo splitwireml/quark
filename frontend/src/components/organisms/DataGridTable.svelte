@@ -122,7 +122,10 @@
   const bodyViewportHeight = $derived(Math.max(0, viewportHeight - HEADER_HEIGHT));
   const visibleRowCount = $derived(bodyViewportHeight / rowHeight);
   const pxPerRow = $derived(scrollRowStep(totalRows, rowHeight, bodyViewportHeight));
-  const firstVisibleRow = $derived(Math.min(Math.max(0, totalRows - visibleRowCount), scrollTop / pxPerRow));
+  // WebKit stores scrollTop in whole pixels, so a jump would read back as a
+  // fraction of a row early. Keep the jump's exact row until the user scrolls.
+  let jump = $state<{ row: number; top: number } | null>(null);
+  const firstVisibleRow = $derived(Math.min(Math.max(0, totalRows - visibleRowCount), jump?.top === scrollTop ? jump.row : scrollTop / pxPerRow));
   const lastVisibleRow = $derived(Math.min(totalRows - 1, firstVisibleRow + visibleRowCount));
 
   type Segment = { kind: 'current' | 'neighbor' | 'snapshot' | 'retained'; start: number; rows: TableRows };
@@ -209,6 +212,7 @@
     if (onlyIfOutside && absolute >= firstVisibleRow && absolute < lastVisibleRow - 1) return;
     scrollElement.scrollTop = Math.max(0, absolute * pxPerRow);
     scrollTop = scrollElement.scrollTop;
+    jump = { row: Math.max(0, absolute), top: scrollTop };
   }
 
   let lastScrollTop = 0;
