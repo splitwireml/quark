@@ -333,7 +333,13 @@ fn evict(columnar_dir: &Path, cap: u64) {
             break;
         }
         match fs::remove_file(&path) {
-            Ok(()) => total -= len,
+            Ok(()) => {
+                total -= len;
+                // DuckDB may leave a write-ahead log beside the file; it is useless alone.
+                let mut wal = path.into_os_string();
+                wal.push(".wal");
+                let _ = fs::remove_file(wal);
+            }
             Err(error) => tracing::debug!(%error, "columnar file in use; keeping it for now"),
         }
     }
@@ -581,10 +587,16 @@ mod tests {
         let middle = cache_file(dir.path(), &cache, "b.csv", 2 * day);
         let newest = cache_file(dir.path(), &cache, "c.csv", day);
         oldest.touch(&cache);
+        let middle_wal = PathBuf::from(format!("{}.wal", middle.final_path(&cache).display()));
+        fs::write(&middle_wal, b"log").unwrap();
 
         let (mut worker, ready) = start_with_cap(&cache, 25);
         assert!(oldest.is_ready(&cache), "mounting made it the most recent");
         assert!(!middle.is_ready(&cache), "startup evicts the least recent");
+        assert!(
+            !middle_wal.exists(),
+            "eviction removes the file's write-ahead log"
+        );
         assert!(newest.is_ready(&cache));
 
         let job = job(dir.path(), "d.csv", "a\n1\n");
