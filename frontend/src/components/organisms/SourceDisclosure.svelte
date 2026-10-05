@@ -1,8 +1,10 @@
 <script lang="ts">
+  import BusyBar from '../atoms/BusyBar.svelte';
   import Button from '../atoms/Button.svelte';
 
   type Props = {
     mutating: boolean;
+    uploading?: boolean;
     attachPath: string;
     onUpload: (event: Event) => void;
     onAttach: (event: SubmitEvent) => void;
@@ -10,14 +12,22 @@
     idPrefix?: string;
     showUpload?: boolean;
   };
-  let { mutating, attachPath, onUpload, onAttach, setAttachPath, idPrefix = 'database-path', showUpload = true }: Props = $props();
+  let { mutating, uploading = false, attachPath, onUpload, onAttach, setAttachPath, idPrefix = 'database-path', showUpload = true }: Props = $props();
+  // The trigger becomes the upload's progress, so remember which file it took.
+  let picked = $state('');
+  let busy = $derived(uploading && !!picked);
+  function choose(event: Event) {
+    picked = (event.currentTarget as HTMLInputElement).files?.[0]?.name ?? '';
+    onUpload(event);
+  }
 </script>
 
 <div class="disclosure">
   {#if showUpload}
-    <label class="upload" class:disabled={mutating}>
-      Upload file
-      <input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={onUpload} disabled={mutating} />
+    <label class="upload" class:disabled={mutating && !busy} aria-busy={busy}>
+      <span class="text" aria-live="polite">{busy ? `Uploading ${picked}…` : 'Upload file'}</span>
+      <input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx,.duckdb,.db" onchange={choose} disabled={mutating} />
+      {#if busy}<BusyBar />{/if}
     </label>
   {/if}
   <form onsubmit={onAttach}>
@@ -32,6 +42,8 @@
 <style>
   .disclosure { display: flex; flex-direction: column; gap: 10px; }
   .upload {
+    position: relative;
+    overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     height: 30px;
     border-radius: var(--radius-lg);
@@ -43,6 +55,8 @@
   }
   .upload:hover { border-color: var(--faint); }
   .upload.disabled { opacity: 0.5; pointer-events: none; }
+  .upload[aria-busy='true'] { pointer-events: none; color: var(--muted); }
+  .upload .text { min-width: 0; padding: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
   form { display: flex; flex-direction: column; gap: 5px; }
   form label { font-size: 11px; color: var(--muted); }

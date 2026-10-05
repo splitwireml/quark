@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BusyBar from '../atoms/BusyBar.svelte';
   import Button from '../atoms/Button.svelte';
   import Icon from '../atoms/Icon.svelte';
   import SourceTreeItem from '../molecules/SourceTreeItem.svelte';
@@ -9,6 +10,7 @@
   type Props = {
     error: string;
     mutating: boolean;
+    uploading?: boolean;
     nodes: SourceSummary[];
     loadedSourceIds: string[];
     loadingSourceId: string;
@@ -18,7 +20,14 @@
     onRetry: () => void;
     attachForm: Snippet;
   };
-  let { error, mutating, nodes, loadedSourceIds, loadingSourceId, onSelectSource, onShowAllSources, onUpload, onRetry, attachForm }: Props = $props();
+  let { error, mutating, uploading = false, nodes, loadedSourceIds, loadingSourceId, onSelectSource, onShowAllSources, onUpload, onRetry, attachForm }: Props = $props();
+  // The card that took the file becomes the upload's progress.
+  let picked = $state<{ kind: 'data' | 'duckdb'; name: string } | null>(null);
+  let busyKind = $derived(uploading ? picked?.kind : undefined);
+  function choose(kind: 'data' | 'duckdb', event: Event) {
+    picked = { kind, name: (event.currentTarget as HTMLInputElement).files?.[0]?.name ?? '' };
+    onUpload(event);
+  }
   let hasSources = $derived(nodes.length > 0);
   let attachOpen = $state(false);
   const VISIBLE_SOURCES = 3;
@@ -78,17 +87,19 @@
   <div class="add-group">
     <div class="group-title"><Eyebrow>{hasSources ? 'Add another source' : 'Add a source'}</Eyebrow></div>
     <div class="actions">
-      <label class="action" class:disabled={mutating}>
+      <label class="action" class:disabled={mutating && busyKind !== 'data'} aria-busy={busyKind === 'data'}>
         <Icon name="file" />
         <span class="label">Data file</span>
-        <small>CSV, Parquet, JSON, XLSX</small>
-        <input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx" onchange={onUpload} disabled={mutating} />
+        <small aria-live="polite">{busyKind === 'data' ? `Uploading ${picked?.name}…` : 'CSV, Parquet, JSON, XLSX'}</small>
+        <input type="file" accept=".csv,.tsv,.parquet,.json,.ndjson,.jsonl,.xlsx" onchange={(event) => choose('data', event)} disabled={mutating} />
+        {#if busyKind === 'data'}<BusyBar />{/if}
       </label>
-      <label class="action" class:disabled={mutating}>
+      <label class="action" class:disabled={mutating && busyKind !== 'duckdb'} aria-busy={busyKind === 'duckdb'}>
         <Icon name="database" />
         <span class="label">DuckDB file</span>
-        <small>Copied into the project</small>
-        <input type="file" accept=".duckdb,.db" onchange={onUpload} disabled={mutating} />
+        <small aria-live="polite">{busyKind === 'duckdb' ? `Uploading ${picked?.name}…` : 'Copied into the project'}</small>
+        <input type="file" accept=".duckdb,.db" onchange={(event) => choose('duckdb', event)} disabled={mutating} />
+        {#if busyKind === 'duckdb'}<BusyBar />{/if}
       </label>
       <button type="button" class="action" class:open={attachOpen} aria-expanded={attachOpen} onclick={() => attachOpen = !attachOpen}>
         <Icon name="link" />
@@ -161,6 +172,8 @@
   .add-group { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
   .actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .action {
+    position: relative;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -177,6 +190,8 @@
   }
   .action:hover:not(.disabled), .action.open { border-color: var(--action); background: var(--action-tint); color: var(--action); }
   .action.disabled { opacity: 0.5; pointer-events: none; }
+  .action[aria-busy='true'] { pointer-events: none; }
+  .action small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .action .label { font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
   .action small { font-size: 10.5px; line-height: 1.35; color: var(--faint); }
   .action :global(svg) { transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1); }

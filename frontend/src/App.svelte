@@ -115,6 +115,7 @@
   let loadingNodes = $state(true);
   let loadingData = $state(false);
   let mutating = $state(false);
+  let uploading = $state(false);
   let error = $state('');
   let filterColumn = $state<ColumnInfo | null>(null);
   let filterOperator = $state<FilterOperator>('=');
@@ -2352,6 +2353,7 @@
     const project = activeProject;
     if (!file || !project) return;
     mutating = true;
+    uploading = true;
     error = '';
     try {
       const node = await api.uploadNode(project.id, file);
@@ -2364,7 +2366,7 @@
         await refreshAfterSourceMutation(project);
       }
     } catch (reason) { error = message(reason); }
-    finally { mutating = false; input.value = ''; }
+    finally { mutating = false; uploading = false; input.value = ''; }
   }
 
   async function attach() {
@@ -3064,7 +3066,7 @@
       onCloseRail={() => railOpen = false}
     >
       {#snippet disclosure()}
-        <SourceDisclosure {mutating} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} />
+        <SourceDisclosure {mutating} {uploading} {attachPath} onUpload={upload} onAttach={(event) => { event.preventDefault(); attach(); }} setAttachPath={(value) => attachPath = value} />
       {/snippet}
     </SourceRail>
   {/snippet}
@@ -3075,7 +3077,7 @@
       <div class="workspace-content" hidden={settingsOpen}>
       {#if !selectedDataset}
         <WelcomeScreen
-          {error} {mutating} {nodes} {loadedSourceIds} {loadingSourceId}
+          {error} {mutating} {uploading} {nodes} {loadedSourceIds} {loadingSourceId}
           onSelectSource={(id) => { void loadProjectSource(id); }}
           onShowAllSources={() => { railCollapsed = false; railOpen = true; highlightToken += 1; }}
           onUpload={upload} onRetry={() => loadProjectContents(activeProject!)}
