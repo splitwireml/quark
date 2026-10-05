@@ -4,6 +4,12 @@ Plan section 12 says every spec deviation needs a human sign-off. This page list
 
 Mark each item **accept** or **fix** in review.
 
+## Sign-off (2026-10-05)
+
+- **Accepted:** 1 to 3, 5 to 19, and 21 to 25.
+- **Fix now:** 20. Eviction now removes each evicted file's `.wal` sibling.
+- **Moved to sub-project 2:** 4. Keep the TIMETZ offset by casting in the page query when queries are ported.
+
 ## Python-parity choices (made during the run)
 
 | # | Spec or card says | Code does | Why |
