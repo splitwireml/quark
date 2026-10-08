@@ -1,36 +1,20 @@
 # Quark desktop, sub-project 1: walking skeleton
 
-Date: 2026-10-02. Status: design, awaiting review. Part 1 of the 5-part Rust desktop pivot.
+Date: 2026-10-02. Status: implemented on `rust-desktop/skeleton`. Part 1 of the Rust desktop pivot. The pivot, all of its sub-projects and their current status are in `2026-10-04-rust-desktop-pivot-design.md`.
 
 ## 1. Context
 
 Quark is a local-first DuckDB data viewer. Today a Svelte 5 single-page app talks to a single-file FastAPI backend (`backend/app.py`, about 2,000 lines and 30 routes) that owns DuckDB connections and query safety. It runs as a web server (uvicorn or Docker) and is used from a browser.
 
-Quark is becoming a desktop-only application: a Tauri 2 shell around the existing Svelte UI, with the backend rewritten in Rust, on macOS, Windows and Ubuntu. Once the Rust app reaches parity, FastAPI, the Dockerfile and compose are retired.
-
-The pivot is split into five sub-projects. Each gets its own design, plan and implementation.
-
-| # | Sub-project | Outcome |
-|---|---|---|
-| 1 | Walking skeleton (this document) | Tauri app and Rust core on three OSes; projects, upload, paging, filter, sort and dedupe end to end; efficiency upgrades; CI |
-| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; the pytest suite moved to Rust |
-| 3 | Native files and OS integration | Open files in place, native dialogs, drag and drop, native export save, file associations, single instance, default-app card |
-| 4 | Release | Signing, notarization, installers, updates, app icon, version scheme |
-| 5 | Retire Python | Remove FastAPI, Docker and pytest; update README, PRODUCT.md and SPEC.md |
+Quark is becoming a desktop-only application: a Tauri 2 shell around the existing Svelte UI, with the backend rewritten in Rust, on macOS, Windows and Ubuntu. This document designs sub-project 1 only. The pivot spec defines the sub-projects and their order.
 
 ## 2. Decisions
 
-Made during brainstorming on 2026-10-01 and 2026-10-02:
+The pivot-wide decisions are in the pivot spec, section 2: scope, desktop only, platforms, transport, code standard, bundle identifier and the DuckDB pin. A custom URL scheme and Tauri IPC were considered for the transport; the custom scheme is the fallback (section 11).
 
-- **Scope:** Tauri 2, the existing Svelte UI, and the backend ported to Rust. No Python runtime ships with the app.
-- **Desktop only:** no headless or web mode after parity.
-- **Platforms:** macOS 12+ as a universal build (Apple Silicon and Intel), Windows 10 and 11 on x64, Ubuntu 22.04+ on x64 as a `.deb`.
-- **Transport:** the UI reaches the backend over HTTP on `127.0.0.1` with a per-launch token. A custom URL scheme and Tauri IPC were considered; the custom scheme is the fallback (section 11).
-- **Efficiency upgrades in this sub-project:** count and null cache, stale-query cancellation, columnar cache, result cache. ART indexes were measured and rejected (section 6.7). Parallel reads are deferred to sub-project 2.
-- **Code standard:** Rust code follows the repository's `rust-skills` guidelines.
-- **Bundle identifier:** `ml.splitwire.quark`. It is effectively permanent; changing it later moves the data folder and breaks file associations.
-- **DuckDB engine:** pinned to the version the Python side uses (1.5.4) so both backends behave the same during the port.
-- **Later wants:** file associations for `.xlsx`, `.csv`, `.json` and `.parquet`, and an in-app "make Quark the default" recommendation. Both belong to sub-project 3.
+Decided for this sub-project:
+
+- **Efficiency upgrades:** count and null cache, stale-query cancellation, columnar cache, result cache. ART indexes were measured and rejected (section 6.7). Parallel reads are deferred to sub-project 2.
 
 ## 3. Goals and non-goals
 
@@ -41,7 +25,7 @@ Goals:
 3. Make that slice faster than today (section 6).
 4. Put the safety net in place: the pytest suite runnable against Rust, Rust unit and integration tests, and CI on three OSes.
 
-Non-goals are listed with their owning sub-project in section 12.
+Non-goals belong to later sub-projects (section 12).
 
 ## 4. Architecture
 
@@ -448,16 +432,8 @@ The skeleton is done when:
 
 ## 12. Deferred
 
-- **Sub-project 2, backend parity:** column stats, category values, charts, joins, exports, cell find and attach; XLSX, including an offline replacement for `INSTALL excel`; ICU versus Rust-side time-zone handling; parallel reads; whether the legacy routes survive; moving the remaining tests to Rust.
-- **Sub-project 3, native files and OS integration:** opening files in place; native open and save dialogs; drag and drop from the OS; exports saved by the backend; file associations for `.xlsx`, `.csv`, `.json` and `.parquet`; single instance with open-file routing; which project a double-clicked file lands in; the "make Quark the default" card (macOS and Ubuntu can set it directly; Windows can only open its Settings page).
-- **Sub-project 4, release:** Apple Developer ID signing and notarization, Windows code signing, the update channel, the real icon, the version scheme.
-- **Sub-project 5, retire Python:** delete the Python backend, pytest and Docker files; update README, PRODUCT.md (Tauri and Rust, and the cache clarification) and SPEC.md.
+Everything this sub-project leaves out belongs to a later sub-project. The pivot spec, section 3, gives each one's scope.
 
 ## 13. Open questions carried forward
 
-None of these block this sub-project.
-
-- The "recommendation widget" is read as an in-app card suggesting Quark as the default app for its file types, the way browsers do. To be confirmed in sub-project 3.
-- Which project a double-clicked file lands in.
-- Whether `.tsv`, `.jsonl`, `.ndjson` and `.duckdb` appear under "Open with" without being offered as a default.
-- When the default-app card appears, and how dismissing it persists.
+None blocked this sub-project. The open questions moved to the pivot spec, section 3.3 (native files and OS integration).
