@@ -1,6 +1,6 @@
 # Quark desktop pivot
 
-Date: 2026-10-04. Status: decisions approved 2026-10-01 and 2026-10-02; sub-project 1 implemented. This document is the single outline of the pivot and its sub-projects. Each sub-project has its own design, plan and implementation, linked below.
+Date: 2026-10-04, updated 2026-10-08. Status: decisions approved 2026-10-01 and 2026-10-02; sub-project 1 implemented and merged into integration; sub-project 2 designed. This document is the single outline of the pivot and its sub-projects. Each sub-project has its own design, plan and implementation, linked below.
 
 ## 1. Context
 
@@ -26,11 +26,11 @@ Made during brainstorming on 2026-10-01 and 2026-10-02:
 
 | # | Sub-project | Outcome | Status |
 |---|---|---|---|
-| 1 | Walking skeleton | Tauri app and Rust core on three OSes; projects, upload, paging, filter, sort and dedupe end to end; efficiency upgrades; CI | Implemented; awaiting H2 and deviation sign-off |
-| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; the pytest suite moved to Rust | Not started |
+| 1 | Walking skeleton | Tauri app and Rust core on three OSes; projects, upload, paging, filter, sort and dedupe end to end; efficiency upgrades; CI | Implemented; deviations signed off; merged into integration; remaining H2 steps moved to sub-project 2's exit gate |
+| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; ICU time zones; read pool and the other efficiency upgrades; pytest runs against Rust | Designed; spec awaiting review |
 | 3 | Native files and OS integration | Open files in place, native dialogs, drag and drop, native export save, file associations, single instance, default-app card | Not started |
 | 4 | Release | Signing, notarization, installers, updates, app icon, version scheme | Not started |
-| 5 | Retire Python | Remove FastAPI, Docker and pytest; update README, PRODUCT.md and SPEC.md | Not started |
+| 5 | Retire Python | Remove FastAPI and Docker; port pytest to Rust or keep it as a test-only tool; update README, PRODUCT.md and SPEC.md | Not started |
 
 ### 3.1 Walking skeleton
 
@@ -48,23 +48,17 @@ Prove the risky parts before the bulk port, and ship one production-quality vert
   - Design: `2026-10-02-rust-desktop-skeleton-design.md`.
   - Plan: `2026-10-02-rust-desktop-skeleton.md`.
   - Exit deviations: `2026-10-04-skeleton-exit-deviations.md`.
-- **Branch:** `rust-desktop/skeleton`, at de640e9. CI and installer builds are green on all three OSes, and the Rust-mode skeleton suite passes 41 of 41.
-- **Remaining:**
-  - H2: the manual smoke test (skeleton design, section 8.5) with the bundle-run installers. Those artifacts expire on 2026-10-18.
-  - Sign-off on the 25 listed deviations.
+- **Branch:** `rust-desktop/skeleton`, fast-forwarded into `rust-desktop/integration` at af7c0bd on 2026-10-08. CI and installer builds are green on all three OSes, and the Rust-mode skeleton suite passes 41 of 41.
+- **Remaining:** the manual H2 steps (a full Windows run, creating a project and uploading into it on macOS, launching from the icon on Ubuntu, re-checking the H2 fixes). They run in sub-project 2's exit gate with its installers. The 25 deviations are signed off.
 
 ### 3.2 Backend parity
 
-Port every remaining endpoint so the Rust core can replace FastAPI.
+Port every remaining endpoint so the Rust core can replace FastAPI, and take the efficiency upgrades the Python version skipped.
 
-- **Scope:**
-  - Column stats, category values, charts, joins, exports, cell find and attach.
-  - XLSX, including an offline replacement for `INSTALL excel`.
-  - Time-zone handling: ICU versus the Rust side.
-  - Parallel reads, deferred from the skeleton.
-  - Whether the legacy routes survive.
-  - Moving the remaining tests to Rust.
-- **Open:** whether the legacy routes survive, and the time-zone approach. Both are settled in this sub-project's design.
+- **Scope:** column stats, category values, charts, joins, exports, cell find, attach and the source path; offline XLSX with calamine and rust_xlsxwriter; ICU compiled into DuckDB; a read pool per engine; a response cache; three visible behaviour fixes; the code reshaped into feature folders with a CI-enforced layout.
+- **Settled in its design:** the legacy routes stay until sub-project 5; time zones use ICU; the pytest suite stays the API test suite and runs against Rust, and sub-project 5 decides whether to port it.
+- **Documents:** design `2026-10-08-rust-desktop-parity-design.md`; planning notes `2026-10-05-sp2-backend-parity-notes.md`.
+- **Branch:** `rust-desktop/parity`, from integration.
 
 ### 3.3 Native files and OS integration
 
@@ -96,17 +90,17 @@ Ship installers people can run without security warnings, and keep them updated.
 Remove the web-era stack once the Rust app is at parity.
 
 - **Scope:**
-  - Delete the Python backend, pytest and the Docker files.
+  - Delete the Python backend and the Docker files.
+  - Decide whether the pytest API suite is ported to Rust or kept as a test-only tool. Either way its Python mode and `python_only` tests go.
   - Update README, SPEC.md, and PRODUCT.md (Tauri and Rust, plus the cache clarification).
 - **Until then:** the Python backend keeps working unchanged, and the pytest suite stays the parity check for the Rust core.
 
 ## 4. Branches
 
-- `rust-desktop/integration` is the pivot's integration branch, cut from main at 0270c8d.
-- Sub-project 1 lives on `rust-desktop/skeleton`, branched from integration.
+- `rust-desktop/integration` is the pivot's integration branch, cut from main at 0270c8d. It holds sub-project 1 since 2026-10-08 (af7c0bd).
+- Each sub-project lives on its own `rust-desktop/<name>` branch from integration: sub-project 1 on `rust-desktop/skeleton`, sub-project 2 on `rust-desktop/parity`.
 - No merge into integration or main, and no pull request, without the user's go-ahead.
 
 ## 5. Open questions for the pivot
 
-- The branch for each later sub-project. Likely `rust-desktop/<name>` off integration; not yet decided.
-- When the skeleton branch merges into integration.
+- When integration merges into main.
