@@ -7,8 +7,8 @@ use axum::{Json, Router};
 
 use super::model::{ProjectCreate, ProjectSummary};
 use super::service;
-use crate::api::{ApiJson, blocking};
 use crate::error::ApiResult;
+use crate::http::deps::{ApiJson, blocking};
 use crate::runtime::AppState;
 
 pub fn routes() -> Router<AppState> {

@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 
 use arrow::ipc::reader::StreamReader;
 use duckdb::Connection;
+use quark_core::features::pages::model::{Format, PageBody};
+use quark_core::features::pages::service::run_page;
 use quark_core::features::sources::service::datasets;
 use quark_core::features::sources::uploads::register_upload;
-use quark_core::page::{Format, PageBody, run_page};
 use quark_core::relation::request::QueryRequest;
 use quark_core::relation::target::Target;
 use quark_core::runtime::AppState;

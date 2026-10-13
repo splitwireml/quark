@@ -1,6 +1,6 @@
 //! Tests for the upload and delete routes, including the body-limit and clean-up guarantees.
 
-use crate::api::router;
+use crate::http::router;
 use crate::runtime::AppState;
 use crate::runtime::dirs::Dirs;
 use axum::Router;

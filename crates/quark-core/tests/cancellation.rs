@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use duckdb::Connection;
-use quark_core::api::router;
+use quark_core::router;
 use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
 use serde_json::json;

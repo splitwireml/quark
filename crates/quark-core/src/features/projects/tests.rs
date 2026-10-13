@@ -1,7 +1,7 @@
 //! Tests for listing and creating projects, in the service and over HTTP.
 
 use super::service::{create_project, list_projects};
-use crate::api::router;
+use crate::http::router;
 use crate::runtime::AppState;
 use crate::runtime::dirs::Dirs;
 use crate::runtime::registry::load_projects;

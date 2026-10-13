@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use quark_core::api::router;
+use quark_core::router;
 use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
 use tokio::net::TcpListener;

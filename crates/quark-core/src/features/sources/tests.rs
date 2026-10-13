@@ -1,7 +1,7 @@
 //! Tests for listing sources, views and datasets, in the services and over HTTP.
 
 use super::service::{datasets, legacy_nodes, project_sources, project_views, source_detail};
-use crate::api::router;
+use crate::http::router;
 use crate::runtime::AppState;
 use crate::runtime::dirs::Dirs;
 use crate::runtime::state::fixtures::*;
