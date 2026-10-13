@@ -27,7 +27,7 @@ Made during brainstorming on 2026-10-01 and 2026-10-02:
 | # | Sub-project | Outcome | Status |
 |---|---|---|---|
 | 1 | Walking skeleton | Tauri app and Rust core on three OSes; projects, upload, paging, filter, sort and dedupe end to end; efficiency upgrades; CI | Implemented; deviations signed off; merged into integration; remaining H2 steps moved to sub-project 2's exit gate |
-| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; ICU time zones; read pool and the other efficiency upgrades; pytest runs against Rust | Designed; spec awaiting review |
+| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; ICU time zones; read pool and the other efficiency upgrades; pytest runs against Rust | Spec approved; plan written (47 units, 15 batches); not started |
 | 3 | Native files and OS integration | Open files in place, native dialogs, drag and drop, native export save, file associations, single instance, default-app card | Not started |
 | 4 | Release | Signing, notarization, installers, updates, app icon, version scheme | Not started |
 | 5 | Retire Python | Remove FastAPI and Docker; port pytest to Rust or keep it as a test-only tool; update README, PRODUCT.md and SPEC.md | Not started |
@@ -57,7 +57,7 @@ Port every remaining endpoint so the Rust core can replace FastAPI, and take the
 
 - **Scope:** column stats, category values, charts, joins, exports, cell find, attach and the source path; offline XLSX with calamine and rust_xlsxwriter; ICU compiled into DuckDB; a read pool per engine; a response cache; three visible behaviour fixes; the code reshaped into feature folders with a CI-enforced layout.
 - **Settled in its design:** the legacy routes stay until sub-project 5; time zones use ICU; the pytest suite stays the API test suite and runs against Rust, and sub-project 5 decides whether to port it.
-- **Documents:** design `2026-10-08-rust-desktop-parity-design.md`; planning notes `2026-10-05-sp2-backend-parity-notes.md`.
+- **Documents:** design `2026-10-08-rust-desktop-parity-design.md`; plan `2026-10-08-rust-desktop-parity.md`; orchestration map `2026-10-08-rust-desktop-parity-orchestration.md`; planning notes `2026-10-05-sp2-backend-parity-notes.md`.
 - **Branch:** `rust-desktop/parity`, from integration.
 
 ### 3.3 Native files and OS integration

@@ -1,6 +1,6 @@
 # Quark desktop, sub-project 2: backend parity
 
-Date: 2026-10-08. Status: design, awaiting review. Part 2 of the Rust desktop pivot. The pivot, all of its sub-projects and their status are in `2026-10-04-rust-desktop-pivot-design.md`.
+Date: 2026-10-08. Status: approved 2026-10-13. Implementation plan: `2026-10-08-rust-desktop-parity.md`, scheduled in `2026-10-08-rust-desktop-parity-orchestration.md`. Part 2 of the Rust desktop pivot. The pivot, all of its sub-projects and their status are in `2026-10-04-rust-desktop-pivot-design.md`.
 
 Read with: the skeleton design `2026-10-02-rust-desktop-skeleton-design.md` (section 5 sets the parity rules, section 6 the caches), the signed-off deviations `2026-10-04-skeleton-exit-deviations.md`, and the planning notes `2026-10-05-sp2-backend-parity-notes.md`.
 
@@ -21,7 +21,7 @@ Made during brainstorming on 2026-10-06 to 2026-10-08:
   - The API contract stays identical to Python: response shapes, field names, status codes, handled-error `detail` text, identifiers, values after JSON parsing, and the data folder format. The frontend does not change.
   - Internals and performance are free to change.
   - Three visible behaviour fixes are allowed (section 7).
-  - One error-path difference is proposed for review: an unreadable workbook returns 400 instead of Python's 500 (section 7).
+  - One error-path difference, approved with the spec: an unreadable workbook returns 400 instead of Python's 500 (section 7).
   - Nothing else visible changes.
 - **Tests:**
   - The existing pytest suite stays the API test suite and runs against the Rust server (`QUARK_TEST_BACKEND=rust`). It is the only suite that runs against both backends, which makes it the parity proof.
@@ -305,7 +305,7 @@ The importer (calamine to typed tables in a cache file) lives in `runtime/cache/
     - the declared types.
   - Sprint 1's XLSX test build records these rules by comparing Python's `read_xlsx` with calamine on generated workbooks.
   - A corpus of workbooks then becomes pytest cases that run on both backends. It covers numbers, dates, times, datetimes, booleans, mixed columns, empty cells, cached formula results, shared strings, unicode and apostrophe sheet names, and header-only sheets.
-- **Unreadable workbook.** This is the proposed error-path difference (section 7). A file that is not a valid workbook, or that has no sheets, returns 400 `Could not open source: <reason>` and is deleted. Python answers a plain-text 500 here.
+- **Unreadable workbook.** This is the approved error-path difference (section 7). A file that is not a valid workbook, or that has no sheets, returns 400 `Could not open source: <reason>` and is deleted. Python answers a plain-text 500 here.
 
 ## 7. Behaviour fixes
 
@@ -317,7 +317,7 @@ Each fix replaces a Python shortcut. For each one, the existing test that pins P
 | 2 | Grouped histograms skip the group for date and huge-integer columns (app.py 1602) | Grouped counts work for every bin type | `test_visualize_histogram_skips_series_for_a_date_column` becomes `python_only`; a new `rust_only` test checks date series share the bin edges |
 | 3 | One global join slot: a second cross-source join invalidates the first (app.py 407) | Up to 4 join workspaces, least recently used evicted | `test_cross_node_join_workspace_replaces_previous_without_listing_it` becomes `python_only`; a new `rust_only` test checks two joins stay queryable, a fifth evicts the oldest (404), and none are listed |
 
-**Proposed error-path difference (needs sign-off in review).**
+**Error-path difference (approved with the spec on 2026-10-13).**
 
 - **Case:** an upload named `.xlsx` that is not a valid workbook, or that has no sheets.
 - **Python:** raises an unhandled exception, so it answers a plain-text 500.
