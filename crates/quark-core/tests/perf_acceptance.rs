@@ -15,8 +15,8 @@ use duckdb::Connection;
 use quark_core::page::{Format, PageBody, run_page};
 use quark_core::relation::request::QueryRequest;
 use quark_core::relation::target::Target;
+use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
-use quark_core::state::AppState;
 use serde_json::{Value, json};
 
 const ROWS: u64 = 2_000_000;

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use duckdb::Connection;
 use quark_core::api::router;
+use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
-use quark_core::state::AppState;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;

@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use super::blocking;
 use crate::error::{ApiError, ApiResult};
+use crate::runtime::AppState;
 use crate::runtime::registry::DEFAULT_PROJECT_ID;
-use crate::state::AppState;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()

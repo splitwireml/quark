@@ -18,6 +18,7 @@ use quark_core::relation::builder::build_query;
 use quark_core::relation::describe::describe;
 use quark_core::relation::request::{Connector, Direction, Filter, QueryRequest, Sort};
 use quark_core::relation::target::Target;
+use quark_core::runtime::AppState;
 use quark_core::runtime::cache::results::ResultAction;
 use quark_core::runtime::cache::stats::stats_key;
 use quark_core::runtime::dirs::Dirs;
@@ -26,7 +27,6 @@ use quark_core::runtime::registry::SourceRecord;
 use quark_core::shared::columns::ColumnMeta;
 use quark_core::shared::ids::dataset_id;
 use quark_core::shared::sql::scan_expression;
-use quark_core::state::AppState;
 use serde_json::{Value, json};
 
 const ROWS: i64 = 20_000;

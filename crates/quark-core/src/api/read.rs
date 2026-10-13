@@ -8,10 +8,10 @@ use serde::Deserialize;
 
 use super::{ApiJson, blocking};
 use crate::error::ApiResult;
+use crate::runtime::AppState;
+use crate::runtime::catalog::{LegacyNode, ProjectSummary, SourceDetail, SourceSummary};
+use crate::runtime::engines::DatasetEntry;
 use crate::runtime::mount::ViewInfo;
-use crate::state::{
-    AppState, DatasetEntry, LegacyNode, ProjectSummary, SourceDetail, SourceSummary,
-};
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()

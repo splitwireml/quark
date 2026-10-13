@@ -3,9 +3,9 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use quark_core::api::router;
+use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
 use quark_core::secure::{SecurityConfig, desktop_origins, generate_token, is_app_origin, secure};
-use quark_core::state::AppState;
 use tauri::webview::PageLoadEvent;
 use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tracing_appender::non_blocking::WorkerGuard;

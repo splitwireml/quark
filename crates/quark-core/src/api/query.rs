@@ -11,9 +11,9 @@ use crate::error::{ApiError, ApiResult};
 use crate::page::{Format, PageBody, run_page};
 use crate::relation::request::{QueryRequest, SqlQueryRequest};
 use crate::relation::target::Target;
+use crate::runtime::AppState;
 use crate::runtime::cancel::Cancelled;
 use crate::shared::encode::arrow::ARROW_MEDIA_TYPE;
-use crate::state::AppState;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -97,10 +97,10 @@ async fn page(
 mod tests {
     use super::super::{blocking, router};
     use crate::error::ApiResult;
+    use crate::runtime::AppState;
     use crate::runtime::dirs::Dirs;
     use crate::shared::encode::arrow::ARROW_MEDIA_TYPE;
     use crate::shared::ids::dataset_id;
-    use crate::state::AppState;
     use arrow::ipc::reader::StreamReader;
     use axum::Router;
     use axum::body::Body;
