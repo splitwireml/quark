@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::{ApiJson, blocking};
 use crate::error::ApiResult;
-use crate::mount::ViewInfo;
+use crate::runtime::mount::ViewInfo;
 use crate::state::{
     AppState, DatasetEntry, LegacyNode, ProjectSummary, SourceDetail, SourceSummary,
 };
@@ -86,7 +86,7 @@ async fn list_datasets(
 mod tests {
     use super::super::router;
     use super::*;
-    use crate::engine::Dirs;
+    use crate::runtime::dirs::Dirs;
     use axum::body::Body;
     use axum::http::{Method, Request};
     use http_body_util::BodyExt;

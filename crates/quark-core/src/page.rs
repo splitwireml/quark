@@ -8,14 +8,14 @@ use duckdb::arrow::record_batch::RecordBatch;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
-use crate::cache::stats::{StatsEntry, stats_key};
-use crate::engine::EngineInner;
 use crate::error::{ApiError, ApiResult};
 use crate::relation::builder::build_query;
 use crate::relation::params::bind;
 use crate::relation::request::QueryRequest;
 use crate::relation::target::{Target, resolve};
+use crate::runtime::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
+use crate::runtime::cache::stats::{StatsEntry, stats_key};
+use crate::runtime::engine::EngineInner;
 use crate::shared::columns::{ColumnMeta, ColumnSummary};
 use crate::shared::encode::arrow::encode_page;
 use crate::shared::encode::cell::cell_json;
@@ -247,11 +247,12 @@ pub fn run_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::results::{ResultCache, table_name};
-    use crate::engine::{Dirs, Engine};
-    use crate::registry::SourceRecord;
     use crate::relation::describe::datasets;
     use crate::relation::request::{Direction, Filter, Sort};
+    use crate::runtime::cache::results::{ResultCache, table_name};
+    use crate::runtime::dirs::Dirs;
+    use crate::runtime::engine::Engine;
+    use crate::runtime::registry::SourceRecord;
     use crate::shared::ids::dataset_id;
     use arrow::ipc::reader::StreamReader;
     use duckdb::Connection;

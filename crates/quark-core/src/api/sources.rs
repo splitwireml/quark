@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::blocking;
 use crate::error::{ApiError, ApiResult};
-use crate::registry::DEFAULT_PROJECT_ID;
+use crate::runtime::registry::DEFAULT_PROJECT_ID;
 use crate::state::AppState;
 
 pub(super) fn routes() -> Router<AppState> {
@@ -143,7 +143,7 @@ async fn delete_node(
 mod tests {
     use super::super::router;
     use super::*;
-    use crate::engine::Dirs;
+    use crate::runtime::dirs::Dirs;
     use axum::body::{Body, Bytes};
     use axum::http::{Method, Request};
     use http_body_util::{BodyExt, Channel};

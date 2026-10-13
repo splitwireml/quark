@@ -15,15 +15,17 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::cache::columnar::{ColumnarKey, ColumnarWorker};
-use crate::engine::{Dirs, Engine};
 use crate::error::{ApiError, ApiResult};
-use crate::mount::{ViewInfo, database_paths, import_job};
-use crate::registry::{
+use crate::relation::describe::{DatasetInfo, describe};
+use crate::runtime::cache::columnar::ColumnarWorker;
+use crate::runtime::cache::columnar_key::ColumnarKey;
+use crate::runtime::dirs::Dirs;
+use crate::runtime::engine::Engine;
+use crate::runtime::mount::{ViewInfo, database_paths, import_job};
+use crate::runtime::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, default_project, load_projects,
     load_registry, save_projects, save_registry,
 };
-use crate::relation::describe::{DatasetInfo, describe};
 use crate::shared::naming::dataset_name;
 use crate::shared::sql::quote_ident;
 
@@ -631,7 +633,7 @@ fn remove_orphan_uploads(uploads: &Path, registry: &[RawRecord]) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::EngineKind;
+    use crate::runtime::engine::EngineKind;
     use serde_json::json;
     use std::time::{Instant, SystemTime};
 

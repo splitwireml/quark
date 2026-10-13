@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 
 use arrow::ipc::reader::StreamReader;
 use duckdb::Connection;
-use quark_core::engine::Dirs;
 use quark_core::page::{Format, PageBody, run_page};
 use quark_core::relation::request::QueryRequest;
 use quark_core::relation::target::Target;
+use quark_core::runtime::dirs::Dirs;
 use quark_core::state::AppState;
 use serde_json::{Value, json};
 

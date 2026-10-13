@@ -162,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn requests_are_logged_without_secrets() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = crate::engine::Dirs {
+        let dirs = crate::runtime::dirs::Dirs {
             data: root.path().join("data"),
             cache: root.path().join("cache"),
         };

@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use anyhow::Context;
 use quark_core::api::router;
-use quark_core::engine::Dirs;
+use quark_core::runtime::dirs::Dirs;
 use quark_core::state::AppState;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
