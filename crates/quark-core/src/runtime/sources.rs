@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
@@ -21,9 +20,7 @@ impl AppState {
 
     /// Opens the engine behind `source`; a file that cannot be read is a 400.
     pub(crate) fn open_node_engine(&self, source: &SourceRecord) -> ApiResult<Engine> {
-        let generation = self.0.next_generation.fetch_add(1, Ordering::Relaxed);
-        Engine::open_node(source, &self.0.dirs, generation)
-            .map_err(|error| cannot_open(format!("{error:#}")))
+        Engine::open_node(source, &self.0.dirs).map_err(|error| cannot_open(format!("{error:#}")))
     }
 
     /// Adds an opened source to its project: the registry entry is saved before the catalog changes.

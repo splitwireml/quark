@@ -14,7 +14,7 @@ fn engine() -> Arc<Engine> {
     let kind = EngineKind::Node {
         node_id: "s1".to_owned(),
     };
-    Arc::new(Engine::new(kind, 1, Connection::open_in_memory().unwrap()))
+    Arc::new(Engine::new(kind, Connection::open_in_memory().unwrap()))
 }
 
 /// Runs short queries on the ticket until `release` is set; reports each query's success.

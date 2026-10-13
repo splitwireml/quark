@@ -247,7 +247,7 @@ fn header_only_csv_is_an_empty_page() {
         data: root.path().join("data"),
         cache: root.path().join("cache"),
     };
-    let engine = Engine::open_node(&record, &dirs, 1).unwrap();
+    let engine = Engine::open_node(&record, &dirs).unwrap();
 
     let body = json_body(
         run_page(

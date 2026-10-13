@@ -1,7 +1,6 @@
 //! Unit tests for Arrow stream encoding of query results.
 
 use super::*;
-use crate::relation::describe::describe;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Int32Type};
 use arrow::ipc::reader::StreamReader;
@@ -16,10 +15,25 @@ fn meta() -> Map<String, Value> {
         .unwrap()
 }
 
+/// Column names and types of `sql`, as DuckDB describes them.
+fn describe_columns(conn: &Connection, sql: &str) -> Vec<ColumnMeta> {
+    let mut statement = conn.prepare(&format!("DESCRIBE {sql}")).unwrap();
+    statement
+        .query_map([], |row| {
+            Ok(ColumnMeta {
+                name: row.get(0)?,
+                type_name: row.get(1)?,
+            })
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 /// Runs `sql` and encodes the result the way `run_page` does.
 fn encode(sql: &str, keep_batches: bool) -> (Vec<RecordBatch>, Vec<u8>) {
     let conn = Connection::open_in_memory().unwrap();
-    let columns = describe(&conn, "query(?)", &[&sql]).unwrap();
+    let columns = describe_columns(&conn, sql);
     let mut statement = conn.prepare(sql).unwrap();
     let arrow = statement.query_arrow([]).unwrap();
     let schema = arrow.get_schema();

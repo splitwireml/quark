@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::fs;
 use std::io;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use anyhow::Context;
@@ -35,7 +34,6 @@ pub(crate) fn invalid_value(error: impl Display) -> ApiError {
 pub struct Shared {
     pub dirs: Dirs,
     pub catalog: Mutex<Catalog>,
-    pub next_generation: AtomicU64,
     /// Fills the columnar cache; `None` once the app has shut down.
     columnar: Mutex<Option<ColumnarWorker>>,
 }
@@ -83,7 +81,6 @@ impl AppState {
                     engines: HashMap::new(),
                     remount: HashSet::new(),
                 }),
-                next_generation: AtomicU64::new(1),
                 columnar: Mutex::new(Some(worker)),
             }
         });

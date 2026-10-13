@@ -319,7 +319,7 @@ fn first_second_and_built_results_match_the_oracle() {
             .iter()
             .map(|&page| oracle.expect(&case.request(page)))
             .collect();
-        let engine = Engine::open_node(&source, &dirs, 1).unwrap();
+        let engine = Engine::open_node(&source, &dirs).unwrap();
         let check = |at: usize, phase| {
             assert_matches(&engine, case, offsets[at], &expected[at], phase);
         };

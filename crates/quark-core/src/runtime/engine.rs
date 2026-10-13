@@ -52,7 +52,6 @@ impl EngineInner {
 
 pub struct Engine {
     pub kind: EngineKind,
-    pub generation: u64,
     // ponytail: one query at a time per engine; parallel reads are the upgrade path (sub-project 2).
     inner: Mutex<EngineInner>,
     pub(crate) interrupt: Arc<InterruptHandle>,
@@ -64,10 +63,9 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(kind: EngineKind, generation: u64, conn: Connection) -> Self {
+    pub fn new(kind: EngineKind, conn: Connection) -> Self {
         Self {
             kind,
-            generation,
             interrupt: conn.interrupt_handle(),
             inner: Mutex::new(EngineInner::new(conn)),
             active: Mutex::new(None),
@@ -82,11 +80,7 @@ impl Engine {
     }
 
     /// Opens a source on its own connection: databases read-only, flat files behind one view.
-    pub fn open_node(
-        source: &SourceRecord,
-        dirs: &Dirs,
-        generation: u64,
-    ) -> anyhow::Result<Engine> {
+    pub fn open_node(source: &SourceRecord, dirs: &Dirs) -> anyhow::Result<Engine> {
         let extension = source
             .source
             .extension()
@@ -127,7 +121,7 @@ impl Engine {
         let kind = EngineKind::Node {
             node_id: source.id.clone(),
         };
-        Ok(Engine::new(kind, generation, conn))
+        Ok(Engine::new(kind, conn))
     }
 }
 

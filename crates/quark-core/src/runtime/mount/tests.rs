@@ -33,7 +33,7 @@ fn record(file: &Path, dataset_name: Option<&str>) -> SourceRecord {
 }
 
 fn workspace(source: &SourceRecord, root: &Path) -> Engine {
-    Engine::open_workspace(&project(), std::slice::from_ref(source), &dirs_in(root), 1).unwrap()
+    Engine::open_workspace(&project(), std::slice::from_ref(source), &dirs_in(root)).unwrap()
 }
 
 fn csv(root: &Path, name: &str) -> std::path::PathBuf {
@@ -176,7 +176,7 @@ fn workspace_cannot_read_unlisted_files() {
     assert_eq!(rows(&listed).unwrap(), 2);
     assert!(rows(&unlisted).is_err());
 
-    let empty = Engine::open_workspace(&project(), &[], &dirs_in(root.path()), 1).unwrap();
+    let empty = Engine::open_workspace(&project(), &[], &dirs_in(root.path())).unwrap();
     let scan = scan_expression(&listed.to_string_lossy()).unwrap();
     assert!(
         empty
@@ -223,7 +223,7 @@ fn workspace_allow_list_is_exact() {
     expected.sort();
 
     let sources = [flat, other];
-    let engine = Engine::open_workspace(&project(), &sources, &dirs_in(root.path()), 1).unwrap();
+    let engine = Engine::open_workspace(&project(), &sources, &dirs_in(root.path())).unwrap();
     let mut allowed: Vec<String> = engine
         .lock()
         .conn
@@ -345,7 +345,7 @@ fn engines_with_a_ready_cache_list_only_their_view() {
     };
     let only_view = [("data".to_owned(), "VIEW".to_owned())];
 
-    let node = Engine::open_node(&source, &dirs_in(root.path()), 1).unwrap();
+    let node = Engine::open_node(&source, &dirs_in(root.path())).unwrap();
     let workspace = workspace(&source, root.path());
     workspace.mount(&project(), &source).unwrap();
 

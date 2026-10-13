@@ -90,7 +90,6 @@ impl Engine {
         project: &ProjectRecord,
         sources: &[SourceRecord],
         dirs: &Dirs,
-        generation: u64,
     ) -> anyhow::Result<Engine> {
         let conn = Connection::open_in_memory()?;
         configure_spill(&conn, dirs)?;
@@ -116,7 +115,7 @@ impl Engine {
             project_id: project.id.clone(),
             node_id: project.node_id.clone(),
         };
-        let mut engine = Engine::new(kind, generation, conn);
+        let mut engine = Engine::new(kind, conn);
         engine.caches = caches;
         Ok(engine)
     }

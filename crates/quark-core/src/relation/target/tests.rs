@@ -1,3 +1,5 @@
+//! Unit tests for resolving a request to its target relation.
+
 use super::*;
 use duckdb::Connection;
 

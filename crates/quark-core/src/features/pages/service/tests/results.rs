@@ -158,7 +158,7 @@ fn engine_rebuild_drops_results() {
         cache: root.path().join("cache"),
     };
     let request = sorted_by_id(1, Direction::Asc);
-    let first = Engine::open_node(&record, &dirs, 1).unwrap();
+    let first = Engine::open_node(&record, &dirs).unwrap();
     {
         let mut inner = first.lock();
         run_page(&mut inner, &dataset("rows"), &request, Format::Json).unwrap();
@@ -168,7 +168,7 @@ fn engine_rebuild_drops_results() {
     }
 
     drop(first);
-    let second = Engine::open_node(&record, &dirs, 2).unwrap();
+    let second = Engine::open_node(&record, &dirs).unwrap();
     let mut inner = second.lock();
     assert_eq!(result_tables(&inner.conn), 0);
     run_page(&mut inner, &dataset("rows"), &request, Format::Json).unwrap();
@@ -198,7 +198,7 @@ fn database_node_builds_result_cache() {
         data: root.path().join("data"),
         cache: root.path().join("cache"),
     };
-    let engine = Engine::open_node(&record, &dirs, 1).unwrap();
+    let engine = Engine::open_node(&record, &dirs).unwrap();
     let mut inner = engine.lock();
     let request = sorted_by_id(1, Direction::Asc);
     let first = run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap();

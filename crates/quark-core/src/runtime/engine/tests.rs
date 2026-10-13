@@ -34,7 +34,7 @@ fn record(file: &Path, dataset_name: Option<&str>) -> SourceRecord {
 }
 
 fn open(file: &Path, dataset_name: Option<&str>, root: &Path) -> anyhow::Result<Engine> {
-    Engine::open_node(&record(file, dataset_name), &dirs_in(root), 1)
+    Engine::open_node(&record(file, dataset_name), &dirs_in(root))
 }
 
 fn names(engine: &Engine) -> Vec<(String, String, String)> {
@@ -175,7 +175,6 @@ fn poisoned_engine_lock_recovers() {
         EngineKind::Node {
             node_id: "s1".to_owned(),
         },
-        1,
         Connection::open_in_memory().unwrap(),
     ));
     let held = std::sync::Arc::clone(&engine);

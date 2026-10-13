@@ -1,3 +1,5 @@
+//! Unit tests for the shared request types.
+
 use super::*;
 use serde_json::json;
 

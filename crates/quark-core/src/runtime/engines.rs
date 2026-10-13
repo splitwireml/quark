@@ -1,7 +1,6 @@
 //! Opening engines on demand: a node's own engine, a project's workspace and its mounted sources.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::{cell::RefCell, rc::Rc};
 
@@ -95,8 +94,10 @@ impl AppState {
                 Err(error) if plan.is_current(&catalog) => return Err(error),
                 Err(_) => continue,
             };
-            if let Some(existing) = catalog.engines.get(plan.key()) {
-                return Ok(Arc::clone(existing));
+            if let Some(existing) = catalog.engines.get(plan.key()).map(Arc::clone) {
+                // The losing engine drops after the guard, so its connection never closes under the lock.
+                drop(catalog);
+                return Ok(existing);
             }
             if plan.is_current(&catalog) {
                 plan.insert(&mut catalog, &engine);
@@ -104,6 +105,7 @@ impl AppState {
                 self.queue_node_import(&plan);
                 return Ok(engine);
             }
+            drop(catalog);
         }
         // The catalog keeps changing: open under the lock so the call still ends.
         let mut catalog = self.catalog();
@@ -126,8 +128,7 @@ impl AppState {
                 sources,
                 is_remount,
             } => {
-                let generation = self.0.next_generation.fetch_add(1, Ordering::Relaxed);
-                let engine = Engine::open_workspace(project, sources, &self.0.dirs, generation)
+                let engine = Engine::open_workspace(project, sources, &self.0.dirs)
                     .map_err(invalid_value)?;
                 if *is_remount {
                     for source in sources {

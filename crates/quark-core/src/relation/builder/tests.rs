@@ -1,3 +1,5 @@
+//! Unit tests for building filtered, sorted relations.
+
 use super::*;
 use crate::relation::request::Sort;
 use serde_json::json;

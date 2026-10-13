@@ -1,3 +1,5 @@
+//! Unit tests for dataset listing and relation description.
+
 use super::*;
 
 #[test]

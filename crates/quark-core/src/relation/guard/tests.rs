@@ -1,3 +1,5 @@
+//! Unit tests for the read-only SQL guard.
+
 use super::*;
 
 fn conn() -> Connection {
