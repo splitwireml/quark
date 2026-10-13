@@ -9,8 +9,9 @@ use axum::{Json, Router};
 use super::{ApiJson, blocking};
 use crate::cancel::Cancelled;
 use crate::error::{ApiError, ApiResult};
-use crate::page::{Format, PageBody, PageTarget, run_page};
-use crate::query::{QueryRequest, SqlQueryRequest};
+use crate::page::{Format, PageBody, run_page};
+use crate::relation::request::{QueryRequest, SqlQueryRequest};
+use crate::relation::target::Target;
 use crate::shared::encode::arrow::ARROW_MEDIA_TYPE;
 use crate::state::AppState;
 
@@ -29,14 +30,7 @@ async fn dataset_query(
     headers: HeaderMap,
     ApiJson(request): ApiJson<QueryRequest>,
 ) -> ApiResult<Response> {
-    page(
-        state,
-        node_id,
-        PageTarget::Dataset(dataset),
-        request,
-        &headers,
-    )
-    .await
+    page(state, node_id, Target::Dataset(dataset), request, &headers).await
 }
 
 async fn sql_query(
@@ -45,7 +39,7 @@ async fn sql_query(
     headers: HeaderMap,
     ApiJson(request): ApiJson<SqlQueryRequest>,
 ) -> ApiResult<Response> {
-    let target = PageTarget::Sql(request.sql.clone());
+    let target = Target::Sql(request.sql.clone());
     page(state, node_id, target, request.query(), &headers).await
 }
 
@@ -60,7 +54,7 @@ fn wants_arrow(headers: &HeaderMap) -> bool {
 async fn page(
     state: AppState,
     node_id: String,
-    target: PageTarget,
+    target: Target,
     request: QueryRequest,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {

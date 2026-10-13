@@ -9,10 +9,9 @@ use duckdb::{Connection, params};
 use serde::Serialize;
 
 use crate::cache::columnar::{ColumnarJob, ColumnarKey};
-use crate::engine::{
-    DatasetInfo, Dirs, Engine, EngineKind, configure_spill, describe, lock_down_paths,
-};
+use crate::engine::{Dirs, Engine, EngineKind, configure_spill, lock_down_paths};
 use crate::registry::{ProjectRecord, SourceRecord};
+use crate::relation::describe::{DatasetInfo, describe};
 use crate::shared::ids::{database_alias, dataset_id, source_schema, view_id};
 use crate::shared::sql::{quote_ident, scan_expression, sql_string};
 
@@ -580,7 +579,7 @@ mod tests {
         let source = record(&csv(root.path(), "claims.csv"), None);
         let key = build_cache(&source, root.path());
         let listed = |engine: &Engine| -> Vec<(String, String)> {
-            crate::engine::datasets(&engine.lock().conn)
+            crate::relation::describe::datasets(&engine.lock().conn)
                 .unwrap()
                 .into_iter()
                 .map(|item| (item.name, item.kind))

@@ -16,13 +16,14 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::cache::columnar::{ColumnarKey, ColumnarWorker};
-use crate::engine::{DatasetInfo, Dirs, Engine, describe};
+use crate::engine::{Dirs, Engine};
 use crate::error::{ApiError, ApiResult};
 use crate::mount::{ViewInfo, database_paths, import_job};
 use crate::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, default_project, load_projects,
     load_registry, save_projects, save_registry,
 };
+use crate::relation::describe::{DatasetInfo, describe};
 use crate::shared::naming::dataset_name;
 use crate::shared::sql::quote_ident;
 
@@ -366,7 +367,7 @@ impl AppState {
     pub fn datasets(&self, node_id: &str) -> ApiResult<Vec<DatasetEntry>> {
         let engine = self.engine_for_node(node_id)?;
         let inner = engine.lock();
-        crate::engine::datasets(&inner.conn)
+        crate::relation::describe::datasets(&inner.conn)
             .map_err(invalid_value)?
             .into_iter()
             .map(|info| {
@@ -495,7 +496,7 @@ impl AppState {
         let generation = self.0.next_generation.fetch_add(1, Ordering::Relaxed);
         let engine = Engine::open_node(&source, &self.0.dirs, generation)
             .map_err(|error| cannot_open(format!("{error:#}")))?;
-        crate::engine::datasets(&engine.lock().conn).map_err(cannot_open)?;
+        crate::relation::describe::datasets(&engine.lock().conn).map_err(cannot_open)?;
 
         let mut record = RawRecord::new();
         record.insert("id".into(), source.id.clone().into());

@@ -8,16 +8,13 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, bail};
-use duckdb::{AccessMode, Config, Connection, InterruptHandle, ToSql};
-use serde::Serialize;
+use duckdb::{AccessMode, Config, Connection, InterruptHandle};
 
 use crate::cache::columnar::ColumnarKey;
 use crate::cache::results::ResultCache;
 use crate::cache::stats::StatsCache;
 use crate::mount::{ViewInfo, attach_cache, import_job};
 use crate::registry::SourceRecord;
-use crate::shared::columns::ColumnMeta;
-use crate::shared::ids::dataset_id;
 use crate::shared::sql::{quote_ident, scan_expression, sql_string};
 
 #[derive(Debug, thiserror::Error)]
@@ -87,16 +84,6 @@ fn lock_down(conn: &Connection, setting: &str, allowed: &[String]) -> Result<(),
     }
     conn.execute_batch("SET enable_external_access = false")?;
     Ok(())
-}
-
-/// One table or view in an engine, as listed by `GET /datasets`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DatasetInfo {
-    pub id: String,
-    pub name: String,
-    pub schema: String,
-    #[serde(rename = "type")]
-    pub kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,53 +201,11 @@ impl Engine {
     }
 }
 
-/// Lists user tables and views, ordered by schema then name.
-pub fn datasets(conn: &Connection) -> duckdb::Result<Vec<DatasetInfo>> {
-    // The attached columnar caches hold the same rows as the views over them.
-    let mut statement = conn.prepare(
-        "SELECT schema_name, table_name, 'TABLE' FROM duckdb_tables()
-         WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog', 'quark_results')
-           AND NOT regexp_full_match(database_name, 'cache_[0-9a-f]{16}')
-         UNION ALL
-         SELECT schema_name, view_name, 'VIEW' FROM duckdb_views()
-         WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog', 'quark_results')
-           AND NOT regexp_full_match(database_name, 'cache_[0-9a-f]{16}')
-         ORDER BY 1, 2",
-    )?;
-    statement
-        .query_map([], |row| {
-            let schema: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            Ok(DatasetInfo {
-                id: dataset_id(&schema, &name),
-                name,
-                schema,
-                kind: row.get(2)?,
-            })
-        })?
-        .collect()
-}
-
-/// Column names and types of `relation`, which may contain `?` placeholders bound from `params`.
-pub fn describe(
-    conn: &Connection,
-    relation: &str,
-    params: &[&dyn ToSql],
-) -> duckdb::Result<Vec<ColumnMeta>> {
-    let mut statement = conn.prepare(&format!("DESCRIBE SELECT * FROM {relation}"))?;
-    statement
-        .query_map(params, |row| {
-            Ok(ColumnMeta {
-                name: row.get(0)?,
-                type_name: row.get(1)?,
-            })
-        })?
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relation::describe::datasets;
+    use crate::shared::ids::dataset_id;
     use crate::shared::sql::scan_expression;
     use std::path::Path;
 
@@ -539,20 +484,5 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(open(&root.path().join("x.xlsx"), None, root.path()).is_err());
         assert!(open(&root.path().join("x.txt"), None, root.path()).is_err());
-    }
-
-    #[test]
-    fn describe_binds_params_and_reports_types() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE t (a INTEGER, b VARCHAR)")
-            .unwrap();
-
-        let columns = describe(&conn, "t WHERE a > ?", &[&1_i64]).unwrap();
-
-        let pairs: Vec<_> = columns
-            .iter()
-            .map(|c| (c.name.as_str(), c.type_name.as_str()))
-            .collect();
-        assert_eq!(pairs, [("a", "INTEGER"), ("b", "VARCHAR")]);
     }
 }

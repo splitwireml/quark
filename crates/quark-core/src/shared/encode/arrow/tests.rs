@@ -1,7 +1,7 @@
 //! Unit tests for Arrow stream encoding of query results.
 
 use super::*;
-use crate::engine::describe;
+use crate::relation::describe::describe;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Int32Type};
 use arrow::ipc::reader::StreamReader;

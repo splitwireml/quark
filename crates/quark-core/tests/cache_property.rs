@@ -15,10 +15,13 @@ use duckdb::params_from_iter;
 use duckdb::types::Value as Cell;
 use quark_core::cache::results::ResultAction;
 use quark_core::cache::stats::stats_key;
-use quark_core::engine::{Dirs, Engine, describe};
-use quark_core::page::{Format, PageBody, PageTarget, run_page};
-use quark_core::query::{Connector, Direction, Filter, QueryRequest, Sort, build_query};
+use quark_core::engine::{Dirs, Engine};
+use quark_core::page::{Format, PageBody, run_page};
 use quark_core::registry::SourceRecord;
+use quark_core::relation::builder::build_query;
+use quark_core::relation::describe::describe;
+use quark_core::relation::request::{Connector, Direction, Filter, QueryRequest, Sort};
+use quark_core::relation::target::Target;
 use quark_core::shared::columns::ColumnMeta;
 use quark_core::shared::ids::dataset_id;
 use quark_core::shared::sql::scan_expression;
@@ -265,7 +268,7 @@ fn assert_matches(engine: &Engine, case: &Case, page: i64, expected: &Expected, 
     let request = case.request(page);
     let body = {
         let mut inner = engine.lock();
-        let target = PageTarget::Dataset(dataset_id("main", "data"));
+        let target = Target::Dataset(dataset_id("main", "data"));
         run_page(&mut inner, &target, &request, Format::Json).unwrap()
     };
     let PageBody::Json(body) = body else {

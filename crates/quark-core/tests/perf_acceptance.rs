@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use arrow::ipc::reader::StreamReader;
 use duckdb::Connection;
 use quark_core::engine::Dirs;
-use quark_core::page::{Format, PageBody, PageTarget, run_page};
-use quark_core::query::QueryRequest;
+use quark_core::page::{Format, PageBody, run_page};
+use quark_core::relation::request::QueryRequest;
+use quark_core::relation::target::Target;
 use quark_core::state::AppState;
 use serde_json::{Value, json};
 
@@ -67,7 +68,7 @@ fn sorted_by_price(page: i64) -> QueryRequest {
 fn timed_page(state: &AppState, dataset: &str, request: &QueryRequest) -> Duration {
     let started = Instant::now();
     let engine = state.engine_for_node(NODE).unwrap();
-    let target = PageTarget::Dataset(dataset.to_owned());
+    let target = Target::Dataset(dataset.to_owned());
     let body = run_page(&mut engine.lock(), &target, request, Format::Arrow).unwrap();
     let elapsed = started.elapsed();
     let PageBody::Arrow(bytes) = body else {

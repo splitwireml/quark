@@ -2,31 +2,26 @@
 
 use std::time::Instant;
 
+use duckdb::Connection;
 use duckdb::arrow::datatypes::SchemaRef;
 use duckdb::arrow::record_batch::RecordBatch;
-use duckdb::types::{Null, ToSqlOutput};
-use duckdb::{Connection, ToSql, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
 use crate::cache::stats::{StatsEntry, stats_key};
-use crate::engine::{EngineInner, datasets, describe};
+use crate::engine::EngineInner;
 use crate::error::{ApiError, ApiResult};
-use crate::guard::check_select;
-use crate::query::{QueryRequest, build_query};
+use crate::relation::builder::build_query;
+use crate::relation::params::bind;
+use crate::relation::request::QueryRequest;
+use crate::relation::target::{Target, resolve};
 use crate::shared::columns::{ColumnMeta, ColumnSummary};
 use crate::shared::encode::arrow::encode_page;
 use crate::shared::encode::cell::cell_json;
 use crate::shared::naming::page_count;
 use crate::shared::sql::quote_ident;
 use crate::shared::types::{is_numeric, profile_kind};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PageTarget {
-    Dataset(String),
-    Sql(String),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -49,89 +44,6 @@ pub struct PageMeta {
 pub enum PageBody {
     Json(Value),
     Arrow(Vec<u8>),
-}
-
-/// Binds a JSON value as a DuckDB parameter; arrays and objects bind as their JSON text.
-struct Param<'a>(&'a Value);
-
-impl ToSql for Param<'_> {
-    fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
-        Ok(match self.0 {
-            Value::Null => Null.into(),
-            Value::Bool(flag) => (*flag).into(),
-            Value::Number(number) => match (number.as_i64(), number.as_u64()) {
-                (Some(signed), _) => signed.into(),
-                (None, Some(unsigned)) => unsigned.into(),
-                _ => number.as_f64().unwrap_or_default().into(),
-            },
-            Value::String(text) => ToSqlOutput::from(text.as_str()),
-            other => other.to_string().into(),
-        })
-    }
-}
-
-pub(crate) fn bind(params: &[Value]) -> impl duckdb::Params {
-    params_from_iter(params.iter().map(Param))
-}
-
-/// What a target resolves to before the request's filters and sorts are applied.
-struct Resolved {
-    table: String,
-    display_table: String,
-    columns: Vec<ColumnMeta>,
-    /// Parameters for placeholders inside `table`, bound before the filters'.
-    lead: Vec<Value>,
-    /// The `sql` to report when the request adds no filters, sorts or dedupe.
-    plain_sql: Option<String>,
-    error_prefix: &'static str,
-}
-
-fn internal(_: duckdb::Error) -> ApiError {
-    ApiError::internal("Internal error")
-}
-
-/// DuckDB parser failures mean the text is not a single SELECT; anything else is a bad query.
-fn describe_error(error: duckdb::Error) -> ApiError {
-    let text = error.to_string();
-    if text.starts_with("Parser Error") {
-        ApiError::unprocessable("SQL accepts only one read-only SELECT query")
-    } else {
-        ApiError::unprocessable(format!("Invalid SQL query: {text}"))
-    }
-}
-
-fn resolve(conn: &Connection, target: &PageTarget) -> ApiResult<Resolved> {
-    match target {
-        PageTarget::Dataset(id) => {
-            let item = datasets(conn)
-                .map_err(internal)?
-                .into_iter()
-                .find(|item| item.id == *id)
-                .ok_or_else(|| ApiError::not_found("Dataset not found"))?;
-            let table = format!("{}.{}", quote_ident(&item.schema), quote_ident(&item.name));
-            let columns = describe(conn, &table, &[]).map_err(internal)?;
-            Ok(Resolved {
-                display_table: table.clone(),
-                table,
-                columns,
-                lead: Vec::new(),
-                plain_sql: None,
-                error_prefix: "Invalid filter value: ",
-            })
-        }
-        PageTarget::Sql(sql) => {
-            let sql = check_select(conn, sql)?;
-            let columns = describe(conn, "query(?)", &[&sql]).map_err(describe_error)?;
-            Ok(Resolved {
-                table: "query(?)".to_owned(),
-                display_table: format!("({sql})"),
-                columns,
-                lead: vec![Value::String(sql.clone())],
-                plain_sql: Some(sql),
-                error_prefix: "Invalid SQL query: ",
-            })
-        }
-    }
 }
 
 /// The page's Arrow schema and batches.
@@ -234,7 +146,7 @@ fn rows_json(batches: &[RecordBatch], columns: &[ColumnMeta]) -> Vec<Value> {
 /// Runs one page of `target` with the request's filters, sorts and dedupe applied.
 pub fn run_page(
     inner: &mut EngineInner,
-    target: &PageTarget,
+    target: &Target,
     request: &QueryRequest,
     format: Format,
 ) -> ApiResult<PageBody> {
@@ -337,8 +249,9 @@ mod tests {
     use super::*;
     use crate::cache::results::{ResultCache, table_name};
     use crate::engine::{Dirs, Engine};
-    use crate::query::{Direction, Filter, Sort};
     use crate::registry::SourceRecord;
+    use crate::relation::describe::datasets;
+    use crate::relation::request::{Direction, Filter, Sort};
     use crate::shared::ids::dataset_id;
     use arrow::ipc::reader::StreamReader;
     use duckdb::Connection;
@@ -353,8 +266,8 @@ mod tests {
         EngineInner::new(conn)
     }
 
-    fn dataset(name: &str) -> PageTarget {
-        PageTarget::Dataset(dataset_id("main", name))
+    fn dataset(name: &str) -> Target {
+        Target::Dataset(dataset_id("main", name))
     }
 
     fn json_body(body: PageBody) -> Value {
@@ -606,7 +519,7 @@ mod tests {
     #[test]
     fn sql_target_display_rules() {
         let mut inner = inner("");
-        let sql = PageTarget::Sql("  select 7 as x  ".to_owned());
+        let sql = Target::Sql("  select 7 as x  ".to_owned());
 
         let plain =
             json_body(run_page(&mut inner, &sql, &QueryRequest::default(), Format::Json).unwrap());
@@ -644,7 +557,7 @@ mod tests {
         let run = |inner: &mut EngineInner, sql: &str| {
             run_page(
                 inner,
-                &PageTarget::Sql(sql.to_owned()),
+                &Target::Sql(sql.to_owned()),
                 &QueryRequest::default(),
                 Format::Json,
             )
@@ -669,24 +582,6 @@ mod tests {
             conversion.detail().starts_with("Invalid SQL query: "),
             "{}",
             conversion.detail()
-        );
-    }
-
-    #[test]
-    fn parser_errors_while_describing_say_select_only() {
-        let conn = Connection::open_in_memory().unwrap();
-
-        let parser = describe(&conn, "query(?)", &[&"selec 1"]).unwrap_err();
-        let other = describe(&conn, "query(?)", &[&"select * from missing"]).unwrap_err();
-
-        assert_eq!(
-            describe_error(parser).detail(),
-            "SQL accepts only one read-only SELECT query"
-        );
-        assert!(
-            describe_error(other)
-                .detail()
-                .starts_with("Invalid SQL query: ")
         );
     }
 

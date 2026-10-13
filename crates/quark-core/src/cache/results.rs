@@ -13,8 +13,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::mount::ViewInfo;
-use crate::page::bind;
-use crate::query::QueryRequest;
+use crate::relation::params::bind;
+use crate::relation::request::QueryRequest;
 
 /// Result tables per engine: only Building and Ready entries take a slot.
 const CAPACITY: usize = 4;
@@ -289,7 +289,7 @@ pub fn is_plain_scan<'a>(
 mod tests {
     use super::*;
     use crate::cache::stats::stats_key;
-    use crate::query::{Connector, Filter};
+    use crate::relation::request::{Connector, Filter};
     use serde_json::json;
     use std::time::{Duration, Instant};
 
