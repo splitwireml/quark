@@ -9,16 +9,18 @@ use duckdb::{Connection, ToSql, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::arrow::encode_page;
 use crate::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
 use crate::cache::stats::{StatsEntry, stats_key};
 use crate::engine::{EngineInner, datasets, describe};
 use crate::error::{ApiError, ApiResult};
 use crate::guard::check_select;
-use crate::naming::page_count;
-use crate::query::{ColumnMeta, QueryRequest, build_query};
-use crate::sql::quote_ident;
-use crate::values::{cell_json, is_numeric, profile_kind};
+use crate::query::{QueryRequest, build_query};
+use crate::shared::columns::{ColumnMeta, ColumnSummary};
+use crate::shared::encode::arrow::encode_page;
+use crate::shared::encode::cell::cell_json;
+use crate::shared::naming::page_count;
+use crate::shared::sql::quote_ident;
+use crate::shared::types::{is_numeric, profile_kind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageTarget {
@@ -30,16 +32,6 @@ pub enum PageTarget {
 pub enum Format {
     Json,
     Arrow,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ColumnSummary {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub type_name: String,
-    pub numeric: bool,
-    pub profile_kind: Option<&'static str>,
-    pub null_fraction: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -345,9 +337,9 @@ mod tests {
     use super::*;
     use crate::cache::results::{ResultCache, table_name};
     use crate::engine::{Dirs, Engine};
-    use crate::ids::dataset_id;
     use crate::query::{Direction, Filter, Sort};
     use crate::registry::SourceRecord;
+    use crate::shared::ids::dataset_id;
     use arrow::ipc::reader::StreamReader;
     use duckdb::Connection;
     use serde_json::json;

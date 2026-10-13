@@ -7,11 +7,11 @@ use axum::routing::post;
 use axum::{Json, Router};
 
 use super::{ApiJson, blocking};
-use crate::arrow::ARROW_MEDIA_TYPE;
 use crate::cancel::Cancelled;
 use crate::error::{ApiError, ApiResult};
 use crate::page::{Format, PageBody, PageTarget, run_page};
 use crate::query::{QueryRequest, SqlQueryRequest};
+use crate::shared::encode::arrow::ARROW_MEDIA_TYPE;
 use crate::state::AppState;
 
 pub(super) fn routes() -> Router<AppState> {
@@ -102,10 +102,10 @@ async fn page(
 #[cfg(test)]
 mod tests {
     use super::super::{blocking, router};
-    use crate::arrow::ARROW_MEDIA_TYPE;
     use crate::engine::Dirs;
     use crate::error::ApiResult;
-    use crate::ids::dataset_id;
+    use crate::shared::encode::arrow::ARROW_MEDIA_TYPE;
+    use crate::shared::ids::dataset_id;
     use crate::state::AppState;
     use arrow::ipc::reader::StreamReader;
     use axum::Router;

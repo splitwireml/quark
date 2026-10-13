@@ -4,7 +4,7 @@ use duckdb::Connection;
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
-use crate::sql::sql_string;
+use crate::shared::sql::sql_string;
 
 const SELECT_ONLY: &str = "SQL accepts only one read-only SELECT query";
 

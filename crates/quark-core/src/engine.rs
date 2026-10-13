@@ -14,11 +14,11 @@ use serde::Serialize;
 use crate::cache::columnar::ColumnarKey;
 use crate::cache::results::ResultCache;
 use crate::cache::stats::StatsCache;
-use crate::ids::dataset_id;
 use crate::mount::{ViewInfo, attach_cache, import_job};
-use crate::query::ColumnMeta;
 use crate::registry::SourceRecord;
-use crate::sql::{quote_ident, scan_expression, sql_string};
+use crate::shared::columns::ColumnMeta;
+use crate::shared::ids::dataset_id;
+use crate::shared::sql::{quote_ident, scan_expression, sql_string};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -261,7 +261,7 @@ pub fn describe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::scan_expression;
+    use crate::shared::sql::scan_expression;
     use std::path::Path;
 
     fn count_rows(conn: &Connection, file: &Path) -> duckdb::Result<i64> {

@@ -12,9 +12,9 @@ use crate::cache::columnar::{ColumnarJob, ColumnarKey};
 use crate::engine::{
     DatasetInfo, Dirs, Engine, EngineKind, configure_spill, describe, lock_down_paths,
 };
-use crate::ids::{database_alias, dataset_id, source_schema, view_id};
 use crate::registry::{ProjectRecord, SourceRecord};
-use crate::sql::{quote_ident, scan_expression, sql_string};
+use crate::shared::ids::{database_alias, dataset_id, source_schema, view_id};
+use crate::shared::sql::{quote_ident, scan_expression, sql_string};
 
 /// One mounted dataset, as listed by the project's views endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -16,13 +16,12 @@ use duckdb::types::Value as Cell;
 use quark_core::cache::results::ResultAction;
 use quark_core::cache::stats::stats_key;
 use quark_core::engine::{Dirs, Engine, describe};
-use quark_core::ids::dataset_id;
 use quark_core::page::{Format, PageBody, PageTarget, run_page};
-use quark_core::query::{
-    ColumnMeta, Connector, Direction, Filter, QueryRequest, Sort, build_query,
-};
+use quark_core::query::{Connector, Direction, Filter, QueryRequest, Sort, build_query};
 use quark_core::registry::SourceRecord;
-use quark_core::sql::scan_expression;
+use quark_core::shared::columns::ColumnMeta;
+use quark_core::shared::ids::dataset_id;
+use quark_core::shared::sql::scan_expression;
 use quark_core::state::AppState;
 use serde_json::{Value, json};
 

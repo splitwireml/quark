@@ -1,22 +1,16 @@
-//! Request types shared by the data endpoints, and column metadata for responses.
+//! Request types shared by the data endpoints.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::error::{ApiError, ApiResult};
-use crate::literal::literal;
-use crate::sql::quote_ident;
-use crate::values::is_text;
+use crate::shared::columns::ColumnMeta;
+use crate::shared::literal::literal;
+use crate::shared::sql::quote_ident;
+use crate::shared::types::is_text;
 
 const MAX_PAGE_SIZE: i64 = 1000;
-
-/// A column's name and DuckDB type, as reported in response metadata.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ColumnMeta {
-    pub name: String,
-    pub type_name: String,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]

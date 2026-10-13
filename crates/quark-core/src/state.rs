@@ -19,12 +19,12 @@ use crate::cache::columnar::{ColumnarKey, ColumnarWorker};
 use crate::engine::{DatasetInfo, Dirs, Engine, describe};
 use crate::error::{ApiError, ApiResult};
 use crate::mount::{ViewInfo, database_paths, import_job};
-use crate::naming::dataset_name;
 use crate::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, default_project, load_projects,
     load_registry, save_projects, save_registry,
 };
-use crate::sql::quote_ident;
+use crate::shared::naming::dataset_name;
+use crate::shared::sql::quote_ident;
 
 /// Longest raw project name, in Unicode scalar values.
 const PROJECT_NAME_LIMIT: usize = 200;

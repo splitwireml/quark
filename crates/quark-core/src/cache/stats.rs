@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use serde_json::Value;
 
-use crate::page::ColumnSummary;
+use crate::shared::columns::ColumnSummary;
 
 const CAPACITY: usize = 256;
 

@@ -365,7 +365,7 @@ fn remove_stray_partials(columnar_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::scan_expression;
+    use crate::shared::sql::scan_expression;
     use std::fs::File;
     use std::time::{Duration, Instant, SystemTime};
 
