@@ -12,7 +12,7 @@ anyhow = "1"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["clock"] }
 axum = { version = "0.8", features = ["multipart"] }
-duckdb = { version = "=1.10504.0", features = ["bundled", "parquet", "json"] }
+duckdb = { version = "=1.10504.0", git = "https://github.com/duckdb/duckdb-rs", tag = "v1.10504.0", features = ["bundled", "parquet", "json", "icu"] }
 getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
