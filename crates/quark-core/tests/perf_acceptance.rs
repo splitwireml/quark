@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use arrow::ipc::reader::StreamReader;
 use duckdb::Connection;
+use quark_core::features::sources::service::datasets;
+use quark_core::features::sources::uploads::register_upload;
 use quark_core::page::{Format, PageBody, run_page};
 use quark_core::relation::request::QueryRequest;
 use quark_core::relation::target::Target;
@@ -149,8 +151,8 @@ fn two_million_row_csv_meets_the_targets() {
         cache: root.path().join("cache"),
     };
     let state = AppState::load(dirs).unwrap();
-    state.register_upload(None, NODE, "perf.csv", &csv).unwrap();
-    let dataset = state.datasets(NODE).unwrap().remove(0).info.id;
+    register_upload(&state, None, NODE, "perf.csv", &csv).unwrap();
+    let dataset = datasets(&state, NODE).unwrap().remove(0).info.id;
     let mut table = Table::default();
 
     // The upload queued the columnar import, so this page runs on the live CSV beside it.

@@ -22,7 +22,7 @@ fn mount_failure_drops_the_workspace() {
         &[project("p")],
     );
 
-    let (status, detail) = failure(state.project_views("p"));
+    let (status, detail) = failure(project_views(&state, "p"));
 
     assert_eq!(status, 422);
     assert!(detail.starts_with("Invalid filter value: "), "{detail}");
@@ -72,13 +72,6 @@ fn engine_resolution() {
         &node,
         &state.engine_for_node("legacy").unwrap()
     ));
-    assert_eq!(
-        serde_json::to_value(state.datasets("legacy").unwrap()).unwrap(),
-        json!([{
-            "id": "WyJtYWluIiwiZGF0YSJd", "name": "data", "schema": "main",
-            "type": "VIEW", "columns": ["a", "b"],
-        }])
-    );
 
     for missing in ["a1", "nope", "gone"] {
         assert_eq!(
@@ -123,7 +116,7 @@ fn views_switch_to_cache_with_identical_rows() {
     let sources = [entry(root.path(), "s", Some("p"))];
     let state = started_with_worker(root.path(), &sources, &[project("p")]);
 
-    let live = state.project_views("p").unwrap();
+    let live = project_views(&state, "p").unwrap();
     let (live_rows, _) = read_view(&state, &live[0].sql);
     let cached = mount_and_wait_for_cache(&state, 1);
     let (cached_rows, definition) = read_view(&state, &cached[0].sql);
@@ -160,7 +153,7 @@ fn mounting_touches_the_cache_file() {
     let old = SystemTime::now() - 3 * day;
     set_modified_time(&file, old);
 
-    state.project_views("p").unwrap();
+    project_views(&state, "p").unwrap();
 
     assert!(fs::metadata(&file).unwrap().modified().unwrap() > old + day);
     state.shutdown();
@@ -175,7 +168,7 @@ fn restart_mounts_cache_directly() {
     first.shutdown();
 
     let second = AppState::load(dirs(root.path())).unwrap();
-    let views = second.project_views("p").unwrap();
+    let views = project_views(&second, "p").unwrap();
     let (rows, definition) = read_view(&second, &views[0].sql);
 
     assert_eq!(rows.len(), 2);
@@ -191,13 +184,13 @@ fn edited_source_gets_a_new_cache() {
     let sources = [entry(root.path(), "s", Some("p"))];
     let first = started_with_worker(root.path(), &sources, &[project("p")]);
     mount_and_wait_for_cache(&first, 1);
-    let views = first.project_views("p").unwrap();
+    let views = project_views(&first, "p").unwrap();
     let (_, old_definition) = read_view(&first, &views[0].sql);
     first.shutdown();
     write(&root.path().join("s.csv"), "a,b\n1,x\n2,y\n3,z\n");
 
     let second = AppState::load(dirs(root.path())).unwrap();
-    let views = second.project_views("p").unwrap();
+    let views = project_views(&second, "p").unwrap();
     let (rows, _) = read_view(&second, &views[0].sql);
     assert_eq!(rows.len(), 3);
     let views = mount_and_wait_for_cache(&second, 2);
@@ -221,7 +214,7 @@ fn purged_cache_falls_back_to_live() {
     }
 
     let second = AppState::load(dirs(root.path())).unwrap();
-    let views = second.project_views("p").unwrap();
+    let views = project_views(&second, "p").unwrap();
     let (rows, _) = read_view(&second, &views[0].sql);
 
     assert_eq!(rows.len(), 2);

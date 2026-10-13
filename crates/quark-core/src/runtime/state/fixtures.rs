@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::error::ApiResult;
 use crate::runtime::dirs::Dirs;
 use crate::runtime::mount::ViewInfo;
+use crate::runtime::registry::SourceRecord;
 use crate::runtime::state::AppState;
 
 pub(crate) fn dirs(root: &Path) -> Dirs {
@@ -82,6 +83,16 @@ pub(crate) fn cache_files(dirs: &Dirs) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Mounts every source of the project, as listing its views does.
+pub(crate) fn project_views(state: &AppState, project_id: &str) -> ApiResult<Vec<ViewInfo>> {
+    let sources: Vec<SourceRecord> = {
+        let catalog = state.catalog();
+        catalog.project(project_id)?;
+        catalog.sources_of(project_id).cloned().collect()
+    };
+    state.mount_sources(project_id, &sources)
+}
+
 /// How many of the project's source views are defined over an attached cache.
 pub(crate) fn cached_view_count(state: &AppState) -> usize {
     let engine = state.engine_for_node("project_p").unwrap();
@@ -104,7 +115,7 @@ pub(crate) fn cached_view_count(state: &AppState) -> usize {
 pub(crate) fn mount_and_wait_for_cache(state: &AppState, caches: usize) -> Vec<ViewInfo> {
     let mut views = Vec::new();
     wait_until("the import and the engine swap", || {
-        views = state.project_views("p").unwrap();
+        views = project_views(state, "p").unwrap();
         cache_files(&state.0.dirs).len() == caches && cached_view_count(state) == views.len()
     });
     views

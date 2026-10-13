@@ -13,17 +13,16 @@ use serde::de::DeserializeOwned;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::error::{ApiError, ApiResult};
+use crate::features::{projects, sources};
 use crate::runtime::AppState;
 
 mod query;
-mod read;
-mod sources;
 
 /// Every route the desktop build serves. Other `/api/*` requests, including a wrong method on a known path, answer 501; the rest 404.
 pub fn router(state: AppState) -> Router {
     guarded(
         Router::new()
-            .merge(read::routes())
+            .merge(projects::routes())
             .merge(sources::routes())
             .merge(query::routes())
             .fallback(unknown_route)

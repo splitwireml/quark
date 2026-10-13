@@ -3,23 +3,12 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use serde::Serialize;
-
 use crate::error::{ApiError, ApiResult};
-use crate::relation::describe::{DatasetInfo, describe};
 use crate::runtime::catalog::Catalog;
 use crate::runtime::engine::Engine;
 use crate::runtime::mount::ViewInfo;
 use crate::runtime::registry::{DEFAULT_PROJECT_ID, ProjectRecord, SourceRecord};
 use crate::runtime::state::{AppState, invalid_value};
-use crate::shared::sql::quote_ident;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DatasetEntry {
-    #[serde(flatten)]
-    pub info: DatasetInfo,
-    pub columns: Vec<String>,
-}
 
 impl AppState {
     /// The engine behind a project node id or an active default-project source id.
@@ -41,34 +30,12 @@ impl AppState {
         if let Some(engine) = catalog.engines.get(node_id) {
             return Ok(Arc::clone(engine));
         }
-        let generation = self.0.next_generation.fetch_add(1, Ordering::Relaxed);
-        let engine = Engine::open_node(&source, &self.0.dirs, generation)
-            .map_err(|error| ApiError::bad_request(format!("Could not open source: {error:#}")))?;
-        let engine = Arc::new(engine);
+        let engine = Arc::new(self.open_node_engine(&source)?);
         catalog
             .engines
             .insert(node_id.to_owned(), Arc::clone(&engine));
         self.queue_import(&source);
         Ok(engine)
-    }
-
-    /// Every table and view of the node's engine, with column names.
-    pub fn datasets(&self, node_id: &str) -> ApiResult<Vec<DatasetEntry>> {
-        let engine = self.engine_for_node(node_id)?;
-        let inner = engine.lock();
-        crate::relation::describe::datasets(&inner.conn)
-            .map_err(invalid_value)?
-            .into_iter()
-            .map(|info| {
-                let table = format!("{}.{}", quote_ident(&info.schema), quote_ident(&info.name));
-                let columns = describe(&inner.conn, &table, &[])
-                    .map_err(invalid_value)?
-                    .into_iter()
-                    .map(|column| column.name)
-                    .collect();
-                Ok(DatasetEntry { info, columns })
-            })
-            .collect()
     }
 
     /// The project's workspace engine, opened on first use. The caller holds the catalog lock.
