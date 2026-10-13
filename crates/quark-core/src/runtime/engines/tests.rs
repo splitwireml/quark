@@ -1,12 +1,17 @@
 //! Tests for engine resolution, mount failures and the swap to cached views.
 
-use crate::runtime::engine::EngineKind;
+use super::set_before_open;
+use crate::error::ApiResult;
+use crate::runtime::engine::{Engine, EngineKind};
+use crate::runtime::registry::DEFAULT_PROJECT_ID;
 use crate::runtime::state::AppState;
 use crate::runtime::state::fixtures::*;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 #[test]
@@ -220,4 +225,161 @@ fn purged_cache_falls_back_to_live() {
     assert_eq!(rows.len(), 2);
     wait_until("a new import", || cache_files(&second.0.dirs).len() == 1);
     second.shutdown();
+}
+
+/// Runs `engine_for_node` on a thread that stops after its snapshot until the sender is used.
+/// The receiver says when the thread has stopped.
+fn paused_open(
+    state: &AppState,
+    node: &'static str,
+) -> (
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+    thread::JoinHandle<ApiResult<Arc<Engine>>>,
+) {
+    let (paused_tx, paused) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let state = state.clone();
+    let handle = thread::spawn(move || {
+        let is_first = std::cell::Cell::new(true);
+        set_before_open(move || {
+            if is_first.replace(false) {
+                paused_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        state.engine_for_node(node)
+    });
+    (paused, release, handle)
+}
+
+#[test]
+fn catalog_is_free_while_an_engine_opens() {
+    let root = tempfile::tempdir().unwrap();
+    let state = started(
+        root.path(),
+        &[
+            entry(root.path(), "a", Some("p")),
+            entry(root.path(), "b", Some("q")),
+        ],
+        &[project("p"), project("q")],
+    );
+    let (paused, release, handle) = paused_open(&state, "project_p");
+    paused.recv_timeout(WAIT).unwrap();
+
+    let (go, go_rx) = mpsc::channel::<()>();
+    let (locked_tx, locked) = mpsc::channel();
+    let prober = state.clone();
+    let probe = thread::spawn(move || {
+        go_rx.recv().unwrap();
+        drop(prober.catalog());
+        locked_tx.send(()).unwrap();
+    });
+    go.send(()).unwrap();
+    let outcome = locked.recv_timeout(Duration::from_millis(50));
+    let other = outcome.is_ok().then(|| state.engine_for_node("project_q"));
+    release.send(()).unwrap();
+    handle.join().unwrap().unwrap();
+    probe.join().unwrap();
+
+    assert_eq!(outcome, Ok(()), "the catalog stayed locked during the open");
+    assert!(other.unwrap().is_ok());
+}
+
+#[test]
+fn concurrent_opens_publish_one_engine() {
+    let root = tempfile::tempdir().unwrap();
+    let state = started(
+        root.path(),
+        &[entry(root.path(), "a", Some("p"))],
+        &[project("p")],
+    );
+    let both_snapshotted = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let state = state.clone();
+            let barrier = Arc::clone(&both_snapshotted);
+            thread::spawn(move || {
+                let is_first = std::cell::Cell::new(true);
+                set_before_open(move || {
+                    if is_first.replace(false) {
+                        barrier.wait();
+                    }
+                });
+                state.engine_for_node("project_p").unwrap()
+            })
+        })
+        .collect();
+    let engines: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    assert!(Arc::ptr_eq(&engines[0], &engines[1]));
+    let catalog = state.catalog();
+    assert_eq!(catalog.engines.len(), 1);
+    assert!(Arc::ptr_eq(&catalog.engines["project_p"], &engines[0]));
+}
+
+#[test]
+fn source_deleted_during_open_is_not_resurrected() {
+    let root = tempfile::tempdir().unwrap();
+    let state = started(
+        root.path(),
+        &[
+            entry(root.path(), "keep", Some("p")),
+            entry(root.path(), "gone", Some("p")),
+        ],
+        &[project("p")],
+    );
+    state.catalog().remount.insert("project_p".to_owned());
+    let (paused, release, handle) = paused_open(&state, "project_p");
+    paused.recv_timeout(WAIT).unwrap();
+
+    state.delete_source("p", "gone").unwrap();
+    release.send(()).unwrap();
+    let engine = handle.join().unwrap().unwrap();
+
+    let mounted: Vec<String> = engine.lock().mounted.keys().cloned().collect();
+    assert_eq!(mounted, ["keep"]);
+    let catalog = state.catalog();
+    assert!(Arc::ptr_eq(&catalog.engines["project_p"], &engine));
+    assert!(!catalog.remount.contains("project_p"));
+}
+
+#[test]
+fn node_deleted_with_its_file_during_open_is_not_found() {
+    let root = tempfile::tempdir().unwrap();
+    let state = started(root.path(), &[entry(root.path(), "x", None)], &[]);
+    let (paused, release, handle) = paused_open(&state, "x");
+    paused.recv_timeout(WAIT).unwrap();
+
+    state.delete_source(DEFAULT_PROJECT_ID, "x").unwrap();
+    fs::remove_file(root.path().join("x.csv")).unwrap();
+    release.send(()).unwrap();
+
+    assert_eq!(
+        failure(handle.join().unwrap()),
+        (404, "Node not found".to_owned())
+    );
+}
+
+#[test]
+fn upload_deleted_with_its_file_during_remount_is_left_out() {
+    let root = tempfile::tempdir().unwrap();
+    let mut gone = entry(root.path(), "gone", Some("p"));
+    gone["kind"] = json!("upload");
+    let state = started(
+        root.path(),
+        &[entry(root.path(), "keep", Some("p")), gone],
+        &[project("p")],
+    );
+    state.catalog().remount.insert("project_p".to_owned());
+    let (paused, release, handle) = paused_open(&state, "project_p");
+    paused.recv_timeout(WAIT).unwrap();
+
+    state.delete_source("p", "gone").unwrap();
+    fs::remove_file(root.path().join("gone.csv")).ok();
+    release.send(()).unwrap();
+    let engine = handle.join().unwrap().unwrap();
+
+    let mounted: Vec<String> = engine.lock().mounted.keys().cloned().collect();
+    assert_eq!(mounted, ["keep"]);
 }
