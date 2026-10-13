@@ -1800,11 +1800,18 @@ Every chart card follows the Python branch it names, line for line: the same che
 The Lead records here every change to the cards, the schedule and the environment made while the plan runs. Deviations from the spec listed here go to the exit deviations doc (E5) for sign-off.
 
 **Schedule**
+- spec §4.6 wants `perf_acceptance` to give the same results after the reshape. That release-mode run needs an idle machine, so it moves from the R7 gate to the batch 9 idle slot, beside F7's timing run.
 - F1 ran in batches 1–3 instead of batch 8, before the reshape finished. Spec §5.4 makes ICU the first card of sprint 1. F1 touches no source file, so it does not depend on R1–R7. Sprint 1 closed after batch 3 instead of batch 2.
 
 **Lead units** (not in the original plan)
 - L1 · batch 1 · `ci: pin the Python that uv uses to 3.13`. CI was red on 9d37bde. On `ubuntu-22.04`, `uv sync --frozen` downloaded CPython 3.15.0, which has no `pyarrow 25.0.1` wheel. Every `setup-uv` step now pins `python-version: "3.13"`.
 - L2 · batch 4 · dispatched CI runs get their own concurrency group, so a push to the branch no longer cancels a bundle run, and the reverse.
+- L3 · batch 6 · `fix(core): open engines and remount outside the catalog lock`. The sprint 2 audit found that, since SP1, `engine_for_node` and `workspace_in` held the global catalog lock while DuckDB opened engines and mounted sources. That breaks the section 2 rule. The fix is in `runtime/engines.rs` and has three steps:
+  1. Snapshot the catalog state under the lock.
+  2. Open the engine and remount with no lock held.
+  3. Publish under the lock. An engine already published for the node wins. If the project's sources changed during the open, retry; a node that has gone answers its usual 404.
+  - **Deviation for sign-off:** after 8 attempts in a row lose to catalog changes, the open falls back to running under the catalog lock (SP1's behaviour), so the call always ends. This is a pathological case only.
+  - **Follow-up, folded into R7:** an engine that loses the race must be dropped after the catalog guard is released.
 
 **F1, revised.** The card below replaces the card in section 8.
 - **Why:** the crates.io package of `libduckdb-sys 1.10504.0` ships no DuckDB sources, so the `icu` feature (`bundled-cmake`) cannot build from it.
