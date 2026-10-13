@@ -1794,3 +1794,45 @@ Every chart card follows the Python branch it names, line for line: the same che
 | §11 Sprints | Section 5 |
 | §12 Exit gate | Section 15 |
 | §13 Risks | F1 and the sprint 1 gate (CMake), F8 and W4 (calamine), F3 and F4 (pool), E3 (blob download), section 1.10 (machine limits) |
+
+## 17. Amendments during the run
+
+The Lead records here every change to the cards, the schedule and the environment made while the plan runs. Deviations from the spec listed here go to the exit deviations doc (E5) for sign-off.
+
+**Schedule**
+- F1 ran in batches 1–3 instead of batch 8, before the reshape finished. Spec §5.4 makes ICU the first card of sprint 1. F1 touches no source file, so it does not depend on R1–R7. Sprint 1 closed after batch 3 instead of batch 2.
+
+**Lead units** (not in the original plan)
+- L1 · batch 1 · `ci: pin the Python that uv uses to 3.13`. CI was red on 9d37bde. On `ubuntu-22.04`, `uv sync --frozen` downloaded CPython 3.15.0, which has no `pyarrow 25.0.1` wheel. Every `setup-uv` step now pins `python-version: "3.13"`.
+- L2 · batch 4 · dispatched CI runs get their own concurrency group, so a push to the branch no longer cancels a bundle run, and the reverse.
+
+**F1, revised.** The card below replaces the card in section 8.
+- **Why:** the crates.io package of `libduckdb-sys 1.10504.0` ships no DuckDB sources, so the `icu` feature (`bundled-cmake`) cannot build from it.
+- **Deviation for sign-off:**
+  - `duckdb` comes from the duckdb-rs git tag `v1.10504.0`, whose submodule is DuckDB `v1.5.4`.
+  - A CMake toolchain file pins the reported engine version, because the cargo checkout of the submodule has no tags.
+- **Measured costs:**
+  - first ICU dev build: 22m07s against 19m27s (+14%);
+  - release `quark-dev-server`: 52.6 MB against 45.3 MB (+16%).
+
+#### F1 (rev. 2, as integrated in d3b9e87) · ICU in DuckDB · batch 3 (card revised by the Lead after the batch 1 block and amended after the batch 2 escalation)
+- **Why revised:** the crates.io package of `libduckdb-sys 1.10504.0` excludes `duckdb-sources`, so the `icu` feature (which turns on `bundled-cmake`) panics in its build script: "`bundled-cmake` requires a duckdb-rs checkout with DuckDB sources". The duckdb-rs git tag `v1.10504.0` (commit 452fc0b6) carries `crates/libduckdb-sys/duckdb-sources` as a submodule pinned to DuckDB `v1.5.4` (commit 08e34c4), the same engine the spec requires. The Lead chose this over the spec §5.4 UTC fallback; it is recorded as a deviation for the human's sign-off.
+- **Files:** `Cargo.toml`, `Cargo.lock`, `core/tests/time_zones.rs` (new), `.cargo/config.toml` (new), `cmake/duckdb-version.cmake` (new).
+- **Lead decision (batch 2 escalation):** the cargo checkout of the `duckdb-sources` submodule has no git tags, so DuckDB's CMake build reports `v0.0.1`. DuckDB reads `OVERRIDE_GIT_DESCRIBE` only as a CMake variable, so the version is pinned through a CMake toolchain file: `.cargo/config.toml` sets `[env] CMAKE_TOOLCHAIN_FILE = { value = "cmake/duckdb-version.cmake", relative = true }`, and that file sets `OVERRIDE_GIT_DESCRIBE` to `v1.5.4`. The Lead accepts these two files and records them with the ICU deviation. Known limits, documented in the cmake file's comment: a bump of the pin needs `cargo clean -p libduckdb-sys` (the build script does not watch the file); an externally set `CMAKE_TOOLCHAIN_FILE` overrides the pin (`engine_version` catches it); the pin applies to cargo runs inside the repository.
+- **Needs:** none.
+- **Build:**
+  - The workspace dependency becomes `duckdb = { version = "=1.10504.0", git = "https://github.com/duckdb/duckdb-rs", tag = "v1.10504.0", features = ["bundled", "parquet", "json", "icu"] }`. Cargo fetches the `duckdb-sources` submodule itself. Regenerate `Cargo.lock` with cargo (`cargo update -p duckdb -p libduckdb-sys` or a build), never by hand; only the `duckdb` and `libduckdb-sys` entries (and their source lines) should change. If cargo pulls in any other changed package version, report it.
+  - Nothing else changes beyond the version pin above. `engine_version` must still report `v1.5.4`. `[profile.dev.package.libduckdb-sys] opt-level = 3` stays.
+  - The unit report records the build costs:
+    - wall time of your first `cargo build -p quark-core` with `icu` on (DuckDB builds from scratch through CMake there), against the Lead's before-numbers in `/home/user/quark-wt/f1-before.txt`;
+    - the size of a release `quark-dev-server`: run `nice -n 19 env CARGO_TARGET_DIR=/home/user/quark-wt/release-f1 cargo build -j 2 --release -p quark-core --bin quark-dev-server` (in the background, Bash timeout 90 minutes, poll), record its size, then `rm -rf /home/user/quark-wt/release-f1`. If it has not finished when everything else is done and committed, report "release size: pending" rather than waiting past 90 minutes.
+- **Tests first** (`time_zones.rs`, using only the `duckdb` crate, never `quark_core` paths; each test opens an in-memory connection):
+  - `icu_is_loaded`: `SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'icu'` is `true`.
+  - `session_zone_reads_offsetless_timestamptz`: after `SET TimeZone = 'Asia/Dubai'`, `TIMESTAMPTZ '2024-01-01 10:00:00' = TIMESTAMPTZ '2024-01-01 06:00:00+00'` is `true`.
+  - `date_trunc_and_strftime_use_the_session_zone` (Review Focus 4): after `SET TimeZone = 'America/New_York'`:
+    - `strftime(date_trunc('day', TIMESTAMPTZ '2024-03-10 03:30:00+00'), '%Y-%m-%d')` is `2024-03-09`;
+    - `strftime(TIMESTAMPTZ '2024-01-01 02:00:00+00', '%Y')` is `2023`.
+  - `default_zone_is_set`: `current_setting('TimeZone')` is not empty.
+- **Hot spots:** only the dependency source and feature list change; `cargo test --locked` must work from a clean checkout (CI fetches the submodule through cargo); universal macOS builds both architectures through CMake (the sprint gate's bundle run checks this).
+- **Done when:** `cargo test --locked -p quark-core --test time_zones --test engine_version && cargo test -p quark-core && cargo clippy -p quark-core --all-targets -- -D warnings && cargo fmt --all --check`, and `git diff rust-desktop/parity -- Cargo.lock` changes only the `duckdb` and `libduckdb-sys` entries and adds their build dependencies `cmake` and `which`.
+- **Commit:** `build(core): compile DuckDB with ICU`
