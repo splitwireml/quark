@@ -24,6 +24,8 @@ jobs:
           key: ${{ matrix.os }}
       - run: cargo test -p quark-core --locked
       - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
       - run: uv sync --frozen
       - run: uv run pytest -m skeleton -q
         env:
@@ -115,6 +117,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
       - run: uv sync --frozen
       - run: uv run pytest -q
 
