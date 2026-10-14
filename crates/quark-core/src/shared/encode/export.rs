@@ -2,7 +2,7 @@
 
 use super::cell::cell_json;
 use super::scalar::{split, value};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone};
 use duckdb::arrow::array::{Array, AsArray};
 use duckdb::arrow::datatypes::{
     DataType, Date32Type, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int8Type,
@@ -101,7 +101,7 @@ fn plain_cell<Tz: TimeZone>(
                 .and_then(|seconds| {
                     NaiveTime::from_num_seconds_from_midnight_opt(seconds, micros * 1000)
                 })
-                .map_or(ExportCell::Null, |time| time_cell(time, type_name, zone))
+                .map_or(ExportCell::Null, ExportCell::Time)
         }
         DataType::Timestamp(unit, None) => {
             let (seconds, micros) = match unit {
@@ -143,16 +143,6 @@ fn plain_cell<Tz: TimeZone>(
             _ => ExportCell::Null,
         },
     }
-}
-
-/// Arrow drops a TIMETZ's offset, so its time of day is shown with `zone`'s current offset, as text.
-fn time_cell<Tz: TimeZone>(time: NaiveTime, type_name: &str, zone: &Tz) -> ExportCell {
-    if !type_name.to_ascii_uppercase().starts_with("TIME WITH") {
-        return ExportCell::Time(time);
-    }
-    let offset = zone.offset_from_utc_datetime(&Utc::now().naive_utc()).fix();
-    let text = csv_text(&ExportCell::Time(time)).unwrap_or_default();
-    ExportCell::Text(format!("{text}{offset}"))
 }
 
 fn int_cell(number: i128) -> ExportCell {

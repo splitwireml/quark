@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::relation::params::bind;
 use crate::relation::request::QueryRequest;
+use crate::relation::rows::select_list;
 use crate::runtime::cache::stats::StatsEntry;
 use crate::shared::columns::{ColumnMeta, ColumnSummary};
 use crate::shared::sql::quote_ident;
@@ -74,6 +75,7 @@ pub(super) fn compute_stats(
 pub(super) fn fetch_page(
     conn: &Connection,
     ordered: &str,
+    columns: &[ColumnMeta],
     params: &[Value],
     request: &QueryRequest,
 ) -> duckdb::Result<Fetched> {
@@ -83,7 +85,8 @@ pub(super) fn fetch_page(
     ];
     let params: Vec<Value> = params.iter().cloned().chain(paging).collect();
     let mut statement = conn.prepare(&format!(
-        "SELECT * FROM ({ordered}) AS result LIMIT ? OFFSET ?"
+        "SELECT {} FROM ({ordered}) AS result LIMIT ? OFFSET ?",
+        select_list(columns)
     ))?;
     let arrow = statement.query_arrow(bind(&params))?;
     let schema = arrow.get_schema();

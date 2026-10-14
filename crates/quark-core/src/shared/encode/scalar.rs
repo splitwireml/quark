@@ -4,6 +4,8 @@ use chrono::{DateTime, NaiveTime, Offset, TimeZone, Timelike};
 use duckdb::arrow::array::{Array, ArrowPrimitiveType, AsArray, PrimitiveArray};
 use duckdb::arrow::datatypes::{Decimal128Type, Decimal256Type, IntervalMonthDayNanoType};
 use serde_json::{Number, Value};
+
+use crate::shared::types::is_timetz;
 use std::fmt::Write;
 
 /// Largest integer a JSON consumer can hold exactly (2^53 - 1).
@@ -128,8 +130,35 @@ fn decimal_float(text: &str) -> Value {
     text.parse().map_or(Value::Null, float_json)
 }
 
-pub(super) fn string_json(text: &str) -> Value {
-    Value::String(text.to_owned())
+/// A TIMETZ arrives as text; any other string passes through.
+pub(super) fn string_json(text: &str, type_name: &str) -> Value {
+    if is_timetz(type_name) {
+        timetz_json(text)
+    } else {
+        Value::String(text.to_owned())
+    }
+}
+
+/// DuckDB's `HH:MM:SS[.f]±HH[:MM]` as Python's `isoformat()`: `±HH:MM`, microseconds only when set.
+/// Text that does not parse (such as `24:00:00+00`) is kept as it is.
+fn timetz_json(text: &str) -> Value {
+    let parsed = text.rfind(['+', '-']).and_then(|split| {
+        let (time, offset) = text.split_at(split);
+        let time = NaiveTime::parse_from_str(time, "%H:%M:%S%.f").ok()?;
+        let (hours, minutes) = match offset[1..].split_once(':') {
+            Some((hours, minutes)) => (hours, minutes),
+            None => (&offset[1..], "00"),
+        };
+        let (hours, minutes) = (hours.parse::<u8>().ok()?, minutes.parse::<u8>().ok()?);
+        Some((time, &offset[..1], hours, minutes))
+    });
+    let Some((time, sign, hours, minutes)) = parsed else {
+        return Value::String(text.to_owned());
+    };
+    let mut rendered = String::with_capacity(21);
+    write_time(&mut rendered, time);
+    let _ = write!(rendered, "{sign}{hours:02}:{minutes:02}");
+    Value::String(rendered)
 }
 
 /// DuckDB exports BIT as Binary: the first byte counts the padding bits that lead the rest.

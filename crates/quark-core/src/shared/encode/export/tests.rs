@@ -160,14 +160,20 @@ fn zoned_values_become_isoformat_text_in_the_given_zone() {
         ),
         [text("2024-01-05T16:00:00+05:30")]
     );
-    assert_eq!(
-        cells_in(
-            "SELECT TIMETZ '12:30:00+05:30'",
-            "TIME WITH TIME ZONE",
-            &zone
-        ),
-        [text("12:30:00+05:30")]
-    );
+}
+
+#[test]
+fn timetz_text_keeps_its_stored_offset_under_any_zone() {
+    let sql = "SELECT CAST(TIMETZ '12:30:00-02' AS VARCHAR)";
+    for zone in [
+        FixedOffset::east_opt(5 * 3600 + 1800).unwrap(),
+        FixedOffset::east_opt(0).unwrap(),
+    ] {
+        assert_eq!(
+            cells_in(sql, "TIME WITH TIME ZONE", &zone),
+            [text("12:30:00-02:00")]
+        );
+    }
 }
 
 #[test]

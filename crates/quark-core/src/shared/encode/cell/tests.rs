@@ -299,3 +299,29 @@ fn wide_decimals_follow_the_same_rules() {
     );
     assert_eq!(cell_json(&array, 0, "DECIMAL(76,0)", &Utc), json!(12345.0));
 }
+
+#[test]
+fn timetz_text_renders_like_python() {
+    for (literal, expected) in [
+        ("12:30:00+02", "12:30:00+02:00"),
+        ("12:30:00+05:30", "12:30:00+05:30"),
+        ("12:30:00-02", "12:30:00-02:00"),
+        ("01:02:03.5+00", "01:02:03.500000+00:00"),
+        ("01:02:03.000123-07:30", "01:02:03.000123-07:30"),
+    ] {
+        let sql = format!("SELECT CAST(TIMETZ '{literal}' AS VARCHAR)");
+        assert_eq!(
+            cells(&sql, "TIME WITH TIME ZONE"),
+            [json!(expected)],
+            "{literal}"
+        );
+    }
+    assert_eq!(
+        cells("SELECT 'not a time'", "TIME WITH TIME ZONE"),
+        [json!("not a time")]
+    );
+    assert_eq!(
+        cells("SELECT '12:30:00+02'", "VARCHAR"),
+        [json!("12:30:00+02")]
+    );
+}

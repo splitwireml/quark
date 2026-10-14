@@ -124,7 +124,8 @@ pub fn run_page(
             stats
         }
     };
-    let fetched = fetch_page(conn, ordered, bound, request).map_err(unprocessable)?;
+    let fetched =
+        fetch_page(conn, ordered, &resolved.columns, bound, request).map_err(unprocessable)?;
     if let ResultAction::StartBuild(table) = &action {
         let primary = engine.primary();
         engine

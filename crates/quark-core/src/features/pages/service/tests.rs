@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod results;
+mod timetz;
 
 fn engine(setup: &str) -> Engine {
     let conn = Connection::open_in_memory().unwrap();

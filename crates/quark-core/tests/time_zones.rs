@@ -57,3 +57,17 @@ fn default_zone_is_set() {
     let conn = Connection::open_in_memory().unwrap();
     assert!(!query_string(&conn, "SELECT current_setting('TimeZone')").is_empty());
 }
+
+#[test]
+fn default_zone_matches_the_machine() {
+    let conn = Connection::open_in_memory().unwrap();
+    let seconds_east: i64 = conn
+        .query_row(
+            "SELECT EXTRACT(timezone FROM current_timestamp)::BIGINT",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let machine = chrono::Local::now().offset().local_minus_utc();
+    assert_eq!(seconds_east, i64::from(machine));
+}

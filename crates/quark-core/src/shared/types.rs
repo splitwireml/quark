@@ -78,6 +78,11 @@ pub fn profile_kind(type_: &str) -> Option<&'static str> {
     }
 }
 
+/// DuckDB drops a TIMETZ's offset in Arrow, so these columns are read as text.
+pub fn is_timetz(type_: &str) -> bool {
+    type_.eq_ignore_ascii_case("TIME WITH TIME ZONE")
+}
+
 pub fn is_native(type_: &str) -> bool {
     NATIVE.contains(&type_.to_ascii_uppercase().as_str())
 }
