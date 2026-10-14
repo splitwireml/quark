@@ -36,11 +36,10 @@ pub(super) fn for_each_batch(
         .stream_arrow(bind(&[]), schema)
         .map_err(invalid_query)?
     {
-        let (rows, closing) = split_closing_row(&batch)?;
+        let rows = data_rows(&batch, &mut is_complete)?;
         if rows.num_rows() > 0 {
             each(rows)?;
         }
-        is_complete |= closing;
     }
     if is_complete {
         return Ok(());
@@ -68,8 +67,11 @@ fn stopped_early(rerun: impl FnOnce() -> duckdb::Result<()>) -> ApiError {
     }
 }
 
-/// The batch without its flag column and closing row, and whether the closing row was in it.
-fn split_closing_row(batch: &RecordBatch) -> ApiResult<(RecordBatch, bool)> {
+/// The batch without its flag column and closing row; `is_complete` turns true at the closing row.
+/// That row comes last because DuckDB keeps `UNION ALL` children in order under its default
+/// `preserve_insertion_order`. A row after it would mean that order broke, so the export fails
+/// instead of dropping the rows that follow.
+fn data_rows(batch: &RecordBatch, is_complete: &mut bool) -> ApiResult<RecordBatch> {
     let flag_index = batch.num_columns() - 1;
     let flags = batch
         .column(flag_index)
@@ -77,15 +79,19 @@ fn split_closing_row(batch: &RecordBatch) -> ApiResult<(RecordBatch, bool)> {
         .downcast_ref::<BooleanArray>()
         .ok_or_else(|| ApiError::internal("Internal error"))?;
     let closing = flags.iter().position(|flag| flag == Some(true));
+    let is_after_closing = (*is_complete && batch.num_rows() > 0)
+        || closing.is_some_and(|at| at + 1 != batch.num_rows());
+    if is_after_closing {
+        tracing::error!("export rows arrived after the closing row");
+        return Err(ApiError::internal("Internal error"));
+    }
+    *is_complete |= closing.is_some();
     let kept: Vec<usize> = (0..flag_index).collect();
     let rows = batch.project(&kept).map_err(|error| {
         tracing::error!(%error, "could not drop the export flag column");
         ApiError::internal("Internal error")
     })?;
-    Ok((
-        rows.slice(0, closing.unwrap_or(batch.num_rows())),
-        closing.is_some(),
-    ))
+    Ok(rows.slice(0, closing.unwrap_or(batch.num_rows())))
 }
 
 #[cfg(test)]

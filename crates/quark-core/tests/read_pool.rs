@@ -111,6 +111,17 @@ fn is_pending(stream: &mut TcpStream) -> bool {
     )
 }
 
+/// True when the server has sent nothing yet, checked without waiting.
+fn has_no_answer_yet(stream: &TcpStream) -> bool {
+    stream.set_nonblocking(true).unwrap();
+    let waiting = matches!(
+        stream.peek(&mut [0; 1]),
+        Err(error) if error.kind() == ErrorKind::WouldBlock
+    );
+    stream.set_nonblocking(false).unwrap();
+    waiting
+}
+
 /// A query that cannot use more than one thread, so two of them overlap only on two readers.
 fn single_threaded_sql(value: u32) -> String {
     format!("SELECT list_sum(list_transform(range(12000000), x -> x * 0)) + {value} AS value")
@@ -239,14 +250,15 @@ fn page_is_served_before_a_running_export_finishes() {
             "sql": "SELECT sum(i) AS total FROM range(2000000000) t(i)",
         }]}),
     );
-    thread::sleep(Duration::from_millis(200));
-    assert!(is_pending(&mut export), "the export should be running");
+    // Checks below never wait, so the export only has to outlast this pause and one quick page.
+    thread::sleep(Duration::from_millis(100));
+    assert!(has_no_answer_yet(&export), "the export should be running");
 
     let (status, page) = server.answer_of(QUICK_SQL);
     assert_eq!(status, 200);
     assert_eq!(page["rows"].as_array().map(Vec::len), Some(3));
     assert!(
-        is_pending(&mut export),
+        has_no_answer_yet(&export),
         "the page should be answered while the export is still running"
     );
 

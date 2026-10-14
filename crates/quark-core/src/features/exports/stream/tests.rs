@@ -1,9 +1,12 @@
 //! Tests that the export readers take the result batch by batch and in order.
 
-use duckdb::Connection;
-use duckdb::arrow::array::Int64Array;
+use std::sync::Arc;
 
-use super::{for_each_batch, stopped_early};
+use duckdb::Connection;
+use duckdb::arrow::array::{ArrayRef, BooleanArray, Int64Array};
+use duckdb::arrow::record_batch::RecordBatch;
+
+use super::{data_rows, for_each_batch, stopped_early};
 use crate::error::ApiResult;
 
 const ROWS: i64 = 10_000;
@@ -101,4 +104,36 @@ fn an_unrunnable_query_fails_before_any_batch() {
 
     assert_eq!(batches, 0);
     assert!(outcome.is_err());
+}
+
+/// A batch of `values` with the flag column set on the rows listed in `closing`.
+fn flagged(values: &[i64], closing: &[usize]) -> RecordBatch {
+    let flags: Vec<bool> = (0..values.len())
+        .map(|row| closing.contains(&row))
+        .collect();
+    RecordBatch::try_from_iter([
+        ("n", Arc::new(Int64Array::from(values.to_vec())) as ArrayRef),
+        ("flag", Arc::new(BooleanArray::from(flags)) as ArrayRef),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn the_closing_row_is_dropped_and_marks_the_stream_complete() {
+    let mut is_complete = false;
+    let rows = data_rows(&flagged(&[1, 2, 0], &[2]), &mut is_complete).unwrap();
+    assert!(is_complete);
+    assert_eq!(rows.num_columns(), 1);
+    assert_eq!(rows.num_rows(), 2);
+}
+
+#[test]
+fn rows_after_the_closing_row_fail_instead_of_being_dropped() {
+    let mut is_complete = false;
+    let error = data_rows(&flagged(&[1, 0, 2], &[1]), &mut is_complete).unwrap_err();
+    assert_eq!(error.status().as_u16(), 500);
+
+    let mut is_complete = true;
+    let error = data_rows(&flagged(&[3], &[]), &mut is_complete).unwrap_err();
+    assert_eq!(error.status().as_u16(), 500);
 }

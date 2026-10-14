@@ -7,7 +7,7 @@ Sub-project 2's exit gate (design section 12 items 5 to 7) needs a human on macO
 - [ ] `frontend/index.html` has no `impeccable-live` block. Today it loads `http://localhost:8400/live.js` with a token (SP1 commit 664538f), outside SP2's scope. Remove it and rotate the token before building the installers (deviation 55).
 - [ ] The bundle run's self-test log has no "Error reading the log directory" line (SP1 #24, deviation 35).
 - [ ] The bundle run is green on all three OSes. Record its run id under Results.
-- [ ] **H0:** confirm or adjust the section 9 caps, using the perf doc's summary table. Four route cases miss the provisional caps on the 4-core Linux test container (stats, CSV, XLSX, workbook confirm), and so do 5 of 9 reshape steps. Compare against the Mac figures if you measure there.
+- [ ] **H0:** confirm or adjust the section 9 caps, using the perf doc's summary table. On the 4-core Linux test container, three route cases miss the provisional caps idle (stats, CSV export, workbook confirm), XLSX export passes idle by 0.1 s after L12 but misses under load, and 5 of 9 reshape steps miss. Compare against the Mac figures if you measure there.
 
 ## SP1 carry-over (design section 12 item 6)
 
