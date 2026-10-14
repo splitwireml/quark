@@ -125,7 +125,7 @@ fn duckdb_sources_are_read_only() {
 }
 
 #[test]
-fn database_node_allows_its_folder() {
+fn database_node_blocks_every_file_even_beside_it() {
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("db");
     let elsewhere = root.path().join("elsewhere");
@@ -144,7 +144,7 @@ fn database_node_allows_its_folder() {
     let engine = open(&database, None, root.path()).unwrap();
     let guard = engine.lock();
 
-    assert_eq!(count_rows(&guard.conn, &beside).unwrap(), 2);
+    assert!(count_rows(&guard.conn, &beside).is_err());
     assert!(count_rows(&guard.conn, &outside).is_err());
 }
 

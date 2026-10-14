@@ -138,8 +138,8 @@ pub(crate) fn upload_source(
     }
 }
 
-/// The registry entry that stores the upload.
-pub(crate) fn upload_record(source: &SourceRecord) -> RawRecord {
+/// The registry entry that stores the source.
+pub(crate) fn source_record(source: &SourceRecord) -> RawRecord {
     let mut record = RawRecord::new();
     record.insert("id".into(), source.id.clone().into());
     record.insert("name".into(), source.name.clone().into());
@@ -154,14 +154,14 @@ pub(crate) fn upload_record(source: &SourceRecord) -> RawRecord {
     record
 }
 
-/// The upload as the API returns it: project-scoped, or the legacy shape with its path.
-pub(crate) fn public_upload(source: &SourceRecord) -> Value {
+/// The source as the API returns it: project-scoped, or the legacy shape with its path.
+pub(crate) fn public_source(source: &SourceRecord) -> Value {
     match &source.project_id {
         Some(project) => {
-            json!({"id": source.id, "name": source.name, "kind": "upload", "project_id": project})
+            json!({"id": source.id, "name": source.name, "kind": source.kind, "project_id": project})
         }
         None => {
-            json!({"id": source.id, "name": source.name, "kind": "upload", "source": source.source.to_string_lossy()})
+            json!({"id": source.id, "name": source.name, "kind": source.kind, "source": source.source.to_string_lossy()})
         }
     }
 }

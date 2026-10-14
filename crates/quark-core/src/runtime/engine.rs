@@ -91,8 +91,7 @@ impl Engine {
                 let conn = Connection::open_with_flags(&source.source, config)
                     .context("could not open database")?;
                 configure_spill(&conn, dirs)?;
-                let parent = source.source.parent().unwrap_or(&source.source);
-                lock_down_dirs(&conn, &[parent.to_string_lossy().into_owned()])?;
+                lock_down_dirs(&conn, &[])?;
                 conn
             }
             Some("xlsx") => bail!("Excel sources are not in the desktop build yet"),

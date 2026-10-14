@@ -8,11 +8,12 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::Value;
 
+use super::attach::{AttachRequest, attach_database, source_path};
 use super::model::{DatasetEntry, LegacyNode, SourceDetail, SourceSummary};
 use super::service;
 use super::uploads::{ChunkSource, register_upload, store};
 use crate::error::{ApiError, ApiResult};
-use crate::http::deps::blocking;
+use crate::http::deps::{ApiJson, blocking};
 use crate::runtime::AppState;
 use crate::runtime::mount::ViewInfo;
 use crate::runtime::registry::DEFAULT_PROJECT_ID;
@@ -25,6 +26,14 @@ pub fn routes() -> Router<AppState> {
             post(upload_to_project).layer(DefaultBodyLimit::disable()),
         )
         .route(
+            "/api/projects/{project_id}/sources/attach",
+            post(attach_to_project),
+        )
+        .route(
+            "/api/projects/{project_id}/sources/{source_id}/path",
+            get(get_source_path),
+        )
+        .route(
             "/api/projects/{project_id}/sources/{source_id}",
             get(get_source).delete(delete_project_source),
         )
@@ -34,6 +43,7 @@ pub fn routes() -> Router<AppState> {
             "/api/nodes/upload",
             post(upload_to_default).layer(DefaultBodyLimit::disable()),
         )
+        .route("/api/nodes/attach", post(attach_to_default))
         .route("/api/nodes/{node_id}", delete(delete_node))
         .route("/api/nodes/{node_id}/datasets", get(list_datasets))
 }
@@ -145,6 +155,32 @@ fn file_required() -> ApiError {
 
 fn invalid_form(error: MultipartError) -> ApiError {
     ApiError::unprocessable(error.body_text())
+}
+
+async fn attach_to_project(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(request): ApiJson<AttachRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let node = blocking(move || attach_database(&state, Some(&project_id), &request)).await?;
+    Ok((StatusCode::CREATED, Json(node)))
+}
+
+async fn attach_to_default(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<AttachRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let node = blocking(move || attach_database(&state, None, &request)).await?;
+    Ok((StatusCode::CREATED, Json(node)))
+}
+
+async fn get_source_path(
+    State(state): State<AppState>,
+    Path((project_id, source_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    blocking(move || source_path(&state, &project_id, &source_id))
+        .await
+        .map(Json)
 }
 
 async fn delete_project_source(

@@ -166,15 +166,6 @@ async fn unknown_api_route_is_501() {
     );
     let (status, _) = send(&app, Method::GET, "/api/nodes/upload", None).await;
     assert_eq!(status, 501);
-    let (status, body) = send(
-        &app,
-        Method::POST,
-        "/api/projects/default/sources/attach",
-        Some("{}"),
-    )
-    .await;
-    assert_eq!(status, 501);
-    assert_eq!(body, json!({"detail": "Not in the desktop build yet"}));
     let (status, _) = get_json(&app, "/elsewhere").await;
     assert_eq!(status, 404);
 }
@@ -208,4 +199,198 @@ async fn datasets_route_lists_columns() {
 
     let (status, body) = get_json(&app, "/api/nodes/nope/datasets").await;
     assert_eq!((status, body), (404, json!({"detail": "Node not found"})));
+}
+
+/// A DuckDB file holding one table, `t(n)`, with the rows 1 and 2.
+fn database_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let conn = duckdb::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE t(n INTEGER); INSERT INTO t VALUES (1), (2);")
+        .unwrap();
+    path
+}
+
+fn attach_body(path: &std::path::Path) -> String {
+    json!({"path": path.to_string_lossy()}).to_string()
+}
+
+#[tokio::test]
+async fn attach_rejects_other_suffixes_before_missing_files() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), &[], &[project("p")]);
+    let missing = |name: &str| attach_body(&root.path().join(name));
+
+    for uri in ["/api/nodes/attach", "/api/projects/p/sources/attach"] {
+        for (body, expected) in [
+            (
+                missing("gone.csv"),
+                (400, "Only .duckdb and .db paths can be attached"),
+            ),
+            (missing("gone.DB"), (404, "Database not found")),
+            (missing("gone.duckdb"), (404, "Database not found")),
+            (
+                attach_body(root.path()),
+                (400, "Only .duckdb and .db paths can be attached"),
+            ),
+        ] {
+            let (status, reply) = send(&app, Method::POST, uri, Some(&body)).await;
+            assert_eq!(
+                (status, reply),
+                (expected.0, json!({"detail": expected.1})),
+                "{uri}"
+            );
+        }
+    }
+    let directory = root.path().join("folder.db");
+    fs::create_dir(&directory).unwrap();
+    let (status, _) = send(
+        &app,
+        Method::POST,
+        "/api/nodes/attach",
+        Some(&attach_body(&directory)),
+    )
+    .await;
+    assert_eq!(status, 404);
+
+    let body = missing("gone.csv");
+    let (status, reply) = send(
+        &app,
+        Method::POST,
+        "/api/projects/nope/sources/attach",
+        Some(&body),
+    )
+    .await;
+    assert_eq!(
+        (status, reply),
+        (404, json!({"detail": "Project not found"}))
+    );
+    for body in ["{}", r#"{"path": "x.db", "extra": 1}"#] {
+        let (status, _) = send(&app, Method::POST, "/api/nodes/attach", Some(body)).await;
+        assert_eq!(status, 422, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn attached_database_is_read_only() {
+    let root = tempfile::tempdir().unwrap();
+    let file = database_file(root.path(), "data.duckdb");
+    let app = app(root.path(), &[], &[project("p")]);
+
+    let (status, node) = send(
+        &app,
+        Method::POST,
+        "/api/nodes/attach",
+        Some(&attach_body(&file)),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(node["kind"], "attached");
+    assert_eq!(node["name"], "data.duckdb");
+    assert_eq!(node["source"], file.to_string_lossy().as_ref());
+    assert_eq!(node["id"].as_str().unwrap().len(), 32);
+
+    let (status, scoped) = send(
+        &app,
+        Method::POST,
+        "/api/projects/p/sources/attach",
+        Some(&attach_body(&file)),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(scoped["project_id"], "p");
+    assert!(scoped.get("source").is_none());
+
+    let id = node["id"].as_str().unwrap();
+    let (status, datasets) = get_json(&app, &format!("/api/nodes/{id}/datasets")).await;
+    assert_eq!(status, 200);
+    assert_eq!(datasets[0]["name"], "t");
+    assert_eq!(datasets[0]["columns"], json!(["n"]));
+    let (status, nodes) = get_json(&app, "/api/nodes").await;
+    assert_eq!((status, nodes.as_array().unwrap().len()), (200, 1));
+}
+
+#[tokio::test]
+async fn deleting_an_attachment_keeps_the_file() {
+    let root = tempfile::tempdir().unwrap();
+    let file = database_file(root.path(), "keep.db");
+    let app = app(root.path(), &[], &[project("p")]);
+
+    let (_, node) = send(
+        &app,
+        Method::POST,
+        "/api/projects/p/sources/attach",
+        Some(&attach_body(&file)),
+    )
+    .await;
+    let uri = format!("/api/projects/p/sources/{}", node["id"].as_str().unwrap());
+    let (status, _) = send(&app, Method::DELETE, &uri, None).await;
+    assert_eq!(status, 204);
+    assert!(file.is_file());
+    let (_, sources) = get_json(&app, "/api/projects/p/sources").await;
+    assert_eq!(sources, json!([]));
+}
+
+#[tokio::test]
+async fn source_path_is_absolute() {
+    let root = tempfile::tempdir().unwrap();
+    let file = database_file(root.path(), "where.db");
+    let app = app(
+        root.path(),
+        &[entry(root.path(), "one", Some("p"))],
+        &[project("p")],
+    );
+
+    let (_, node) = send(
+        &app,
+        Method::POST,
+        "/api/projects/p/sources/attach",
+        Some(&attach_body(&file)),
+    )
+    .await;
+    let uri = format!(
+        "/api/projects/p/sources/{}/path",
+        node["id"].as_str().unwrap()
+    );
+    let (status, reply) = get_json(&app, &uri).await;
+    assert_eq!(
+        (status, reply),
+        (200, json!({"path": file.to_string_lossy()}))
+    );
+    let (status, reply) = get_json(&app, "/api/projects/p/sources/one/path").await;
+    assert_eq!(status, 200);
+    assert!(std::path::Path::new(reply["path"].as_str().unwrap()).is_absolute());
+
+    for (uri, detail) in [
+        ("/api/projects/nope/sources/one/path", "Project not found"),
+        ("/api/projects/p/sources/nope/path", "Source not found"),
+    ] {
+        let (status, reply) = get_json(&app, uri).await;
+        assert_eq!((status, reply), (404, json!({"detail": detail})), "{uri}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn attaching_through_a_symlink_reports_the_real_path() {
+    let root = tempfile::tempdir().unwrap();
+    let real = fs::canonicalize(root.path()).unwrap().join("real");
+    fs::create_dir(&real).unwrap();
+    let file = database_file(&real, "x.duckdb");
+    let link = real.with_file_name("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let app = app(root.path(), &[], &[project("p")]);
+    let body = attach_body(&link.join("x.duckdb"));
+
+    let (status, node) = send(&app, Method::POST, "/api/nodes/attach", Some(&body)).await;
+    assert_eq!(status, 201);
+    assert_eq!(node["source"], file.to_string_lossy().as_ref());
+    assert_eq!(node["name"], "x.duckdb");
+    let uri = "/api/projects/p/sources/attach";
+    let (_, scoped) = send(&app, Method::POST, uri, Some(&body)).await;
+    let uri = format!(
+        "/api/projects/p/sources/{}/path",
+        scoped["id"].as_str().unwrap()
+    );
+    let (_, reply) = get_json(&app, &uri).await;
+    assert_eq!(reply, json!({"path": file.to_string_lossy()}));
 }

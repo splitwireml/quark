@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::service::{
-    public_upload, supported_extension, upload_record, upload_source, uploaded_name,
+    public_source, source_record, supported_extension, upload_source, uploaded_name,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::relation::describe::datasets;
@@ -82,8 +82,8 @@ fn add_upload(
     let source = upload_source(project_id, node_id, original_name, path);
     let engine = state.open_node_engine(&source)?;
     datasets(&engine.lock().conn).map_err(cannot_open)?;
-    let public = public_upload(&source);
-    let record = upload_record(&source);
+    let public = public_source(&source);
+    let record = source_record(&source);
     state.register_source(source, record, engine)?;
     Ok(public)
 }
