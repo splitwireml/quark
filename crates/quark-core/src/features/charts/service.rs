@@ -6,7 +6,7 @@ use duckdb::Connection;
 use serde_json::Value;
 
 use super::model::{ChartKind, ChartSpec, VisualizeRequest};
-use super::{bar, box_plot, metric};
+use super::{bar, box_plot, histogram, metric};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::filtered::{Relation, filtered};
 use crate::relation::target::Target;
@@ -24,7 +24,7 @@ pub fn visualize(
     let relation = filtered(conn, target, &request.query())?;
     let spec = &request.spec;
     let compute = || {
-        let mut response = chart(conn, &relation, spec)?;
+        let mut response = chart(engine, conn, &relation, spec)?;
         if let Value::Object(body) = &mut response {
             let millis = (started.elapsed().as_secs_f64() * 1_000_000.0).round() / 1000.0;
             body.insert("elapsed_ms".to_owned(), Value::from(millis));
@@ -64,11 +64,16 @@ fn formula_is_cacheable(
         .unwrap_or(false)
 }
 
-fn chart(conn: &Connection, relation: &Relation, spec: &ChartSpec) -> ApiResult<Value> {
+fn chart(
+    engine: &Engine,
+    conn: &Connection,
+    relation: &Relation,
+    spec: &ChartSpec,
+) -> ApiResult<Value> {
     match spec.chart {
         ChartKind::Metric => metric::chart(conn, relation, spec),
         ChartKind::Bar | ChartKind::Pie => bar::chart(conn, relation, spec),
-        ChartKind::Histogram => unavailable("histogram"),
+        ChartKind::Histogram => histogram::chart(engine, conn, relation, spec),
         ChartKind::Box => box_plot::chart(conn, relation, spec),
         ChartKind::Scatter => unavailable("scatter"),
         ChartKind::Line => unavailable("line"),

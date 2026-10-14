@@ -2330,6 +2330,7 @@ def test_visualize_histogram_without_group_omits_series(client):
     assert "series" not in payload
 
 
+@pytest.mark.python_only
 def test_visualize_histogram_skips_series_for_a_date_column(client):
     body = b"region,day\n" + b"".join(
         f"{'east' if i % 2 else 'west'},2026-01-{i:02d}\n".encode() for i in range(1, 29)
@@ -2341,6 +2342,26 @@ def test_visualize_histogram_skips_series_for_a_date_column(client):
     }).json()
     assert payload["bins"]
     assert "series" not in payload
+
+
+@pytest.mark.rust_only
+def test_visualize_histogram_groups_date_columns_into_series(client):
+    body = b"region,day\n" + b"".join(
+        f"{'east' if i % 2 else 'west'},2026-01-{i:02d}\n".encode() for i in range(1, 29)
+    )
+    node = upload(client, "datehistseries.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'datehistseries')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "histogram", "encodings": {"value": "day", "group": "region"}},
+    }).json()
+    edges = [(item["lower"], item["upper"]) for item in payload["bins"]]
+    assert sorted(series["label"] for series in payload["series"]) == ["east", "west"]
+    for series in payload["series"]:
+        assert [(item["lower"], item["upper"]) for item in series["bins"]] == edges
+    totals = [item["count"] for item in payload["bins"]]
+    summed = [sum(series["bins"][index]["count"] for series in payload["series"]) for index in range(len(edges))]
+    assert summed == totals
+    assert sum(totals) == 28
 
 
 def test_visualize_histogram_rejects_an_unknown_group(client):
