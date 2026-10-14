@@ -587,6 +587,14 @@ def test_restart_discards_unconfirmed_workbook_upload(tmp_path):
     assert source.exists() is False
 
 
+@pytest.mark.rust_only
+def test_unreadable_workbook_upload_is_400(client, tmp_path):
+    response = client.post("/api/nodes/upload", files={"file": ("broken.xlsx", b"not a zip")})
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Could not open source: ")
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
 def test_attach_is_read_only_and_missing_paths_fail(client, tmp_path):
     db = tmp_path / "existing.duckdb"
     with duckdb.connect(str(db)) as con:

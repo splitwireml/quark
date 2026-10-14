@@ -85,6 +85,7 @@ impl AppState {
                     sources,
                     engines: HashMap::new(),
                     remount: HashSet::new(),
+                    pending_workbooks: HashMap::new(),
                 }),
                 columnar: Mutex::new(Some(worker)),
             }

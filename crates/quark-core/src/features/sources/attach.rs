@@ -14,8 +14,6 @@ use crate::runtime::AppState;
 use crate::runtime::registry::{DEFAULT_PROJECT_ID, SourceRecord};
 use crate::runtime::state::cannot_open;
 
-use super::service::{public_source, source_record};
-
 /// The body of both attach routes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,8 +57,8 @@ pub fn attach_database(
     };
     let engine = state.open_node_engine(&source)?;
     datasets(&engine.primary().conn).map_err(cannot_open)?;
-    let public = public_source(&source);
-    let record = source_record(&source);
+    let public = source.to_public();
+    let record = source.to_raw();
     state.register_source(source, record, engine)?;
     Ok(public)
 }

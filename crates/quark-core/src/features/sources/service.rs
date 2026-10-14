@@ -2,15 +2,13 @@
 
 use std::path::Path;
 
-use serde_json::{Value, json};
-
 use super::model::{DatasetEntry, LegacyNode, SourceDetail, SourceSummary};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::describe::{datasets as describe_datasets, describe};
 use crate::runtime::AppState;
 use crate::runtime::cancel::Cancelled;
 use crate::runtime::mount::ViewInfo;
-use crate::runtime::registry::{DEFAULT_PROJECT_ID, RawRecord, SourceRecord};
+use crate::runtime::registry::{DEFAULT_PROJECT_ID, SourceRecord};
 use crate::runtime::state::invalid_value;
 use crate::shared::naming::dataset_name;
 use crate::shared::sql::quote_ident;
@@ -105,10 +103,8 @@ pub(crate) fn supported_extension(name: &str) -> ApiResult<String> {
         .map(|ext| format!(".{}", ext.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
     match ext.as_str() {
-        ".csv" | ".tsv" | ".parquet" | ".json" | ".ndjson" | ".jsonl" | ".duckdb" | ".db" => {
-            Ok(ext)
-        }
-        ".xlsx" => Err(ApiError::not_implemented("Not in the desktop build yet")),
+        ".csv" | ".tsv" | ".parquet" | ".json" | ".ndjson" | ".jsonl" | ".xlsx" | ".duckdb"
+        | ".db" => Ok(ext),
         _ => Err(ApiError::bad_request("Unsupported file type")),
     }
 }
@@ -140,33 +136,5 @@ pub(crate) fn upload_source(
         project_id: project_id.map(str::to_owned),
         dataset_name: (!is_database).then(|| dataset_name(original_name)),
         sheets: None,
-    }
-}
-
-/// The registry entry that stores the source.
-pub(crate) fn source_record(source: &SourceRecord) -> RawRecord {
-    let mut record = RawRecord::new();
-    record.insert("id".into(), source.id.clone().into());
-    record.insert("name".into(), source.name.clone().into());
-    record.insert("kind".into(), source.kind.clone().into());
-    record.insert("source".into(), source.source.to_string_lossy().into());
-    if let Some(project) = &source.project_id {
-        record.insert("project_id".into(), project.clone().into());
-    }
-    if let Some(dataset) = &source.dataset_name {
-        record.insert("dataset_name".into(), dataset.clone().into());
-    }
-    record
-}
-
-/// The source as the API returns it: project-scoped, or the legacy shape with its path.
-pub(crate) fn public_source(source: &SourceRecord) -> Value {
-    match &source.project_id {
-        Some(project) => {
-            json!({"id": source.id, "name": source.name, "kind": source.kind, "project_id": project})
-        }
-        None => {
-            json!({"id": source.id, "name": source.name, "kind": source.kind, "source": source.source.to_string_lossy()})
-        }
     }
 }

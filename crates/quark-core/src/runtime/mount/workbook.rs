@@ -13,7 +13,7 @@ use crate::runtime::dirs::{Dirs, configure_spill, lock_down_dirs};
 use crate::runtime::registry::{ProjectRecord, SourceRecord};
 use crate::shared::sql::quote_ident;
 
-pub(super) fn is_workbook(path: &Path) -> bool {
+pub(crate) fn is_workbook(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx"))
 }

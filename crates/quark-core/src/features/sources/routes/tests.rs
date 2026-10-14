@@ -188,7 +188,7 @@ async fn json_routes_keep_the_two_megabyte_limit() {
 }
 
 #[tokio::test]
-async fn unsupported_and_xlsx_extensions() {
+async fn unsupported_extensions() {
     let root = tempfile::tempdir().unwrap();
     let (app, state) = app(root.path());
 
@@ -200,11 +200,6 @@ async fn unsupported_and_xlsx_extensions() {
             "{name}"
         );
     }
-    let (status, body) = upload(&app, "/api/projects/p/sources/upload", "Book.XLSX", b"x").await;
-    assert_eq!(
-        (status, body),
-        (501, json!({"detail": "Not in the desktop build yet"}))
-    );
     let (status, body) = upload(&app, "/api/nodes/upload", "broken.parquet", b"not parquet").await;
     assert_eq!(status, 400);
     assert!(

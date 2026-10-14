@@ -7,13 +7,12 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use super::service::{
-    public_source, source_record, supported_extension, upload_source, uploaded_name,
-};
+use super::service::{supported_extension, upload_source, uploaded_name};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::describe::datasets;
 use crate::runtime::AppState;
 use crate::runtime::files::remove_with_retry;
+use crate::runtime::mount::workbook::is_workbook;
 use crate::runtime::registry::DEFAULT_PROJECT_ID;
 use crate::runtime::state::cannot_open;
 
@@ -54,7 +53,8 @@ pub(super) async fn store(
     })
 }
 
-/// Adds the saved upload at `path` to the catalog, or deletes the file when that fails.
+/// Adds the saved upload at `path` to the catalog, or stages a workbook until its sheets are confirmed;
+/// deletes the file when that fails.
 pub fn register_upload(
     state: &AppState,
     project_id: Option<&str>,
@@ -62,7 +62,11 @@ pub fn register_upload(
     original_name: &str,
     path: &Path,
 ) -> ApiResult<Value> {
-    let result = add_upload(state, project_id, node_id, original_name, path);
+    let result = if is_workbook(path) {
+        state.stage_workbook(project_id, node_id, original_name, path)
+    } else {
+        add_upload(state, project_id, node_id, original_name, path)
+    };
     if result.is_err() {
         remove_with_retry(path);
     }
@@ -82,8 +86,8 @@ fn add_upload(
     let source = upload_source(project_id, node_id, original_name, path);
     let engine = state.open_node_engine(&source)?;
     datasets(&engine.primary().conn).map_err(cannot_open)?;
-    let public = public_source(&source);
-    let record = source_record(&source);
+    let public = source.to_public();
+    let record = source.to_raw();
     state.register_source(source, record, engine)?;
     Ok(public)
 }

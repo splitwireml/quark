@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub const DEFAULT_PROJECT_ID: &str = "default";
 pub const DEFAULT_PROJECT_NAME: &str = "Default";
@@ -116,6 +116,37 @@ impl SourceRecord {
             dataset_name: text("dataset_name"),
             sheets,
         })
+    }
+
+    /// The registry entry that stores the source.
+    pub(crate) fn to_raw(&self) -> RawRecord {
+        let mut record = RawRecord::new();
+        record.insert("id".into(), self.id.clone().into());
+        record.insert("name".into(), self.name.clone().into());
+        record.insert("kind".into(), self.kind.clone().into());
+        record.insert("source".into(), self.source.to_string_lossy().into());
+        if let Some(project) = &self.project_id {
+            record.insert("project_id".into(), project.clone().into());
+        }
+        if let Some(dataset) = &self.dataset_name {
+            record.insert("dataset_name".into(), dataset.clone().into());
+        }
+        if let Some(sheets) = &self.sheets {
+            record.insert("sheets".into(), sheets.clone().into());
+        }
+        record
+    }
+
+    /// The source as the API returns it: project-scoped, or the legacy shape with its path.
+    pub(crate) fn to_public(&self) -> Value {
+        match &self.project_id {
+            Some(project) => {
+                json!({"id": self.id, "name": self.name, "kind": self.kind, "project_id": project})
+            }
+            None => {
+                json!({"id": self.id, "name": self.name, "kind": self.kind, "source": self.source.to_string_lossy()})
+            }
+        }
     }
 
     /// The owning project; legacy uploads have no `project_id` and belong to the default one.
