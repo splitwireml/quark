@@ -2,4 +2,5 @@
 
 pub mod arrow;
 pub mod cell;
+pub mod export;
 mod scalar;

@@ -101,7 +101,7 @@ fn list_json<Tz: TimeZone>(items: &dyn Array, zone: &Tz) -> Value {
     )
 }
 
-/// `entries` holds the key and value columns; each key is rendered by `python_key_str`.
+/// `entries` holds the key and value columns; each key is rendered by `python_str`.
 fn map_json<Tz: TimeZone>(entries: &[duckdb::arrow::array::ArrayRef], zone: &Tz) -> Value {
     let [keys, values] = entries else {
         return Value::Null;
@@ -110,7 +110,7 @@ fn map_json<Tz: TimeZone>(entries: &[duckdb::arrow::array::ArrayRef], zone: &Tz)
         (0..keys.len())
             .map(|index| {
                 (
-                    python_key_str(keys.as_ref(), index, zone),
+                    python_str(keys.as_ref(), index, zone),
                     cell_json(values.as_ref(), index, "", zone),
                 )
             })
@@ -119,7 +119,7 @@ fn map_json<Tz: TimeZone>(entries: &[duckdb::arrow::array::ArrayRef], zone: &Tz)
 }
 
 /// Renders a map key the way Python `str()` renders the value DuckDB's Python client returns.
-fn python_key_str<Tz: TimeZone>(array: &dyn Array, row: usize, zone: &Tz) -> String {
+pub(crate) fn python_str<Tz: TimeZone>(array: &dyn Array, row: usize, zone: &Tz) -> String {
     match array.data_type() {
         DataType::Boolean if array.as_boolean().value(row) => "True".to_owned(),
         DataType::Boolean => "False".to_owned(),
