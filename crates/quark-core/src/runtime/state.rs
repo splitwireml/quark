@@ -14,6 +14,7 @@ use crate::runtime::cache::columnar_key::ColumnarKey;
 use crate::runtime::catalog::Catalog;
 use crate::runtime::dirs::Dirs;
 use crate::runtime::files::{remove_cache_files, remove_orphan_uploads};
+use crate::runtime::joins::JoinSlots;
 use crate::runtime::mount::import_job;
 use crate::runtime::registry::{SourceRecord, default_project, load_projects, load_registry};
 
@@ -84,6 +85,7 @@ impl AppState {
                     registry,
                     sources,
                     engines: HashMap::new(),
+                    joins: JoinSlots::default(),
                     remount: HashSet::new(),
                     pending_workbooks: HashMap::new(),
                 }),
@@ -160,8 +162,14 @@ impl AppState {
         if let Some(mut worker) = worker {
             worker.shutdown();
         }
-        let engines = std::mem::take(&mut self.catalog().engines);
-        drop(engines);
+        let (engines, joins) = {
+            let mut catalog = self.catalog();
+            (
+                std::mem::take(&mut catalog.engines),
+                std::mem::take(&mut catalog.joins),
+            )
+        };
+        drop((engines, joins));
     }
 }
 

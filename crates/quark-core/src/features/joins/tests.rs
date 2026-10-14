@@ -262,3 +262,50 @@ fn counts_come_from_the_count_cache_when_present() {
         (99, 3, 297)
     );
 }
+
+#[test]
+fn cross_source_preview_keeps_a_join_engine_only_when_it_succeeds() {
+    let root = tempfile::tempdir().unwrap();
+    let state = started(
+        root.path(),
+        &[
+            entry(root.path(), "a1", None),
+            entry(root.path(), "b1", None),
+        ],
+        &[],
+    );
+    let sides = |keys: &[&str]| request(dataset("a1", "data"), dataset("b1", "data"), keys, keys);
+
+    let missing = sides(&["nope"]);
+    assert_eq!(
+        failure(preview(&state, &missing)),
+        (422, "Join key not found".to_owned())
+    );
+    let unknown = request(dataset("a1", "gone"), dataset("b1", "data"), &["a"], &["a"]);
+    assert_eq!(
+        failure(preview(&state, &unknown)),
+        (404, "Dataset not found".to_owned())
+    );
+
+    let result = preview(&state, &sides(&["a"])).unwrap();
+    assert_eq!(
+        (result.left, result.right),
+        (
+            Identity::Dataset {
+                schema: "left_source".to_owned(),
+                name: "data".to_owned()
+            },
+            Identity::Dataset {
+                schema: "right_source".to_owned(),
+                name: "data".to_owned()
+            }
+        )
+    );
+    assert_eq!(
+        (result.left_rows, result.output_rows, result.relationship),
+        (2, 2, Relationship::OneToOne)
+    );
+    assert!(result.node_id.starts_with("join_"));
+    assert!(state.engine_for_node(&result.node_id).is_ok());
+    assert_eq!(state.catalog().joins.len(), 1);
+}

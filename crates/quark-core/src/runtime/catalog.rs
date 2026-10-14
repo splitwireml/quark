@@ -11,6 +11,7 @@ use crate::runtime::cache::columnar_key::ColumnarKey;
 use crate::runtime::cache::workbook::sheet_names;
 use crate::runtime::engine::Engine;
 use crate::runtime::files::remove_with_retry;
+use crate::runtime::joins::JoinSlots;
 use crate::runtime::mount::import_job;
 use crate::runtime::registry::{
     DEFAULT_PROJECT_ID, ProjectRecord, RawRecord, SourceRecord, save_projects,
@@ -51,6 +52,8 @@ pub struct Catalog {
     pub sources: Vec<SourceRecord>,
     /// Opened engines by node id; nothing is opened at startup.
     pub engines: HashMap<String, Arc<Engine>>,
+    /// Cross-source join engines: reachable by id, never listed.
+    pub(crate) joins: JoinSlots,
     /// Workspaces dropped for a new cache: their replacement mounts the whole project.
     pub(crate) remount: HashSet<String>,
     /// Uploaded workbooks waiting for a sheet selection, by stage id.

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use duckdb::Connection;
 
+use super::cross;
 use super::model::{Identity, JoinPreview, JoinReference, JoinWorkspaceRequest, Relationship};
 use super::queries::{has_unique_keys, inner_join_rows, row_count};
 use crate::error::{ApiError, ApiResult};
@@ -51,13 +52,23 @@ fn has_duplicates(keys: &[String]) -> bool {
 
 /// Previews the join in the one engine both sides live in, on a pooled reader that always finishes.
 pub fn preview(state: &AppState, request: &JoinWorkspaceRequest) -> ApiResult<JoinPreview> {
+    if let Some(cross) = cross::open(state, request)? {
+        let result = run_on(&cross.engine, &cross.request)?;
+        state.keep_join(&cross.id, &cross.engine);
+        return Ok(result);
+    }
     let engine = shared_engine(state, request)?;
+    run_on(&engine, request)
+}
+
+fn run_on(engine: &Engine, request: &JoinWorkspaceRequest) -> ApiResult<JoinPreview> {
     engine
-        .read(None, |conn| preview_on(&engine, conn, request))
+        .read(None, |conn| preview_on(engine, conn, request))
         .map_err(|Cancelled| ApiError::internal("Internal error"))?
 }
 
 /// The engine both sides run in. SQL sides may name a project workspace; dataset sides only default-project sources.
+/// Datasets of two different sources never get here: they run in a join engine.
 fn shared_engine(state: &AppState, request: &JoinWorkspaceRequest) -> ApiResult<Arc<Engine>> {
     let (left, right) = (&request.left, &request.right);
     if left.sql.is_some() || right.sql.is_some() {
@@ -78,9 +89,6 @@ fn shared_engine(state: &AppState, request: &JoinWorkspaceRequest) -> ApiResult<
     };
     if !is_active(left) || !is_active(right) {
         return Err(ApiError::not_found("Node not found"));
-    }
-    if left.node_id != right.node_id {
-        return Err(ApiError::not_implemented("Not in the desktop build yet"));
     }
     state.engine_for_node(&left.node_id)
 }

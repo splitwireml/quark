@@ -80,6 +80,10 @@ impl AppState {
     /// Engines open outside the catalog lock; the catalog only decides what to open and
     /// whether the result is still wanted.
     pub fn engine_for_node(&self, node_id: &str) -> ApiResult<Arc<Engine>> {
+        let join = self.catalog().joins.get(node_id);
+        if let Some(engine) = join {
+            return Ok(engine);
+        }
         for _ in 0..OPEN_ATTEMPTS {
             let plan = match snapshot(&self.catalog(), node_id)? {
                 Snapshot::Ready(engine) => return Ok(engine),

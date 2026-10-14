@@ -1547,6 +1547,7 @@ def test_join_workspace_rejects_invalid_references_and_keys(client):
         assert response.status_code == status, response.text
 
 
+@pytest.mark.python_only
 def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
     first = upload(client, "first.csv", b"id\n1\n")
     second = upload(client, "second.csv", b"id\n1\n")
@@ -1576,6 +1577,35 @@ def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
     assert {node["id"] for node in client.get("/api/nodes").json()} == {
         first["id"], second["id"], third["id"],
     }
+
+
+@pytest.mark.rust_only
+def test_cross_node_join_workspaces_stay_open_until_evicted(client):
+    left = upload(client, "left.csv", b"id\n1\n2\n")
+    right = upload(client, "right.csv", b"id\n1\n")
+
+    def join():
+        response = client.post("/api/join-workspaces", json=join_payload(
+            left, dataset(client, left, "left"),
+            right, dataset(client, right, "right"), ["id"], ["id"],
+        ))
+        assert response.status_code == 200, response.text
+        return response.json()["node_id"]
+
+    def query(workspace):
+        return client.post(
+            f"/api/nodes/{workspace}/sql",
+            json={"sql": 'SELECT count(*) AS n FROM "left_source"."left"'},
+        )
+
+    first, second = join(), join()
+    assert first != second
+    assert query(first).json()["rows"] == [{"n": 2}]
+    assert query(second).json()["rows"] == [{"n": 2}]
+    later = [join() for _ in range(3)]
+    assert query(first).status_code == 404
+    assert all(query(workspace).status_code == 200 for workspace in [second, *later])
+    assert {node["id"] for node in client.get("/api/nodes").json()} == {left["id"], right["id"]}
 
 
 def create_project(client, name):

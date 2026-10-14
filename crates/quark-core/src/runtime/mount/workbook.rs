@@ -68,6 +68,19 @@ pub(crate) fn open_node(source: &SourceRecord, dirs: &Dirs) -> anyhow::Result<Co
     Ok(conn)
 }
 
+/// Attaches the workbook's typed cache and returns the quoted origin of `sheet` in it, with the
+/// cache file a workspace must also allow along with its log.
+pub(crate) fn attach_sheet(
+    conn: &Connection,
+    source: &SourceRecord,
+    sheet: &str,
+    cache_dir: &Path,
+) -> anyhow::Result<(String, PathBuf)> {
+    let (key, file, _) = ready_cache(source, cache_dir)?;
+    let alias = attach_alias(conn, &key, &file)?;
+    Ok((format!("{alias}.main.{}", quote_ident(sheet)), file))
+}
+
 /// Mounts each sheet as a view in its own schema over the attached cache.
 pub(super) fn mount(
     conn: &Connection,

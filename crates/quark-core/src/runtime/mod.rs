@@ -7,6 +7,7 @@ pub mod dirs;
 pub mod engine;
 pub mod engines;
 pub mod files;
+pub mod joins;
 pub mod mount;
 pub mod pool;
 pub mod registry;
