@@ -56,6 +56,7 @@ pub(super) fn evict(columnar_dir: &Path, cap: u64) {
     }
 }
 
+/// Clears `*.partial` imports and every write-ahead log whose database file is gone.
 pub(super) fn remove_stray_partials(columnar_dir: &Path) {
     let Ok(entries) = fs::read_dir(columnar_dir) else {
         return;
@@ -64,11 +65,12 @@ pub(super) fn remove_stray_partials(columnar_dir: &Path) {
         let name = path.to_string_lossy();
         if name.ends_with(".partial") {
             remove_partial(&path);
-        } else if name.ends_with(".partial.wal")
+        } else if let Some(database) = name.strip_suffix(".wal")
+            && !Path::new(database).exists()
             && let Err(error) = fs::remove_file(&path)
             && error.kind() != io::ErrorKind::NotFound
         {
-            tracing::warn!(%error, "could not delete an orphan partial log");
+            tracing::warn!(%error, "could not delete an orphan write-ahead log");
         }
     }
 }

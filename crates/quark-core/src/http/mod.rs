@@ -6,7 +6,6 @@ use std::time::Instant;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::Uri;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use tower_http::catch_panic::CatchPanicLayer;
@@ -18,12 +17,13 @@ use crate::features::{
 use crate::runtime::AppState;
 
 pub mod deps;
+mod fallback;
 pub mod secure;
 
 #[cfg(test)]
 mod tests;
 
-/// Every route the desktop build serves. Other `/api/*` requests, including a wrong method on a known path, answer 501; the rest 404.
+/// Every route the desktop build serves. An unknown path answers 404 and a wrong method 405.
 pub fn router(state: AppState) -> Router {
     guarded(
         Router::new()
@@ -37,8 +37,8 @@ pub fn router(state: AppState) -> Router {
             .merge(charts::routes())
             .merge(exports::routes())
             .merge(workbooks::routes())
-            .fallback(unknown_route)
-            .method_not_allowed_fallback(unknown_route),
+            .fallback(fallback::unknown_route)
+            .method_not_allowed_fallback(fallback::wrong_method),
     )
     .layer(middleware::from_fn(log_request))
     .with_state(state)
@@ -76,14 +76,6 @@ struct ErrorBody {
 
 fn guarded<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Router<S> {
     router.layer(CatchPanicLayer::custom(panic_response))
-}
-
-async fn unknown_route(uri: Uri) -> ApiError {
-    if uri.path().starts_with("/api/") {
-        ApiError::not_implemented("Not in the desktop build yet")
-    } else {
-        ApiError::not_found("Not Found")
-    }
 }
 
 fn panic_response(_: Box<dyn Any + Send>) -> Response {

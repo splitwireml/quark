@@ -122,6 +122,26 @@ fn orphan_partial_wal_is_swept() {
     assert!(!wal.exists());
 }
 
+#[test]
+fn stray_wal_files_are_swept() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    let columnar = cache.join("columnar");
+    fs::create_dir_all(&columnar).unwrap();
+    let stray = columnar.join("gone.duckdb.wal");
+    let kept_file = columnar.join("live.duckdb");
+    let kept_wal = columnar.join("live.duckdb.wal");
+    fs::write(&stray, b"log of a deleted cache").unwrap();
+    fs::write(&kept_file, b"cache").unwrap();
+    fs::write(&kept_wal, b"log of a live cache").unwrap();
+
+    let (mut worker, _ready) = start(&cache);
+    worker.shutdown();
+
+    assert!(!stray.exists());
+    assert!(kept_file.exists() && kept_wal.exists());
+}
+
 /// A 10-byte stand-in cache file last used `age` ago.
 fn cache_file(dir: &Path, cache: &Path, name: &str, age: Duration) -> ColumnarKey {
     let source = dir.join(name);

@@ -128,3 +128,28 @@ fn ready_cache_for_deleted_source_stays_while_another_source_uses_it() {
 
     assert!(key.is_ready(&state.0.dirs.cache));
 }
+
+#[test]
+fn scratch_folders_are_emptied_at_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let dirs = dirs(root.path());
+    write(&dirs.exports().join("old.csv"), "x\n");
+    write(&dirs.spill().join("old.tmp"), "x\n");
+
+    AppState::load(dirs.clone()).unwrap();
+
+    assert_eq!(fs::read_dir(dirs.exports()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(dirs.spill()).unwrap().count(), 0);
+}
+
+#[test]
+fn undeletable_scratch_leftover_is_skipped() {
+    let root = tempfile::tempdir().unwrap();
+    let leftover = root.path().join("exports");
+    write(&leftover, "a file where the folder should be");
+
+    empty_folder(&leftover);
+    empty_folder(&root.path().join("missing"));
+
+    assert!(leftover.is_file());
+}

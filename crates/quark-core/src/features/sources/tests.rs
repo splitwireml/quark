@@ -156,22 +156,6 @@ async fn source_and_view_routes() {
 }
 
 #[tokio::test]
-async fn unknown_api_route_is_501() {
-    let root = tempfile::tempdir().unwrap();
-    let app = app(root.path(), &[], &[]);
-
-    let (status, body) = get_json(&app, "/api/export").await;
-    assert_eq!(
-        (status, body),
-        (501, json!({"detail": "Not in the desktop build yet"}))
-    );
-    let (status, _) = send(&app, Method::GET, "/api/nodes/upload", None).await;
-    assert_eq!(status, 501);
-    let (status, _) = get_json(&app, "/elsewhere").await;
-    assert_eq!(status, 404);
-}
-
-#[tokio::test]
 async fn datasets_route_lists_columns() {
     let root = tempfile::tempdir().unwrap();
     let app = app(root.path(), &[entry(root.path(), "legacy", None)], &[]);

@@ -1,4 +1,4 @@
-//! Tests for request logging and panic recovery in the router.
+//! Tests for request logging, panic recovery and unknown-route answers in the router.
 
 use super::*;
 use axum::body::Body;
@@ -100,4 +100,47 @@ async fn panicking_handler_becomes_internal_error() {
         .await
         .unwrap();
     assert_eq!(&bytes[..], br#"{"detail":"Internal error"}"#);
+}
+
+/// The error body of `request` against a router over an empty data folder.
+async fn answer(method: &str, path: &str) -> (StatusCode, serde_json::Value) {
+    let root = tempfile::tempdir().unwrap();
+    let dirs = crate::runtime::dirs::Dirs {
+        data: root.path().join("data"),
+        cache: root.path().join("cache"),
+    };
+    let app = router(AppState::load(dirs).unwrap());
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn unknown_api_path_is_404_not_found() {
+    for path in ["/api/export", "/api/nodes/upload/extra/parts", "/elsewhere"] {
+        let (status, body) = answer("GET", path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(body, serde_json::json!({"detail": "Not Found"}), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn wrong_method_is_405() {
+    for (method, path) in [("DELETE", "/api/nodes"), ("GET", "/api/nodes/upload")] {
+        let (status, body) = answer(method, path).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+        assert_eq!(
+            body,
+            serde_json::json!({"detail": "Method Not Allowed"}),
+            "{method} {path}"
+        );
+    }
 }

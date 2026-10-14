@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use anyhow::Context;
@@ -32,6 +33,16 @@ pub(crate) fn invalid_value(error: impl Display) -> ApiError {
     ApiError::unprocessable(format!("Invalid filter value: {error}"))
 }
 
+/// Deletes the leftovers of the last run. A file the system refuses to delete (Windows keeps
+/// an open one) is logged and skipped: it must not stop the app from starting.
+fn empty_folder(folder: &Path) {
+    if let Err(error) = fs::remove_dir_all(folder)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, folder = %folder.display(), "could not empty a scratch folder");
+    }
+}
+
 pub struct Shared {
     pub dirs: Dirs,
     pub catalog: Mutex<Catalog>,
@@ -50,15 +61,11 @@ impl AppState {
             fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
         }
         let spill = dirs.spill();
-        if spill.exists() {
-            fs::remove_dir_all(&spill).context("emptying the spill folder")?;
-        }
-        fs::create_dir_all(&spill).context("creating the spill folder")?;
         let exports = dirs.exports();
-        if exports.exists() {
-            fs::remove_dir_all(&exports).context("emptying the exports folder")?;
+        for folder in [&spill, &exports] {
+            empty_folder(folder);
+            fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
         }
-        fs::create_dir_all(&exports).context("creating the exports folder")?;
 
         let mut projects = vec![default_project()];
         projects.extend(load_projects(&dirs.projects_file()));

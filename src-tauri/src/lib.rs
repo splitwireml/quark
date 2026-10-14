@@ -85,6 +85,9 @@ fn start(app: &mut App) -> SetupResult {
 
 /// Writes `quark.log.<date>` files, keeping the newest three. The guard flushes on drop.
 fn init_logging(folder: &Path) -> SetupResult<WorkerGuard> {
+    // The appender prunes old logs before it creates the folder, and prints "Error reading the
+    // log directory/files" on a first launch when the folder is missing.
+    std::fs::create_dir_all(folder)?;
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix("quark.log")
