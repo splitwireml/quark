@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
-use duckdb::{Connection, params};
+use duckdb::Connection;
 use serde::Serialize;
 
+use self::datasets::attached_datasets;
+use self::workbook::is_workbook;
 use crate::relation::describe::{DatasetInfo, describe};
 use crate::runtime::cache::columnar_key::{ColumnarJob, ColumnarKey};
 use crate::runtime::cache::responses::source_files;
@@ -16,6 +18,9 @@ use crate::runtime::engine::{Engine, EngineKind};
 use crate::runtime::registry::{ProjectRecord, SourceRecord};
 use crate::shared::ids::{database_alias, dataset_id, source_schema, view_id};
 use crate::shared::sql::{quote_ident, scan_expression, sql_string};
+
+mod datasets;
+pub(crate) mod workbook;
 
 /// One mounted dataset, as listed by the project's views endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -39,7 +44,7 @@ pub(crate) fn is_database(path: &Path) -> bool {
 }
 
 /// The library version, which is part of every cache key.
-fn engine_version() -> &'static str {
+pub(crate) fn engine_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION.get_or_init(|| {
         Connection::open_in_memory()
@@ -71,12 +76,17 @@ pub(crate) fn attach_cache(
     key: &ColumnarKey,
     file: &Path,
 ) -> duckdb::Result<String> {
+    Ok(format!("{}.main.data", attach_alias(conn, key, file)?))
+}
+
+/// Like `attach_cache`, but returns the quoted alias of the attached cache file.
+fn attach_alias(conn: &Connection, key: &ColumnarKey, file: &Path) -> duckdb::Result<String> {
     let alias = quote_ident(&format!("cache_{}", &key.as_str()[..16]));
     conn.execute_batch(&format!(
         "ATTACH IF NOT EXISTS {} AS {alias} (READ_ONLY)",
         sql_string(&file.to_string_lossy())
     ))?;
-    Ok(format!("{alias}.main.data"))
+    Ok(alias)
 }
 
 /// A database file and its write-ahead log, which DuckDB looks for when attaching.
@@ -101,6 +111,7 @@ impl Engine {
                 paths.extend(database_paths(&source.source));
             } else {
                 paths.push(source.source.to_string_lossy().into_owned());
+                paths.extend(workbook::allowed_paths(source, &dirs.cache));
             }
             if let Some(job) = import_job(source)
                 && job.key.is_ready(&dirs.cache)
@@ -118,6 +129,7 @@ impl Engine {
         };
         let mut engine = Engine::new(kind, conn)?;
         engine.caches = caches;
+        engine.cache_dir.clone_from(&dirs.cache);
         engine.source_files = source_files(sources);
         Ok(engine)
     }
@@ -132,7 +144,13 @@ impl Engine {
         if let Some(views) = primary.mounted.get(&source.id) {
             return Ok(views.clone());
         }
-        let views = mount_source(&primary.conn, project, source, &self.caches)?;
+        let views = mount_source(
+            &primary.conn,
+            project,
+            source,
+            &self.caches,
+            &self.cache_dir,
+        )?;
         primary.mounted.insert(source.id.clone(), views.clone());
         Ok(views)
     }
@@ -143,7 +161,11 @@ fn mount_source(
     project: &ProjectRecord,
     source: &SourceRecord,
     caches: &HashMap<ColumnarKey, PathBuf>,
+    cache_dir: &Path,
 ) -> anyhow::Result<Vec<ViewInfo>> {
+    if is_workbook(&source.source) {
+        return workbook::mount(conn, project, source, cache_dir);
+    }
     let path = source.source.to_string_lossy();
     if is_database(&source.source) {
         let alias = database_alias(&source.id);
@@ -183,32 +205,6 @@ fn mount_source(
         };
         Ok(vec![mount_dataset(conn, project, source, &item, &origin)?])
     }
-}
-
-/// Tables and views of the database attached as `alias`, ordered by schema then name.
-fn attached_datasets(conn: &Connection, alias: &str) -> duckdb::Result<Vec<DatasetInfo>> {
-    let mut statement = conn.prepare(
-        "SELECT schema_name, table_name, 'TABLE' FROM duckdb_tables()
-         WHERE database_name = ? AND NOT internal
-           AND schema_name NOT IN ('information_schema', 'pg_catalog')
-         UNION ALL
-         SELECT schema_name, view_name, 'VIEW' FROM duckdb_views()
-         WHERE database_name = ? AND NOT internal
-           AND schema_name NOT IN ('information_schema', 'pg_catalog')
-         ORDER BY 1, 2",
-    )?;
-    statement
-        .query_map(params![alias, alias], |row| {
-            let schema: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            Ok(DatasetInfo {
-                id: dataset_id(&schema, &name),
-                name,
-                schema,
-                kind: row.get(2)?,
-            })
-        })?
-        .collect()
 }
 
 /// Creates the dataset's own schema holding one view over `origin`.

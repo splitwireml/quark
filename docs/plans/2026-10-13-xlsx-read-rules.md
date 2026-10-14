@@ -42,14 +42,16 @@ and the original spelling is kept.
 | string | unchanged, including `=1+1`, `+SUM(A1)`, `-5x`, `007`, `1e3`, `0x10` (never evaluated or coerced) |
 | empty | NULL |
 
-**Declared types without `all_varchar`.** Per column, from the cell kinds in the data rows (a column
-of one kind gets that kind's type):
+**Declared types without `all_varchar`.** Python reads `SELECT * ... LIMIT 0` and takes the types from
+`.description`, which follow the first data row of each column (W1's `declare()` does the same):
 - numbers: `DOUBLE` (integers are not distinguished from floats);
 - date-styled numbers: `DATE`; datetime-styled numbers: `TIMESTAMP`; time-styled numbers: `TIME`;
 - booleans: `BOOLEAN`;
-- strings: `VARCHAR`, including `007` and `0012` stored as text (the value keeps its zeros);
-- a column mixing kinds fails the read (`Could not convert string 'n/a' to DOUBLE` when a string appears after
-  numbers), so the Python backend never relies on a typed read for values.
+- strings: `VARCHAR`, including `007` and `0012` stored as text (the value keeps its zeros).
+
+A later cell of another kind does not change the declared type. A full typed read of such a column fails
+(`Could not convert string 'n/a' to DOUBLE` when a string appears after numbers), so the Python backend
+never relies on a typed read for values.
 
 What decides date, datetime or time is the cell style (number format), not the value. Probed with
 `45293.5` (2024-01-02 12:00): format `General` gives `DOUBLE` (`45293.5`); `yyyy-mm-dd` gives `DATE`
@@ -86,3 +88,10 @@ Consequences the corpus pins:
 Formulas with cached values: `openpyxl` writes formulas without a cached result, so `read_xlsx` would see an
 empty value. Files that carry cached results need a real spreadsheet application to produce; W1's own tests may
 build them with `rust_xlsxwriter` (which can set a result), not this corpus.
+
+## 4. Known gaps
+
+calamine 0.36 exposes no number formats, so the Rust reader decides date, datetime or time from the value.
+Two cases differ from `read_xlsx` (W4 records them as deviations):
+- a datetime-styled column whose first value is at midnight is declared `DATE` (`read_xlsx` says `TIMESTAMP`);
+- a time-styled value of 1 or more (a duration) is declared `TIMESTAMP` (`read_xlsx` says `TIME`).

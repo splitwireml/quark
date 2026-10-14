@@ -13,6 +13,7 @@ use super::cache::responses::{ResponseCache, source_files};
 use super::cache::results::ResultCache;
 use super::cache::stats::StatsCache;
 use super::dirs::{Dirs, configure_spill, lock_down_dirs};
+use super::mount::workbook::open_node as workbook_node;
 use super::mount::{ViewInfo, attach_cache, import_job};
 use super::pool::{ReaderPool, reader_count};
 use super::registry::SourceRecord;
@@ -55,6 +56,8 @@ pub struct Engine {
     pub(crate) next_ticket: AtomicU64,
     /// Cache files that were ready when this workspace opened, so its allow-list covers them.
     pub(crate) caches: HashMap<ColumnarKey, PathBuf>,
+    /// The cache folder, where a workspace imports a workbook that has no cache yet.
+    pub(crate) cache_dir: PathBuf,
 }
 
 /// Locks `mutex`, recovering its data if a panicking thread poisoned it.
@@ -81,6 +84,7 @@ impl Engine {
             active: Mutex::new(HashMap::new()),
             next_ticket: AtomicU64::new(0),
             caches: HashMap::new(),
+            cache_dir: PathBuf::new(),
         })
     }
 
@@ -114,7 +118,7 @@ impl Engine {
                 lock_down_dirs(&conn, &[])?;
                 conn
             }
-            Some("xlsx") => bail!("Excel sources are not in the desktop build yet"),
+            Some("xlsx") => workbook_node(source, dirs)?,
             _ => {
                 let path = source.source.to_string_lossy();
                 let Some(scan) = scan_expression(&path) else {
