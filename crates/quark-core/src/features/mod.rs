@@ -6,4 +6,5 @@ pub mod joins;
 pub mod pages;
 pub mod projects;
 pub mod sources;
+pub mod stats;
 pub mod values;
