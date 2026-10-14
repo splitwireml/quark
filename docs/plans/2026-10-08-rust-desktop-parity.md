@@ -1813,6 +1813,19 @@ The Lead records here every change to the cards, the schedule and the environmen
   - **Deviation for sign-off:** after 8 attempts in a row lose to catalog changes, the open falls back to running under the catalog lock (SP1's behaviour), so the call always ends. This is a pathological case only.
   - **Follow-up, folded into R7:** an engine that loses the race must be dropped after the catalog guard is released.
 
+- L4 · batch 9 · `fix(core): render export decimals the way Python's str(Decimal) does`. Sprint 4 audit (spec §6.2): X1 printed decimals with Arrow's text, but Python switches to scientific notation below an adjusted exponent of -6 (`0.00000012` → `1.2E-7`).
+- L5 · batch 11 · `test(core): resolve paths before comparing and retry the read-overlap timing`. Sprint 5 CI was red on macOS and Windows: two V7 tests compared unresolved temp-dir paths, and F3's overlap timing test flaked on Ubuntu. The tests changed; the production code did not.
+- L6 · batch 13 · `ci: run the live WebKit passes against the Rust core`. This container has only Chromium and may not run `playwright install`, so CI's new `live` job runs E2's and E3's passes in WebKit, and local runs use Chromium as a smoke check.
+- L7 · batch 14 · `fix(core): label histogram series as Python prints them and prove scatter samples repeat`. Sprint 6 audit (spec §6.1, §7 fix 1): histogram labels used SQL `CAST` text instead of Python `str()`, and the scatter repeatability tests were served from the response cache.
+- L8 · batch 15 · `fix(core): replace the last 501 answers and give the live CI job room`. Sprint 7 audit (spec §10): two internal arms still answered 501 (a join side with no scan expression, an unreachable export arm). The `live` job's timeout goes from 30 to 50 minutes, because parity pushes build cold.
+- L9 · batch 15 · `test(ui): draw every chart kind on the dashboard in the WebKit pass`. Spec §8.5 asks for every kind on both canvases; E3's dashboard had four tiles.
+- L10 · batch 15 · `test(perf): time the routes, not the response cache`. Sprint 7 audit (spec §9): the values, chart and Find Next cases repeated one request, so 4 of 5 runs were response-cache hits. compare.py also joined before the second source's import finished, and rewrote the whole results doc.
+
+**Schedule, exit stream**
+- E1 and E3 split their work across batches 14 and 14b after reaching the 200-line split rule; the Lead accepted their sizes and resumed them.
+- Batch 15 runs L8–L10, then an idle-slot release perf run, idle and under load. Spec §9 asks for margins under load, as SP1's deviations 21 and 22 recorded.
+- Batch 16 runs the three exit reviewers of section 15 first, then E5, so the deviations doc holds what they find.
+
 **F1, revised.** The card below replaces the card in section 8.
 - **Why:** the crates.io package of `libduckdb-sys 1.10504.0` ships no DuckDB sources, so the `icu` feature (`bundled-cmake`) cannot build from it.
 - **Deviation for sign-off:**
