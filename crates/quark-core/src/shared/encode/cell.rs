@@ -6,6 +6,7 @@ use super::scalar::{
 };
 use crate::shared::literal::python_float_repr;
 use chrono::TimeZone;
+use duckdb::arrow::array::ArrowPrimitiveType;
 use duckdb::arrow::array::{Array, AsArray, downcast_dictionary_array};
 use duckdb::arrow::datatypes::{
     DataType, Date32Type, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int8Type,
@@ -14,6 +15,7 @@ use duckdb::arrow::datatypes::{
     TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use serde_json::Value;
+use std::fmt::Write;
 
 /// Converts one cell to JSON; `type_name` is DuckDB's name for the column type.
 /// Nested children convert with an empty type name. Types not handled yet give `Null`.
@@ -127,6 +129,9 @@ pub(crate) fn python_str<Tz: TimeZone>(array: &dyn Array, row: usize, zone: &Tz)
         DataType::Float64 => float_key(value::<Float64Type>(array, row)),
         DataType::Decimal128(..) => array.as_primitive::<Decimal128Type>().value_as_string(row),
         DataType::Decimal256(..) => array.as_primitive::<Decimal256Type>().value_as_string(row),
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            timedelta_str(value::<IntervalMonthDayNanoType>(array, row))
+        }
         data_type => match cell_json(array, row, "", zone) {
             Value::String(text) if matches!(data_type, DataType::Timestamp(..)) => {
                 text.replacen('T', " ", 1)
@@ -135,6 +140,34 @@ pub(crate) fn python_str<Tz: TimeZone>(array: &dyn Array, row: usize, zone: &Tz)
             other => other.to_string(),
         },
     }
+}
+
+/// Python `str(timedelta)`: `[D day[s], ]H:MM:SS[.ffffff]`, a month counting as 30 days.
+fn timedelta_str(interval: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native) -> String {
+    let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(interval);
+    let micros =
+        (i128::from(months) * 30 + i128::from(days)) * 86_400_000_000 + i128::from(nanos / 1000);
+    let (whole_days, rest) = (
+        micros.div_euclid(86_400_000_000),
+        micros.rem_euclid(86_400_000_000),
+    );
+    let (seconds, fraction) = (rest / 1_000_000, rest % 1_000_000);
+    let mut text = String::new();
+    if whole_days != 0 {
+        let plural = if whole_days.abs() == 1 { "" } else { "s" };
+        let _ = write!(text, "{whole_days} day{plural}, ");
+    }
+    let _ = write!(
+        text,
+        "{}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    if fraction != 0 {
+        let _ = write!(text, ".{fraction:06}");
+    }
+    text
 }
 
 fn float_key(number: f64) -> String {

@@ -1,6 +1,2 @@
 # Tests the Rust backend has not ported yet (strict xfail in QUARK_TEST_BACKEND=rust mode).
 # One function name per line; delete a line when its test starts passing.
-test_visualize_line_buckets_by_an_automatic_grain
-test_visualize_line_counts_rows_without_a_y_encoding
-test_visualize_line_honours_an_explicit_grain
-test_visualize_line_splits_into_series_by_group

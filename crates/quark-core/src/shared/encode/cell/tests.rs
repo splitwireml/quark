@@ -223,6 +223,32 @@ fn interval_is_total_seconds() {
 }
 
 #[test]
+fn interval_keys_print_like_a_python_timedelta() {
+    let keys = |sql: &str| -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut statement = conn.prepare(sql).unwrap();
+        let batch = statement.query_arrow([]).unwrap().next().unwrap();
+        (0..batch.num_rows())
+            .map(|row| python_str(batch.column(0).as_ref(), row, &chrono::Utc))
+            .collect()
+    };
+
+    assert_eq!(
+        keys(
+            "SELECT * FROM (VALUES (INTERVAL 1 DAY), (INTERVAL '2 days 3 hours 4 seconds'), \
+              (INTERVAL '-1 second'), (INTERVAL '1.5 seconds'), (INTERVAL 1 MONTH)) AS v(i)"
+        ),
+        [
+            "1 day, 0:00:00",
+            "2 days, 3:00:04",
+            "-1 day, 23:59:59",
+            "0:00:01.500000",
+            "30 days, 0:00:00"
+        ]
+    );
+}
+
+#[test]
 fn lists_structs_maps() {
     for (sql, expected) in [
         ("[1, NULL]", "[1,null]"),

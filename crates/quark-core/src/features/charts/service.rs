@@ -6,8 +6,8 @@ use duckdb::Connection;
 use serde_json::Value;
 
 use super::model::{ChartKind, ChartSpec, VisualizeRequest};
-use super::{bar, box_plot, histogram, metric, scatter};
-use crate::error::{ApiError, ApiResult};
+use super::{bar, box_plot, histogram, line, metric, scatter};
+use crate::error::ApiResult;
 use crate::relation::filtered::{Relation, filtered};
 use crate::relation::target::Target;
 use crate::runtime::engine::Engine;
@@ -76,12 +76,6 @@ fn chart(
         ChartKind::Histogram => histogram::chart(engine, conn, relation, spec),
         ChartKind::Box => box_plot::chart(conn, relation, spec),
         ChartKind::Scatter => scatter::chart(conn, relation, spec),
-        ChartKind::Line => unavailable("line"),
+        ChartKind::Line => line::chart(conn, relation, spec),
     }
-}
-
-fn unavailable(kind: &str) -> ApiResult<Value> {
-    Err(ApiError::unprocessable(format!(
-        "Chart type {kind} is not available yet"
-    )))
 }

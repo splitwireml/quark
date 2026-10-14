@@ -140,15 +140,6 @@ fn metric_formula_rejects_placeholders_and_multiple_statements() {
 }
 
 #[test]
-fn chart_kinds_without_a_builder_are_not_available_yet() {
-    let engine = formula_engine();
-
-    let line = metric(&engine, json!({"chart": "line"}));
-
-    assert_eq!(detail(line), "Chart type line is not available yet");
-}
-
-#[test]
 fn cached_chart_reports_its_own_elapsed_time() {
     let engine = engine("CREATE TABLE t AS SELECT range AS amount FROM range(8000000)");
     let spec = json!({"chart": "metric", "encodings": {"value": "amount"}, "metric": "median"});
