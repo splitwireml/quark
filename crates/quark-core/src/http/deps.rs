@@ -3,6 +3,7 @@
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
+use duckdb::Connection;
 use serde::de::DeserializeOwned;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use crate::error::{ApiError, ApiResult};
 use crate::features::pages::model::Format;
 use crate::runtime::AppState;
+use crate::runtime::cancel::{CancelGuard, Cancelled};
 use crate::runtime::engine::Engine;
 use crate::runtime::registry::ProjectRecord;
 use crate::shared::encode::arrow::ARROW_MEDIA_TYPE;
@@ -90,6 +92,59 @@ impl FromRequestParts<AppState> for EngineFor {
         blocking(move || state.engine_for_node(&node_id))
             .await
             .map(Self)
+    }
+}
+
+/// The engine behind the route's `{node_id}` plus a guard that interrupts the request's own reader
+/// if the client goes away. The guard exists before any blocking work is queued.
+pub struct Reader {
+    engine: Arc<Engine>,
+    guard: CancelGuard,
+}
+
+impl FromRequestParts<AppState> for Reader {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let EngineFor(engine) = EngineFor::from_request_parts(parts, state).await?;
+        let guard = engine.guard();
+        Ok(Self { engine, guard })
+    }
+}
+
+impl Reader {
+    /// Runs `work` on a pooled reader off the async runtime. Dropping the returned future (the
+    /// client left) interrupts only this request's query.
+    pub async fn run<T, F>(mut self, work: F) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Engine, &Connection) -> ApiResult<T> + Send + 'static,
+    {
+        let ticket = self.guard.ticket();
+        let engine = self.engine;
+        let outcome = blocking(move || {
+            let outcome = engine.read(Some(&ticket), |conn| work(&engine, conn));
+            if ticket.is_cancelled() {
+                tracing::debug!("discarded a result for a client that went away");
+            }
+            Ok(outcome)
+        })
+        .await;
+        // The guard is armed whenever this future is alive, so only an abandoned request is cancelled.
+        self.guard.disarm();
+        outcome?.map_err(|Cancelled| ApiError::internal("Internal error"))?
+    }
+
+    /// Like [`Reader::run`] without a ticket: the work always finishes, as exports and join previews must.
+    pub async fn run_to_end<T, F>(mut self, work: F) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Engine, &Connection) -> ApiResult<T> + Send + 'static,
+    {
+        let engine = self.engine;
+        let outcome = blocking(move || Ok(engine.read(None, |conn| work(&engine, conn)))).await;
+        self.guard.disarm();
+        outcome?.map_err(|Cancelled| ApiError::internal("Internal error"))?
     }
 }
 
