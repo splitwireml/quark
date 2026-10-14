@@ -10,9 +10,9 @@ use duckdb::Connection;
 use rust_xlsxwriter::{Format, Workbook, Worksheet, XlsxError};
 
 use super::names::export_sheet_name;
-use super::service::{ExportFile, PreparedSheet, invalid_query, read_to_end};
+use super::service::{ExportFile, PreparedSheet, read_to_end};
+use super::stream::for_each_batch;
 use crate::error::{ApiError, ApiResult};
-use crate::relation::params::bind;
 use crate::relation::rows::select_list;
 use crate::runtime::engine::Engine;
 use crate::shared::encode::export::{ExportCell, export_cell, is_illegal_xml};
@@ -81,15 +81,13 @@ fn write_sheet(
         let name = name.chars().filter(|c| !is_illegal_xml(*c)).collect();
         write_cell(worksheet, 0, column, ExportCell::Text(name), formats)?;
     }
-    let mut statement = conn
-        .prepare(&format!(
-            "SELECT {} FROM ({})",
-            select_list(&sheet.columns),
-            sheet.sql
-        ))
-        .map_err(invalid_query)?;
+    let select = format!(
+        "SELECT {} FROM ({})",
+        select_list(&sheet.columns),
+        sheet.sql
+    );
     let mut row_number = 1;
-    for batch in statement.query_arrow(bind(&[])).map_err(invalid_query)? {
+    for_each_batch(conn, &select, |batch| {
         for row in 0..batch.num_rows() {
             for (column, (meta, array)) in (0..).zip(sheet.columns.iter().zip(batch.columns())) {
                 let cell = export_cell(array.as_ref(), row, &meta.type_name, &chrono::Local);
@@ -97,7 +95,8 @@ fn write_sheet(
             }
             row_number += 1;
         }
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 

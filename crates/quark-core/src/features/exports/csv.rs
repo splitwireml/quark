@@ -4,9 +4,9 @@ use std::io::Write;
 
 use duckdb::Connection;
 
-use super::service::{PreparedSheet, invalid_query, write_failed};
+use super::service::{PreparedSheet, write_failed};
+use super::stream::for_each_batch;
 use crate::error::ApiResult;
-use crate::relation::params::bind;
 use crate::relation::rows::select_list;
 use crate::shared::encode::export::{ExportCell, csv_line, csv_text, export_cell, is_illegal_xml};
 
@@ -28,14 +28,12 @@ pub(super) fn write_csv(
         .write_all(csv_line(&header).as_bytes())
         .map_err(write_failed)?;
 
-    let mut statement = conn
-        .prepare(&format!(
-            "SELECT {} FROM ({})",
-            select_list(&sheet.columns),
-            sheet.sql
-        ))
-        .map_err(invalid_query)?;
-    for batch in statement.query_arrow(bind(&[])).map_err(invalid_query)? {
+    let select = format!(
+        "SELECT {} FROM ({})",
+        select_list(&sheet.columns),
+        sheet.sql
+    );
+    for_each_batch(conn, &select, |batch| {
         for row in 0..batch.num_rows() {
             let fields: Vec<Option<String>> = sheet
                 .columns
@@ -50,6 +48,7 @@ pub(super) fn write_csv(
                 .write_all(csv_line(&fields).as_bytes())
                 .map_err(write_failed)?;
         }
-    }
+        Ok(())
+    })?;
     output.flush().map_err(write_failed)
 }

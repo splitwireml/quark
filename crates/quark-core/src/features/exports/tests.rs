@@ -113,6 +113,27 @@ async fn csv_export_writes_headers_and_rows() {
     assert!(exports_in(root.path()).is_empty());
 }
 
+/// DuckDB's vector size is 2,048 rows, so row 6,200 is read after three full batches.
+#[tokio::test]
+async fn csv_export_failing_after_several_batches_is_a_422_with_duckdbs_message_and_no_file() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path());
+
+    let response = csv_export(
+        &app,
+        "SELECT CASE WHEN n = 6200 THEN error('late failure') ELSE n END AS n FROM range(10000) t(n)",
+    )
+    .await;
+
+    let (status, detail) = failure(response).await;
+    assert_eq!(status, 422);
+    assert_eq!(
+        detail,
+        "Invalid SQL query: Invalid Input Error: late failure"
+    );
+    assert!(exports_in(root.path()).is_empty());
+}
+
 #[tokio::test]
 async fn csv_export_neutralizes_formulas_and_quotes_fields() {
     let root = tempfile::tempdir().unwrap();

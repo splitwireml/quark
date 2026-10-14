@@ -6,6 +6,7 @@ pub mod model;
 pub mod names;
 mod routes;
 pub mod service;
+mod stream;
 mod xlsx;
 
 pub use routes::routes;

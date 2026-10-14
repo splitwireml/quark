@@ -6,8 +6,8 @@ use duckdb::Connection;
 
 use super::model::{ExportFormat, JsonLayout};
 use super::service::{PreparedSheet, invalid_query};
+use super::stream::for_each_batch;
 use crate::error::{ApiError, ApiResult};
-use crate::relation::params::bind;
 use crate::runtime::dirs::lock_down_dirs;
 use crate::shared::columns::ColumnMeta;
 use crate::shared::sql::{quote_ident, sql_string};
@@ -58,17 +58,15 @@ pub(super) fn write_copy(
             definitions.join(", ")
         ))
         .map_err(invalid_query)?;
-    let mut statement = reader
-        .prepare(&format!(
-            "SELECT {} FROM ({})",
-            reader_select(&sheet.columns),
-            sheet.sql
-        ))
-        .map_err(invalid_query)?;
     let mut appender = writer.appender("export_data").map_err(invalid_query)?;
-    for batch in statement.query_arrow(bind(&[])).map_err(invalid_query)? {
-        appender.append_record_batch(batch).map_err(invalid_query)?;
-    }
+    let select = format!(
+        "SELECT {} FROM ({})",
+        reader_select(&sheet.columns),
+        sheet.sql
+    );
+    for_each_batch(reader, &select, |batch| {
+        appender.append_record_batch(batch).map_err(invalid_query)
+    })?;
     appender.flush().map_err(invalid_query)?;
     drop(appender);
     writer
