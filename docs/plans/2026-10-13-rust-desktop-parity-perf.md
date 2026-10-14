@@ -54,3 +54,46 @@ Result: FAILED (5 of 9 steps missed their cap; run took 11.4 s). Panic: `targets
 | sorted by price: page at offset 1000000 | 6.08 | <= 5 ms | MISSED (1.2x) |
 
 The two qty > 10 misses are far over their caps. The three sorted-page misses are 1.2x to 2.0x over and may partly be this container; they need confirming on the Mac.
+
+## Per-route perf cases (release, E1)
+
+- Date 2026-10-14, commit 2c4e4a0 (`rust-desktop/parity`), which now holds the per-route cases from E1 in `perf_acceptance`
+- Command: `CARGO_TARGET_DIR=/home/user/quark-wt/release-target cargo test --release -p quark-core --test perf_acceptance -- --ignored --nocapture --test-threads=1`
+- Machine: idle 4-core Linux x86_64 container (15 GB RAM), nothing else building or running. This is not the Mac the spec assumes. The caps are provisional and were set for the Mac, because the human has not yet confirmed them (H0), so a miss here is a signal, not a verdict.
+- Each figure is the median the test itself reports; the whole run took 107 s (5 passed, 6 failed)
+
+| Case | Median (ms) | Cap (ms) | Result |
+|---|---|---|---|
+| Bar chart | 5.7 | 500 | pass |
+| Line chart | 5.9 | 500 | pass |
+| Histogram chart | 6.6 | 500 | pass |
+| Metric chart | 4.9 | 500 | pass |
+| Scatter chart | 9.9 | 800 | pass |
+| Box chart | 5.2 | 800 | pass |
+| Category values, first page | 7.4 | 150 | pass |
+| Find Next after the first search | 43.6 | 200 | pass |
+| Join preview, one-to-one key | 307.5 | 1000 | pass |
+| Stats, numeric column, filter on | 324.2 | 300 | MISS (1.08x) |
+| CSV export, 2M rows | 10558.2 | 5000 | MISS (2.11x) |
+| XLSX export, 1,000,000 rows | 15083.8 | 15000 | MISS (1.006x, marginal) |
+| Workbook confirm, 100,000 x 10 | 4804.5 | 3000 | MISS (1.60x) |
+| Page at row 1,000,000 during export | 115.3 | 60 | MISS (1.92x) |
+
+Spec 4.6 reshape case (`two_million_row_csv_meets_the_targets`, 2,000,000 rows, 254 MB): FAILED, 5 of 9 steps missed.
+
+| Step | ms | Cap | Result |
+|---|---|---|---|
+| first page, qty > 10 (live CSV, import running) | 2023.77 | <= 750 ms | MISSED (2.7x) |
+| columnar import finished (background) | 3433.05 | recorded | - |
+| after the import: page at offset 1,000,000, qty > 10 | 229.70 | <= 60 ms | MISSED (3.8x) |
+| sort by price: first request | 182.82 | recorded | - |
+| sort by price: second request (starts the result build) | 87.77 | recorded | - |
+| sorted result ready (background) | 972.89 | recorded | - |
+| sorted by price: page at offset 0 | 9.48 | <= 5 ms | MISSED (1.9x) |
+| sorted by price: page at offset 500000 | 7.51 | <= 5 ms | MISSED (1.5x) |
+| sorted by price: page at offset 1000000 | 8.40 | <= 5 ms | MISSED (1.7x) |
+
+Notes:
+
+- Join preview passes here (307.5 ms) while the `compare.py` table above shows 2188.0 ms over the HTTP dev server, so the gap is outside the core join; the page-during-export case goes the other way (115.3 ms here against 22.3 ms through `compare.py`), so its cap and the way each harness times it should be checked.
+- Stats (1.08x) and XLSX export (1.006x) are within run-to-run noise of their caps; CSV export, workbook confirm, page during export and the qty > 10 steps are clear misses.
