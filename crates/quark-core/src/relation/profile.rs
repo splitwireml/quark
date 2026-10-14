@@ -8,6 +8,7 @@ use super::rows::json_rows;
 
 pub mod categorical;
 pub mod date;
+pub mod numeric;
 
 /// Histogram bin count: the square root of the non-null count rounded up, between 1 and 20.
 pub fn bin_count(non_null: u64) -> u64 {
