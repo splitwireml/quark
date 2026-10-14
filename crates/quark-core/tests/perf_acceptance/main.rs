@@ -1,17 +1,27 @@
-//! Performance acceptance on a 2M-row CSV (design section 8.6), through `AppState`.
+//! Performance acceptance on a 2M-row CSV (design section 8.6) and the spec section 9 route caps.
 //!
 //! Ignored because timings depend on the machine. Run on the development Mac with:
 //! `cargo test -p quark-core --release --test perf_acceptance -- --ignored --nocapture`
+//! The 2M-row setup and the timing helpers live here; `routes.rs` holds the spec section 9 cases.
+//! Every case takes `SERIAL` first, so the cases never time each other. The route cases drive the
+//! router over one shared 2M-row CSV and assert the median of a few runs against the confirmed cap.
 // clippy.toml allows unwrap only inside `#[test]` fns; the helpers below are test code too.
 #![allow(clippy::unwrap_used)]
 
+mod routes;
+
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use arrow::ipc::reader::StreamReader;
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, header};
 use duckdb::Connection;
+use http_body_util::BodyExt;
 use quark_core::features::pages::model::{Format, PageBody};
 use quark_core::features::pages::service::run_page;
 use quark_core::features::sources::service::datasets;
@@ -20,11 +30,20 @@ use quark_core::relation::request::QueryRequest;
 use quark_core::relation::target::Target;
 use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
+use rust_xlsxwriter::Workbook;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
+use tower::ServiceExt;
 
 const ROWS: u64 = 2_000_000;
 const NODE: &str = "perf";
 const WAIT: Duration = Duration::from_secs(120);
+const RUNS: usize = 5;
+const ARROW: &str = "application/vnd.apache.arrow.stream";
+const WORKBOOK_ROWS: u32 = 100_000;
+const WORKBOOK_COLUMNS: u16 = 10;
+
+static SERIAL: Mutex<()> = Mutex::const_new(());
 
 /// 2M rows by 10 columns, about 250 MB, with the `qty` and `price` columns the checks use.
 fn write_csv(path: &Path) {
@@ -144,6 +163,7 @@ impl Table {
 #[test]
 #[ignore = "timings depend on the machine; run with --ignored in a release build"]
 fn two_million_row_csv_meets_the_targets() {
+    let _serial = SERIAL.blocking_lock();
     let root = tempfile::tempdir().unwrap();
     let csv = root.path().join("perf.csv");
     write_csv(&csv);
@@ -203,4 +223,134 @@ fn two_million_row_csv_meets_the_targets() {
 
     table.finish();
     state.shutdown();
+}
+
+/// The shared 2M-row CSV, registered as node `perf` with its columnar import finished.
+struct Perf {
+    app: Router,
+    state: AppState,
+    csv: PathBuf,
+    dataset: String,
+    table: String,
+}
+
+impl Perf {
+    fn base(&self) -> String {
+        format!("/api/nodes/{NODE}/datasets/{}", self.dataset)
+    }
+
+    fn select_all(&self) -> String {
+        format!("SELECT * FROM {}", self.table)
+    }
+
+    /// An export body over the first `limit` rows of the CSV.
+    fn export_body(&self, format: &str, limit: u64) -> Value {
+        let sql = format!("{} LIMIT {limit}", self.select_all());
+        let sheet = json!({"node_id": NODE, "name": "All", "sql": sql});
+        json!({"format": format, "filename": "perf", "sheets": [sheet]})
+    }
+}
+
+fn perf() -> &'static Perf {
+    static PERF: OnceLock<Perf> = OnceLock::new();
+    PERF.get_or_init(|| {
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("perf-acceptance");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let csv = root.join("perf.csv");
+        write_csv(&csv);
+        let dirs = Dirs {
+            data: root.join("data"),
+            cache: root.join("cache"),
+        };
+        let state = AppState::load(dirs).unwrap();
+        register_upload(&state, None, NODE, "perf.csv", &csv).unwrap();
+        wait_until("the columnar import", || state.catalog().engines.is_empty());
+        let info = datasets(&state, NODE).unwrap().remove(0).info;
+        Perf {
+            app: quark_core::router(state.clone()),
+            state,
+            csv,
+            dataset: info.id,
+            table: info.name,
+        }
+    })
+}
+
+/// Sends one request, reads the whole answer and returns the time that took.
+async fn timed(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    accept: &str,
+) -> Duration {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, accept);
+    let body = body.map_or_else(Body::empty, |json| Body::from(json.to_string()));
+    let started = Instant::now();
+    let response = app
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        status,
+        200,
+        "{method} {uri}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    elapsed
+}
+
+fn median(mut samples: Vec<Duration>) -> Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+/// Prints the median and fails the case when it is over the cap.
+fn assert_cap(case: &str, samples: Vec<Duration>, cap: Duration) {
+    let observed = median(samples);
+    println!(
+        "{case:<40} {:>10.1} ms  (cap {} ms)",
+        observed.as_secs_f64() * 1000.0,
+        cap.as_millis()
+    );
+    assert!(
+        observed <= cap,
+        "{case}: median {observed:?} is over the {cap:?} cap"
+    );
+}
+
+const fn ms(value: u64) -> Duration {
+    Duration::from_millis(value)
+}
+
+/// Times `RUNS` JSON requests built by `request(run)`.
+async fn json_case(
+    perf: &Perf,
+    case: &str,
+    cap: Duration,
+    request: impl Fn(usize) -> (&'static str, String, Option<Value>),
+) {
+    let mut samples = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        let (method, uri, body) = request(run);
+        samples.push(timed(&perf.app, method, &uri, body, "application/json").await);
+    }
+    assert_cap(case, samples, cap);
+}
+
+async fn chart_case(perf: &Perf, case: &str, cap: Duration, spec: Value) {
+    let uri = format!("{}/visualize", perf.base());
+    json_case(perf, case, cap, |_| {
+        ("POST", uri.clone(), Some(json!({"spec": spec})))
+    })
+    .await;
 }
