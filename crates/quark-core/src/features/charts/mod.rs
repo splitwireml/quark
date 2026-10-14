@@ -6,6 +6,7 @@ mod histogram;
 mod metric;
 pub mod model;
 mod routes;
+mod scatter;
 pub mod service;
 
 pub use routes::routes;

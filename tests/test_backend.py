@@ -2221,6 +2221,18 @@ def test_visualize_scatter_rejects_a_non_numeric_size(client):
     }).status_code == 422
 
 
+@pytest.mark.rust_only
+def test_visualize_scatter_sample_is_repeatable(client):
+    body = b"x,y,region\n" + b"".join(f"{i},{i * 2},r{i % 3}\n".encode() for i in range(20000))
+    node = upload(client, "repeat.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'repeat')['id']}"
+    request = {"spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "region"}}}
+    first = client.post(base + "/visualize", json=request).json()
+    second = client.post(base + "/visualize", json=request).json()
+    assert len(first["points"]) == 5000
+    assert first["points"] == second["points"]
+
+
 def test_visualize_line_buckets_by_an_automatic_grain(client):
     body = b"day,amount\n" + b"".join(f"2026-01-{i:02d},{i}\n".encode() for i in range(1, 29))
     node = upload(client, "daily.csv", body)

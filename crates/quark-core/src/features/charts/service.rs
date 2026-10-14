@@ -6,7 +6,7 @@ use duckdb::Connection;
 use serde_json::Value;
 
 use super::model::{ChartKind, ChartSpec, VisualizeRequest};
-use super::{bar, box_plot, histogram, metric};
+use super::{bar, box_plot, histogram, metric, scatter};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::filtered::{Relation, filtered};
 use crate::relation::target::Target;
@@ -75,7 +75,7 @@ fn chart(
         ChartKind::Bar | ChartKind::Pie => bar::chart(conn, relation, spec),
         ChartKind::Histogram => histogram::chart(engine, conn, relation, spec),
         ChartKind::Box => box_plot::chart(conn, relation, spec),
-        ChartKind::Scatter => unavailable("scatter"),
+        ChartKind::Scatter => scatter::chart(conn, relation, spec),
         ChartKind::Line => unavailable("line"),
     }
 }
