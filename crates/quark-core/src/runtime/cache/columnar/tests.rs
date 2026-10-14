@@ -227,8 +227,12 @@ fn default_cap_is_ten_gibibytes() {
     assert_eq!(CACHE_CAP, 10 * 1024_u64.pow(3));
 }
 
-/// A scan that never finishes on its own, so only an interrupt can end the import.
-const ENDLESS_SCAN: &str = "(SELECT sum(i) FROM range(10000000000) t(i))";
+/// A scan that runs for hours, so only an interrupt can end the import.
+const ENDLESS_SCAN: &str = "(SELECT sum(i) FROM range(1000000000000000) t(i))";
+
+/// How long shutdown may take. Any return proves the interrupt, since the scan runs for hours;
+/// the margin absorbs a loaded CI runner.
+const STOP_LIMIT: Duration = Duration::from_secs(20);
 
 fn endless_job(dir: &Path) -> ColumnarJob {
     let mut job = job(dir, "endless.csv", "a\n1\n");
@@ -251,10 +255,15 @@ fn shutdown_interrupts_a_running_import() {
     }
     thread::sleep(Duration::from_millis(300));
 
-    let stopping = Instant::now();
-    worker.shutdown();
+    let (stopped_sender, stopped) = mpsc::channel();
+    thread::spawn(move || {
+        worker.shutdown();
+        stopped_sender.send(()).ok();
+    });
 
-    assert!(stopping.elapsed() < Duration::from_secs(2));
+    stopped
+        .recv_timeout(STOP_LIMIT)
+        .expect("shutdown must interrupt the running import");
     assert!(!key.is_ready(&cache));
     assert!(!key.partial_path(&cache).exists());
     assert!(ready.try_recv().is_err());
@@ -292,7 +301,7 @@ fn shutdown_between_statements_still_stops_the_import() {
     });
 
     stopped
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(STOP_LIMIT)
         .expect("shutdown must return while the import is between statements");
     assert!(!key.is_ready(&cache));
     assert!(!key.partial_path(&cache).exists());
