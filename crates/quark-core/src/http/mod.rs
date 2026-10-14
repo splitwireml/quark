@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::error::ApiError;
-use crate::features::{pages, projects, sources};
+use crate::features::{pages, projects, sources, values};
 use crate::runtime::AppState;
 
 pub mod deps;
@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
             .merge(projects::routes())
             .merge(sources::routes())
             .merge(pages::routes())
+            .merge(values::routes())
             .fallback(unknown_route)
             .method_not_allowed_fallback(unknown_route),
     )

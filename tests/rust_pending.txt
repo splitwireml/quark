@@ -1,7 +1,5 @@
 # Tests the Rust backend has not ported yet (strict xfail in QUARK_TEST_BACKEND=rust mode).
 # One function name per line; delete a line when its test starts passing.
-test_category_values_are_distinct_counted_safe_and_text_only
-test_category_values_are_paged_and_searchable
 test_cross_node_join_workspace_is_queryable_by_sql_and_profile_routes
 test_cross_node_join_workspace_replaces_previous_without_listing_it
 test_export_csv_neutralizes_spreadsheet_formulas
