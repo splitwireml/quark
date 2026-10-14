@@ -1,14 +1,15 @@
 //! The engines: a DuckDB connection with its mounted views and caches, and how a source opens one.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use anyhow::{Context, bail};
 use duckdb::{AccessMode, Config, Connection, InterruptHandle};
 
 use super::cache::columnar_key::ColumnarKey;
+use super::cache::responses::{ResponseCache, source_files};
 use super::cache::results::ResultCache;
 use super::cache::stats::StatsCache;
 use super::dirs::{Dirs, configure_spill, lock_down_dirs};
@@ -42,6 +43,11 @@ pub struct Engine {
     pub(crate) pool: ReaderPool,
     pub stats: Mutex<StatsCache>,
     pub results: Mutex<ResultCache>,
+    pub(crate) responses: Mutex<ResponseCache>,
+    /// Functions and macros that make a response uncacheable, read from the catalog on first use.
+    pub(crate) volatile: OnceLock<HashSet<String>>,
+    /// Every file this engine reads, so a response is only reused while none of them changed.
+    pub(crate) source_files: Vec<PathBuf>,
     #[doc(hidden)]
     pub counters: Counters,
     /// Tickets of the queries running now, with the handle that interrupts each one's reader.
@@ -68,6 +74,9 @@ impl Engine {
             pool,
             stats: Mutex::new(StatsCache::default()),
             results: Mutex::new(ResultCache::default()),
+            responses: Mutex::new(ResponseCache::default()),
+            volatile: OnceLock::new(),
+            source_files: Vec::new(),
             counters: Counters::default(),
             active: Mutex::new(HashMap::new()),
             next_ticket: AtomicU64::new(0),
@@ -131,7 +140,9 @@ impl Engine {
         let kind = EngineKind::Node {
             node_id: source.id.clone(),
         };
-        Ok(Engine::new(kind, conn)?)
+        let mut engine = Engine::new(kind, conn)?;
+        engine.source_files = source_files(std::slice::from_ref(source));
+        Ok(engine)
     }
 }
 

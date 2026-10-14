@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::relation::describe::{DatasetInfo, describe};
 use crate::runtime::cache::columnar_key::{ColumnarJob, ColumnarKey};
+use crate::runtime::cache::responses::source_files;
 use crate::runtime::dirs::{Dirs, configure_spill, lock_down_paths};
 use crate::runtime::engine::{Engine, EngineKind};
 use crate::runtime::registry::{ProjectRecord, SourceRecord};
@@ -32,7 +33,7 @@ pub struct ViewInfo {
     pub sql: String,
 }
 
-fn is_database(path: &Path) -> bool {
+pub(crate) fn is_database(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("duckdb") || ext.eq_ignore_ascii_case("db"))
 }
@@ -117,6 +118,7 @@ impl Engine {
         };
         let mut engine = Engine::new(kind, conn)?;
         engine.caches = caches;
+        engine.source_files = source_files(sources);
         Ok(engine)
     }
 
