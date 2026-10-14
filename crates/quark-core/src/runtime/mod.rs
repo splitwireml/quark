@@ -8,6 +8,7 @@ pub mod engine;
 pub mod engines;
 pub mod files;
 pub mod mount;
+pub mod pool;
 pub mod registry;
 pub mod sources;
 pub mod state;
