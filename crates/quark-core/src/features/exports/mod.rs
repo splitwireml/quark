@@ -1,5 +1,6 @@
-//! Exports: the request that names the sheets to write, the names of the files and sheets, the CSV and XLSX writers and the download route.
+//! Exports: the request that names the sheets to write, the names of the files and sheets, the CSV, XLSX, Parquet and JSON writers and the download route.
 
+mod copy;
 mod csv;
 pub mod model;
 pub mod names;

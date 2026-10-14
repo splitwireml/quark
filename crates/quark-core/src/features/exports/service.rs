@@ -8,8 +8,10 @@ use std::sync::Arc;
 use duckdb::Connection;
 use uuid::Uuid;
 
+use super::copy::write_copy;
 use super::csv::write_csv;
-use super::model::{ExportFormat, ExportRequest, ExportSheet};
+use super::model::{ExportFormat, ExportRequest, ExportSheet, JsonLayout};
+use super::names::extension;
 use super::xlsx::write_xlsx;
 use crate::error::{ApiError, ApiResult};
 use crate::relation::describe::describe;
@@ -121,6 +123,7 @@ pub(super) fn read_to_end<T>(
 /// write deletes the file. Every format but `xlsx` writes the first sheet only.
 pub fn write_export(
     format: ExportFormat,
+    layout: JsonLayout,
     sheets: &[(Arc<Engine>, PreparedSheet)],
     dir: &Path,
 ) -> ApiResult<ExportFile> {
@@ -130,6 +133,14 @@ pub fn write_export(
             let (guard, file) = ExportFile::create(dir, ".csv")?;
             read_to_end(engine, |conn| {
                 write_csv(conn, sheet, &mut BufWriter::new(file))
+            })?;
+            Ok(guard)
+        }
+        (ExportFormat::Parquet | ExportFormat::Json, Some((engine, sheet))) => {
+            let (guard, file) = ExportFile::create(dir, extension(format))?;
+            drop(file);
+            read_to_end(engine, |conn| {
+                write_copy(conn, sheet, format, layout, guard.path(), dir)
             })?;
             Ok(guard)
         }

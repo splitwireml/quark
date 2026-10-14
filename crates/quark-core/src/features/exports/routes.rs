@@ -63,8 +63,8 @@ async fn export(
             .await?;
         prepared.push((engine, checked));
     }
-    let (format, dir) = (request.format, state.0.dirs.exports());
-    let export = blocking(move || write_export(format, &prepared, &dir)).await?;
+    let (format, layout, dir) = (request.format, request.json_layout, state.0.dirs.exports());
+    let export = blocking(move || write_export(format, layout, &prepared, &dir)).await?;
     download(export, format, request.filename.as_deref()).await
 }
 
