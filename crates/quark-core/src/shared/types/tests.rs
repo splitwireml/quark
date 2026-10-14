@@ -22,3 +22,20 @@ fn classification_matches_python() {
         assert_eq!(is_native(type_), native, "is_native({type_})");
     }
 }
+
+#[test]
+fn is_integer_matches_python() {
+    for type_ in [
+        "TINYINT",
+        "bigint",
+        "HUGEINT",
+        "UHUGEINT",
+        "UBIGINT",
+        "INTEGER[]",
+    ] {
+        assert!(is_integer(type_), "is_integer({type_})");
+    }
+    for type_ in ["DOUBLE", "DECIMAL(18,3)", "VARCHAR", "FLOAT", "DATE"] {
+        assert!(!is_integer(type_), "is_integer({type_})");
+    }
+}

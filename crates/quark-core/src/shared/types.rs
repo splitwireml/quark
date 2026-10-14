@@ -16,6 +16,18 @@ const NUMERIC: [&str; 14] = [
     "DOUBLE",
     "DECIMAL",
 ];
+const INTEGER: [&str; 10] = [
+    "TINYINT",
+    "SMALLINT",
+    "INTEGER",
+    "BIGINT",
+    "HUGEINT",
+    "UTINYINT",
+    "USMALLINT",
+    "UINTEGER",
+    "UBIGINT",
+    "UHUGEINT",
+];
 const TEXT: [&str; 3] = ["VARCHAR", "CHAR", "TEXT"];
 const DATE: [&str; 3] = ["DATE", "TIME", "TIMESTAMP"];
 const NATIVE: [&str; 14] = [
@@ -43,6 +55,10 @@ fn has_prefix(type_: &str, prefixes: &[&str]) -> bool {
 
 pub fn is_numeric(type_: &str) -> bool {
     has_prefix(type_, &NUMERIC)
+}
+
+pub fn is_integer(type_: &str) -> bool {
+    has_prefix(type_, &INTEGER)
 }
 
 pub fn is_text(type_: &str) -> bool {
