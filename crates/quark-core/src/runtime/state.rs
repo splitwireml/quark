@@ -53,6 +53,11 @@ impl AppState {
             fs::remove_dir_all(&spill).context("emptying the spill folder")?;
         }
         fs::create_dir_all(&spill).context("creating the spill folder")?;
+        let exports = dirs.exports();
+        if exports.exists() {
+            fs::remove_dir_all(&exports).context("emptying the exports folder")?;
+        }
+        fs::create_dir_all(&exports).context("creating the exports folder")?;
 
         let mut projects = vec![default_project()];
         projects.extend(load_projects(&dirs.projects_file()));

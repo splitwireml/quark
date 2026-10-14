@@ -36,6 +36,11 @@ impl Dirs {
         self.cache.join("columnar")
     }
 
+    /// Holds the files an export is writing or streaming; emptied at startup.
+    pub fn exports(&self) -> PathBuf {
+        self.cache.join("exports")
+    }
+
     pub fn projects_file(&self) -> PathBuf {
         self.data.join("projects.json")
     }

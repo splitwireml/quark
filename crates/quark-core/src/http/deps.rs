@@ -107,12 +107,17 @@ impl FromRequestParts<AppState> for Reader {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let EngineFor(engine) = EngineFor::from_request_parts(parts, state).await?;
-        let guard = engine.guard();
-        Ok(Self { engine, guard })
+        Ok(Self::new(engine))
     }
 }
 
 impl Reader {
+    /// A reader for an engine the route found itself, as an export does from its sheets.
+    pub fn new(engine: Arc<Engine>) -> Self {
+        let guard = engine.guard();
+        Self { engine, guard }
+    }
+
     /// Runs `work` on a pooled reader off the async runtime. Dropping the returned future (the
     /// client left) interrupts only this request's query.
     pub async fn run<T, F>(mut self, work: F) -> ApiResult<T>
