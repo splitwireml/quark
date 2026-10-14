@@ -9,7 +9,7 @@ use anyhow::Context;
 use duckdb::Connection;
 use uuid::Uuid;
 
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::relation::describe::DatasetInfo;
 use crate::runtime::Dirs;
 use crate::runtime::cache::responses::source_files;
@@ -18,7 +18,7 @@ use crate::runtime::engine::{Engine, EngineKind};
 use crate::runtime::mount::workbook::{attach_sheet, is_workbook};
 use crate::runtime::mount::{attach_cache, database_paths, import_job, is_database};
 use crate::runtime::registry::SourceRecord;
-use crate::runtime::state::{AppState, invalid_value};
+use crate::runtime::state::{AppState, cannot_open, invalid_value};
 use crate::shared::sql::{quote_ident, scan_expression, sql_string};
 
 /// How many join engines stay open at once.
@@ -148,8 +148,7 @@ fn mount_side(
         mounted.files.push(file);
         origin
     } else {
-        let scan = scan_expression(&path)
-            .ok_or_else(|| ApiError::not_implemented("Not in the desktop build yet"))?;
+        let scan = scan_expression(&path).ok_or_else(|| cannot_open("unsupported file type"))?;
         mounted.allowed.push(path.into_owned());
         mounted.files = source_files(slice::from_ref(source));
         scan

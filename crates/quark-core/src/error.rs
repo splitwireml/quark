@@ -39,10 +39,6 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
 
-    pub fn not_implemented(detail: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_IMPLEMENTED, detail)
-    }
-
     pub fn unauthorized(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, detail)
     }
@@ -97,16 +93,5 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body: serde_json::Value = serde_json::from_slice(&body_bytes(response)).unwrap();
         assert_eq!(body, serde_json::json!({"detail": "Project not found"}));
-    }
-
-    #[test]
-    fn not_implemented_is_501() {
-        let error = ApiError::not_implemented("Not in the desktop build yet");
-        assert_eq!(error.status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(error.detail(), "Not in the desktop build yet");
-        assert_eq!(
-            error.to_string(),
-            "501 Not Implemented: Not in the desktop build yet"
-        );
     }
 }

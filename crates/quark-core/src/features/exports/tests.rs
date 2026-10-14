@@ -2,17 +2,22 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, Response, header};
+use duckdb::Connection;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use super::model::{ExportFormat, ExportSheet, JsonLayout};
+use super::service::{prepare_sheet, write_export};
 use crate::http::router;
 use crate::runtime::AppState;
 use crate::runtime::dirs::Dirs;
+use crate::runtime::engine::{Engine, EngineKind};
 
 fn dirs(root: &Path) -> Dirs {
     Dirs {
@@ -272,4 +277,34 @@ fn startup_sweeps_old_exports() {
 
     assert!(exports.is_dir());
     assert!(exports_in(root.path()).is_empty());
+}
+
+#[test]
+fn write_export_writes_the_only_sheet_of_a_flat_format() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = Arc::new(
+        Engine::new(
+            EngineKind::Node {
+                node_id: "n".to_owned(),
+            },
+            Connection::open_in_memory().unwrap(),
+        )
+        .unwrap(),
+    );
+    let request = ExportSheet {
+        node_id: "n".to_owned(),
+        name: "Sheet".to_owned(),
+        sql: "SELECT 7 AS a".to_owned(),
+    };
+    let prepared = prepare_sheet(&Connection::open_in_memory().unwrap(), &request).unwrap();
+
+    let file = write_export(
+        ExportFormat::Csv,
+        JsonLayout::default(),
+        &[(engine, prepared)],
+        root.path(),
+    )
+    .unwrap();
+
+    assert_eq!(fs::read_to_string(file.path()).unwrap(), "a\r\n7\r\n");
 }

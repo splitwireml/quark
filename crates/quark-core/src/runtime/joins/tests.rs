@@ -143,6 +143,28 @@ fn join_engine_cannot_read_other_files() {
 }
 
 #[test]
+fn join_side_with_an_unknown_file_type_cannot_be_opened() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = [
+        entry(root.path(), "a1", None),
+        entry(root.path(), "b1", None),
+    ];
+    let state = started(root.path(), &registry, &[]);
+    let (left, mut right) = (source(&state, "a1"), source(&state, "b1"));
+    right.source = root.path().join("notes.txt");
+
+    let Err(error) = state.open_join((&left, &data_item()), (&right, &data_item())) else {
+        panic!("a side with no reader opened");
+    };
+
+    assert_eq!(error.status(), 400);
+    assert_eq!(
+        error.detail(),
+        "Could not open source: unsupported file type"
+    );
+}
+
+#[test]
 fn fifth_join_evicts_the_least_recent() {
     let mut slots = JoinSlots::default();
     for number in 1..=JOIN_LIMIT {

@@ -127,23 +127,23 @@ pub fn write_export(
     sheets: &[(Arc<Engine>, PreparedSheet)],
     dir: &Path,
 ) -> ApiResult<ExportFile> {
-    match (format, sheets.first()) {
-        (ExportFormat::Xlsx, _) => write_xlsx(sheets, dir),
-        (ExportFormat::Csv, Some((engine, sheet))) => {
-            let (guard, file) = ExportFile::create(dir, ".csv")?;
-            read_to_end(engine, |conn| {
-                write_csv(conn, sheet, &mut BufWriter::new(file))
-            })?;
-            Ok(guard)
-        }
-        (ExportFormat::Parquet | ExportFormat::Json, Some((engine, sheet))) => {
-            let (guard, file) = ExportFile::create(dir, extension(format))?;
-            drop(file);
-            read_to_end(engine, |conn| {
-                write_copy(conn, sheet, format, layout, guard.path(), dir)
-            })?;
-            Ok(guard)
-        }
-        _ => Err(ApiError::not_implemented("Not in the desktop build yet")),
+    if format == ExportFormat::Xlsx {
+        return write_xlsx(sheets, dir);
     }
+    let (engine, sheet) = sheets
+        .first()
+        .ok_or_else(|| ApiError::internal("Internal error"))?;
+    if format == ExportFormat::Csv {
+        let (guard, file) = ExportFile::create(dir, ".csv")?;
+        read_to_end(engine, |conn| {
+            write_csv(conn, sheet, &mut BufWriter::new(file))
+        })?;
+        return Ok(guard);
+    }
+    let (guard, file) = ExportFile::create(dir, extension(format))?;
+    drop(file);
+    read_to_end(engine, |conn| {
+        write_copy(conn, sheet, format, layout, guard.path(), dir)
+    })?;
+    Ok(guard)
 }
