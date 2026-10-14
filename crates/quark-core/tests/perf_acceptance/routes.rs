@@ -22,8 +22,9 @@ async fn category_values_meet_their_cap() {
     let _serial = SERIAL.lock().await;
     let perf = perf();
     let uri = format!("{}/columns/category/values", perf.base());
-    json_case(perf, "category values, first page", ms(150), |_| {
-        ("GET", uri.clone(), None)
+    // The route has no filter, so each run asks for a different page size; `limit` is in the cache key.
+    json_case(perf, "category values, first page", ms(150), |run| {
+        ("GET", format!("{uri}?limit={}", 200 - run), None)
     })
     .await;
 }
@@ -82,9 +83,11 @@ async fn find_next_meets_its_cap() {
     let _serial = SERIAL.lock().await;
     let perf = perf();
     let uri = format!("/api/nodes/{NODE}/sql/find");
-    let search = json!({"sql": perf.select_all(), "term": "Item 77", "columns": ["name"]});
     let mut samples = Vec::with_capacity(RUNS);
-    for _ in 0..RUNS {
+    for run in 0..RUNS {
+        // A new term each run, so no request repeats; the numbered copy of the View is shared.
+        let term = format!("Item {}", 77 + run);
+        let search = json!({"sql": perf.select_all(), "term": term, "columns": ["name"]});
         let first = timed_json(&perf.app, &uri, search.clone()).await;
         let cell = &first["match"];
         let mut next = search.clone();
@@ -243,7 +246,9 @@ async fn page_during_an_export_meets_its_cap() {
     let _serial = SERIAL.lock().await;
     let perf = perf();
     let uri = format!("{}/query", perf.base());
-    for _ in 0..3 {
+    // Opening the dataset fills the count cache, as it does for a user who scrolls to a deeper page.
+    timed(&perf.app, "POST", &uri, Some(json!({"page": 1})), ARROW).await;
+    for attempt in 0..3 {
         let app = perf.app.clone();
         let body = perf.export_body("csv", ROWS);
         let export =
@@ -255,7 +260,8 @@ async fn page_during_an_export_meets_its_cap() {
             &perf.app,
             "POST",
             &uri,
-            Some(json!({"page": 10_001})),
+            // Row 1,000,000 plus 100 rows per attempt: a page no request has asked for before.
+            Some(json!({"page": 10_001 + attempt})),
             ARROW,
         )
         .await;

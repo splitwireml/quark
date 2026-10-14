@@ -13,6 +13,7 @@ mod routes;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,7 @@ const WORKBOOK_ROWS: u32 = 100_000;
 const WORKBOOK_COLUMNS: u16 = 10;
 
 static SERIAL: Mutex<()> = Mutex::const_new(());
+static FRESH: AtomicI64 = AtomicI64::new(0);
 
 /// 2M rows by 10 columns, about 250 MB, with the `qty` and `price` columns the checks use.
 fn write_csv(path: &Path) {
@@ -347,10 +349,19 @@ async fn json_case(
     assert_cap(case, samples, cap);
 }
 
+/// A filter on `id` that no earlier request in this process has sent. It keeps all but a few rows, so
+/// a case does the work its spec row names, and the response-cache key (the relation's SQL and
+/// parameters) is new each time, so the timed run is never a response-cache hit.
+fn fresh_filter() -> Value {
+    let floor = FRESH.fetch_add(1, Ordering::Relaxed);
+    json!([{"column": "id", "operator": ">", "value": floor}])
+}
+
 async fn chart_case(perf: &Perf, case: &str, cap: Duration, spec: Value) {
     let uri = format!("{}/visualize", perf.base());
     json_case(perf, case, cap, |_| {
-        ("POST", uri.clone(), Some(json!({"spec": spec})))
+        let body = json!({"spec": spec, "filters": fresh_filter()});
+        ("POST", uri.clone(), Some(body))
     })
     .await;
 }

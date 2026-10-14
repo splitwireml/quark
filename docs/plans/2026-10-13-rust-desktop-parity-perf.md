@@ -9,6 +9,7 @@
 
 ## Route comparison
 
+<!-- compare.py:table:start -->
 | Case | Spec 9 cap | Python (ms) | Rust (ms) | Rust vs cap | Rust vs Python |
 |---|---|---|---|---|---|
 | Stats on a numeric column, filter on | 300 ms | 1103.1 | 343.5 | OVER CAP (1.15x cap) | 3.2x faster |
@@ -31,6 +32,7 @@
 | deep page, qty > 10 | - | 2054.0 | 14.5 | no cap | 141.7x faster |
 | page 1, sorted by price | - | 2086.5 | 12.0 | no cap | 173.9x faster |
 | deep page, sorted by price | - | 2429.1 | 14.4 | no cap | 168.7x faster |
+<!-- compare.py:table:end -->
 
 Cases over their cap: stats (343.5 ms vs 300 ms), join preview (2188.0 ms vs 1 s), CSV export (10.8 s vs 5 s), XLSX export (15.5 s vs 15 s, marginal) and workbook confirm (4.5 s vs 3 s).
 Cases where Rust is not faster than Python: none. Rust is faster in every row; the closest are join preview (1.3x) and stats (3.2x).

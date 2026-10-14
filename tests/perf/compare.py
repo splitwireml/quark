@@ -1,9 +1,15 @@
 """Compares route timings of the Python and Rust backends on a generated CSV and writes the results doc.
 
-Usage: uv run python tests/perf/compare.py [--python] [--rust] [--rows N] [--rust-binary PATH]
+Usage: uv run python tests/perf/compare.py [--python] [--rust] [--rows N] [--rust-binary PATH] [--out PATH]
+
+Every timed request is new to the backend: the chart cases filter on a fresh `id` bound, category values asks for a
+fresh page size, Find Next searches a fresh term and the page during an export asks for a fresh page, so no run is a
+response-cache hit. The results go to the route comparison table of the results doc, between its marker comments;
+a smoke run (fewer rows, or a binary outside a release dir) only prints unless `--out` names a file.
 """
 import argparse
 import datetime
+import itertools
 import os
 import platform
 import re
@@ -27,6 +33,8 @@ FULL_ROWS = 2_000_000
 RUNS = 5
 WORKBOOK_ROWS, WORKBOOK_COLUMNS = 100_000, 10
 ARROW = {"Accept": "application/vnd.apache.arrow.stream"}
+RESULTS_DOC = ROOT / "docs/plans/2026-10-13-rust-desktop-parity-perf.md"
+TABLE_START, TABLE_END = "<!-- compare.py:table:start -->", "<!-- compare.py:table:end -->"
 
 def write_csv(path, rows):
     """Same COPY SQL as `write_csv` in crates/quark-core/tests/perf_acceptance.rs."""
@@ -91,10 +99,12 @@ def timed_call(ctx, method, path, **kwargs):
 
 
 def settle(measure, patience):
+    """Repeats `measure` until three runs in a row agree, and returns the fastest of them in milliseconds."""
     recent, deadline = [], time.monotonic() + patience
     while time.monotonic() < deadline and not (len(recent) == 3 and max(recent) <= 1.5 * min(recent) + 5):
         recent = [*recent[-2:], measure()]
         time.sleep(0.2)
+    return min(recent, default=0)
 
 
 def download(url, body):
@@ -120,7 +130,7 @@ class Export(threading.Thread):
 
 def export_body(ctx, file_format, limit, widen=False):
     sql = f"SELECT * FROM {ctx.table}"
-    if widen:
+    if widen and limit > ctx.rows:
         sql += f" CROSS JOIN range({-(-limit // ctx.rows)})"
     sheet = {"node_id": ctx.node, "name": "All", "sql": f"{sql} LIMIT {limit}"}
     return {"format": file_format, "filename": "perf", "sheets": [sheet]}
@@ -136,11 +146,14 @@ def page_case(page, controls):
 
 
 def page_during_export(ctx, _i):
-    path, body = f"{ctx.dataset_path}/query", {"page": ctx.deep_page}
+    """Times a page the backend has not served before, one past the deep page; the deep page's count is already cached."""
+    path = f"{ctx.dataset_path}/query"
     for _ in range(3):
         worker = Export(ctx.url, export_body(ctx, "csv", FULL_ROWS, widen=True))
         worker.start()
         time.sleep(0.3)
+        ctx.pages_served += 1
+        body = {"page": ctx.deep_page + ctx.pages_served}
         elapsed = None if worker.error else timed_call(ctx, "POST", path, json=body, headers=ARROW)
         overlapped = worker.is_alive()
         worker.join()
@@ -151,8 +164,13 @@ def page_during_export(ctx, _i):
     return None
 
 
+def fresh_filter(ctx):
+    """A filter on `id` that no earlier request to this backend has sent; it keeps all but a few rows."""
+    return [{"column": "id", "operator": ">", "value": next(ctx.fresh)}]
+
+
 def chart_case(spec):
-    return lambda ctx, _i: timed_call(ctx, "POST", f"{ctx.dataset_path}/visualize", json={"spec": spec})
+    return lambda ctx, _i: timed_call(ctx, "POST", f"{ctx.dataset_path}/visualize", json={"spec": spec, "filters": fresh_filter(ctx)})
 
 
 def stats(ctx, i):
@@ -160,19 +178,31 @@ def stats(ctx, i):
     return timed_call(ctx, "POST", f"{ctx.dataset_path}/columns/price/stats", json={"filters": filters})
 
 
-def category_values(ctx, _i):
-    return timed_call(ctx, "GET", f"{ctx.dataset_path}/columns/category/values")
+def category_values(ctx, i):
+    """The route has no filter, so each run asks for a different page size."""
+    return timed_call(ctx, "GET", f"{ctx.dataset_path}/columns/category/values", params={"limit": 200 - i})
 
 
-def find_next(ctx, _i):
-    path, body = f"/api/nodes/{ctx.node}/sql/find", {"sql": f"SELECT * FROM {ctx.table}", "term": "Item 77", "columns": ["name"]}
+def find_next(ctx, i):
+    path, body = f"/api/nodes/{ctx.node}/sql/find", {"sql": f"SELECT * FROM {ctx.table}", "term": f"Item {77 + i}", "columns": ["name"]}
     first = call(ctx, "POST", path, json=body).json()["match"]
     return timed_call(ctx, "POST", path, json={**body, "after_row": first["row"], "after_column": first["column_index"]})
+
+
+def wait_for_import(ctx, node, dataset):
+    """Polls a deep page of a new source until it is as quick as the first source's, so its columnar import is done."""
+    path, deadline = f"/api/nodes/{node}/datasets/{dataset}/query", time.monotonic() + 300
+    while time.monotonic() < deadline:
+        elapsed = timed_call(ctx, "POST", path, json={"page": ctx.deep_page}, headers=ARROW)
+        if elapsed <= 1.5 * ctx.baseline + 20:
+            return
+        time.sleep(0.2)
 
 
 def join_preview(ctx, _i):
     if ctx.second is None:
         ctx.second = upload(ctx.client, ctx.csv)
+        wait_for_import(ctx, ctx.second[0], ctx.second[1]["id"])
     node, info = ctx.second
     left, right = {"node_id": ctx.node, "dataset": ctx.dataset}, {"node_id": node, "dataset": info["id"]}
     body = {"left": left, "right": right, "left_keys": ["id"], "right_keys": ["id"]}
@@ -239,8 +269,9 @@ def measure_backend(url, csv, workbook, rows):
         ctx = SimpleNamespace(
             client=client, url=url, csv=csv, workbook=workbook, rows=rows, node=node, dataset=info["id"],
             table=info["name"], dataset_path=f"/api/nodes/{node}/datasets/{info['id']}", deep_page=deep_page, second=None,
+            fresh=itertools.count(), pages_served=0, baseline=0,
         )
-        settle(lambda: timed_call(ctx, "POST", f"{ctx.dataset_path}/query", json={"page": deep_page}, headers=ARROW), 300)
+        ctx.baseline = settle(lambda: timed_call(ctx, "POST", f"{ctx.dataset_path}/query", json={"page": deep_page}, headers=ARROW), 300)
         for name, (_cap, run) in CASES.items():
             print(f"  {name}", file=sys.stderr)
             try:
@@ -268,21 +299,41 @@ def markdown_table(results):
     return "\n".join(rows)
 
 
-def write_results(results, rows, binary):
-    is_smoke = rows != FULL_ROWS or "release" not in Path(binary).parts
+def compare_section(results, rows, binary, is_smoke):
     notice = f"> Smoke run: {rows:,} rows on `{binary}`, not the {FULL_ROWS:,}-row release baseline.\n\n" if is_smoke else ""
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    text = (
-        f"# Python and Rust route timings\n\n{notice}"
+    return (
+        f"{notice}"
         f"- Date {datetime.date.today().isoformat()}, commit {commit}, "
         f"{platform.system()} {platform.machine()} with {os.cpu_count()} cores\n"
-        f"- {rows:,} rows, pages of 100, median of {RUNS} runs; the deep page is row 1,000,000 in a full run "
-        "and mid-file in a smaller one; `n/a` means the route answers 501 or an export failed, or no export outlasted the timed page\n"
+        f"- {rows:,} rows, pages of 100, median of {RUNS} runs, every timed request new to its backend; the deep page is row 1,000,000 "
+        "in a full run and mid-file in a smaller one; `n/a` means the route answers 501 or an export failed, or no export outlasted the timed page\n"
         "- The export cases write 2M and 1,000,000 rows in a full run and every row of a smaller one; the page-during-export case always exports 2M rows so the export outlasts the page\n\n"
         f"{markdown_table(results)}\n"
     )
-    (ROOT / "docs/plans/2026-10-13-rust-desktop-parity-perf.md").write_text(text)
-    print(text)
+
+
+def replace_section(text, section):
+    """Swaps what lies between the table markers, leaving the rest of the doc as it is."""
+    start, end = text.find(TABLE_START), text.find(TABLE_END)
+    if start < 0 or end < start:
+        raise SystemExit(f"the results file has no {TABLE_START} ... {TABLE_END} markers")
+    return f"{text[: start + len(TABLE_START)]}\n{section}{text[end:]}"
+
+
+def write_results(results, rows, binary, out):
+    is_smoke = rows != FULL_ROWS or "release" not in Path(binary).parts
+    section = compare_section(results, rows, binary, is_smoke)
+    print(section)
+    if out is None and is_smoke:
+        print("Smoke run: no results file written; pass --out PATH to keep it.", file=sys.stderr)
+        return
+    path = Path(out or RESULTS_DOC)
+    if path.exists():
+        text = replace_section(path.read_text(), section)
+    else:
+        text = f"# Python and Rust route timings\n\n{TABLE_START}\n{section}{TABLE_END}\n"
+    path.write_text(text)
 
 
 def main():
@@ -291,6 +342,7 @@ def main():
     parser.add_argument("--rust", action="store_true")
     parser.add_argument("--rows", type=int, default=FULL_ROWS)
     parser.add_argument("--rust-binary", default="target/release/quark-dev-server")
+    parser.add_argument("--out", help="results file; default: the results doc, but only for a full release run")
     args = parser.parse_args()
     if not (args.python or args.rust):
         parser.error("choose --python, --rust or both")
@@ -306,7 +358,7 @@ def main():
         for name in [n for n in starts if getattr(args, n.lower())]:
             with server(*starts[name], Path(tmp) / f"{name}.log") as url:
                 results[name] = measure_backend(url, csv, workbook, args.rows)
-    write_results(results, args.rows, args.rust_binary)
+    write_results(results, args.rows, args.rust_binary, args.out)
 
 
 if __name__ == "__main__":
