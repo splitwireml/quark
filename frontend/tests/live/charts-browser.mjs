@@ -1,4 +1,4 @@
-// Draws every chart kind on the Chart canvas, then a four-tile dashboard, in the real App against the Rust core.
+// Draws every chart kind on the Chart canvas, then a dashboard with a tile of every kind, in the real App against the Rust core.
 import assert from "node:assert/strict";
 import { runSteps, withLive } from "./harness.mjs";
 
@@ -29,7 +29,6 @@ await withLive({ name: "orders.csv", csv }, async ({ page, api, url }) => {
     const target = new URL(request.url());
     return api.post(target.pathname + target.search, request.postDataJSON());
   };
-  const isVisualize = request => request.url().endsWith("/visualize") && request.method() === "POST";
 
   // Picks exactly these columns, then optionally a chart type, and returns the API's answer to the page's own request.
   const draw = async (names, chart) => {
@@ -105,8 +104,17 @@ await withLive({ name: "orders.csv", csv }, async ({ page, api, url }) => {
     },
 
     async dashboard_survives_a_filter_change() {
-      const tiles = [[["city"], "Bar"], [["amount"], "Histogram"], [["day", "amount"], "Line"], [["amount"], "Metric"]];
-      for (const [names, chart] of tiles) {
+      // One tile of every kind the chart picker offers, each with the marks its Chart-canvas step looks for.
+      const tiles = [
+        { names: ["city"], chart: "Bar", marks: ["rect.bar"] },
+        { names: ["city"], chart: "Pie", marks: ["svg[aria-label^='Pie chart'] .slice"] },
+        { names: ["amount"], chart: "Histogram", marks: ["rect.bar"] },
+        { names: ["amount"], chart: "Box", marks: ["g.box"] },
+        { names: ["amount", "score"], chart: "Scatter", marks: ["button.hit", "canvas.dots"] },
+        { names: ["day", "amount"], chart: "Line", marks: ["path.line"] },
+        { names: ["amount"], chart: "Metric", marks: ["[role=figure]"] }
+      ];
+      for (const { names, chart } of tiles) {
         await draw(names, chart);
         await pane.getByRole("button", { name: "Add to dashboard" }).click();
         await pane.getByText("Added to dashboard").waitFor();
@@ -118,8 +126,8 @@ await withLive({ name: "orders.csv", csv }, async ({ page, api, url }) => {
       });
       await page.getByRole("group", { name: "Canvas" }).getByRole("button", { name: "Dashboard", exact: true }).click();
       const dashboard = page.locator('section[aria-label="Dashboard"]');
-      await dashboard.locator("article.tile").nth(3).waitFor();
-      assert.equal(await dashboard.locator("article.tile").count(), 4);
+      await dashboard.locator("article.tile").nth(tiles.length - 1).waitFor();
+      assert.equal(await dashboard.locator("article.tile").count(), tiles.length);
 
       const filtered = page.waitForRequest(request => isVisualize(request) && request.postDataJSON().filters?.length > 0);
       await dashboard.locator("article.tile rect.bar").first().waitFor();
@@ -127,15 +135,14 @@ await withLive({ name: "orders.csv", csv }, async ({ page, api, url }) => {
       await dashboard.locator("article.tile rect.bar").first().click();
       assert.deepEqual((await filtered).postDataJSON().filters.map(filter => filter.column), ["city"]);
 
-      const rendered = {
-        "rect.bar": 1, "path.line": 1, "[role=figure]": 1
-      };
-      for (const [selector, atLeast] of Object.entries(rendered)) {
-        await page.waitForFunction(({ selector, atLeast }) => document.querySelectorAll(`section[aria-label="Dashboard"] article.tile ${selector}`).length >= atLeast, { selector, atLeast });
-      }
       await page.waitForFunction(() => document.querySelectorAll('section[aria-label="Dashboard"] article.tile .state').length === 0, undefined, { timeout: 15000 });
       await page.unroute(isVisualizeUrl);
       assert.equal(await dashboard.locator("article.tile [role=alert]").count(), 0, "no tile shows an error");
+      for (const [index, { chart, marks: selectors }] of tiles.entries()) {
+        for (const selector of selectors) {
+          assert.ok(await dashboard.locator("article.tile").nth(index).locator(selector).count() > 0, `${chart} tile draws ${selector}`);
+        }
+      }
       assert.match(await dashboard.locator("[role=figure] .rows").innerText(), new RegExp(`^${rows.length / cities.length} rows`), "the metric tile counts the filtered rows");
     },
 
