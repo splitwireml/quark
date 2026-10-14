@@ -5,8 +5,8 @@ use std::time::Instant;
 use duckdb::Connection;
 use serde_json::Value;
 
-use super::metric;
 use super::model::{ChartKind, ChartSpec, VisualizeRequest};
+use super::{box_plot, metric};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::filtered::{Relation, filtered};
 use crate::relation::target::Target;
@@ -70,7 +70,7 @@ fn chart(conn: &Connection, relation: &Relation, spec: &ChartSpec) -> ApiResult<
         ChartKind::Bar => unavailable("bar"),
         ChartKind::Pie => unavailable("pie"),
         ChartKind::Histogram => unavailable("histogram"),
-        ChartKind::Box => unavailable("box"),
+        ChartKind::Box => box_plot::chart(conn, relation, spec),
         ChartKind::Scatter => unavailable("scatter"),
         ChartKind::Line => unavailable("line"),
     }
