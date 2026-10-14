@@ -1,11 +1,14 @@
 //! Request cancellation: a dropped request interrupts only the query it owns.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use crate::runtime::engine::{Engine, EngineInner};
+use duckdb::{Connection, InterruptHandle};
+
+use crate::runtime::engine::{Engine, lock_recovering};
 
 /// How often a cancelled query is interrupted again until it stops.
 const REINTERRUPT_INTERVAL: Duration = Duration::from_millis(5);
@@ -28,8 +31,22 @@ pub struct CancelGuard {
     is_armed: bool,
 }
 
-fn lock_active(active: &Mutex<Option<u64>>) -> MutexGuard<'_, Option<u64>> {
-    active.lock().unwrap_or_else(PoisonError::into_inner)
+type Active = HashMap<u64, Arc<InterruptHandle>>;
+
+fn lock_active(active: &Mutex<Active>) -> MutexGuard<'_, Active> {
+    lock_recovering(active)
+}
+
+/// A ticket registered on a reader; dropping it, even while unwinding, ends the registration.
+struct Registration<'a> {
+    active: &'a Mutex<Active>,
+    id: u64,
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        lock_active(self.active).remove(&self.id);
+    }
 }
 
 impl Engine {
@@ -44,24 +61,30 @@ impl Engine {
         }
     }
 
-    /// Runs `f` on the connection unless the ticket was cancelled while waiting for the lock.
-    pub fn run_guarded<T>(
+    /// Runs `work` on a pooled reader, unless the ticket was cancelled while waiting for one.
+    /// A ticket stays registered on its reader while `work` runs, so only its own query is interrupted.
+    pub fn read<T>(
         &self,
-        ticket: &Ticket,
-        f: impl FnOnce(&mut EngineInner) -> T,
+        ticket: Option<&Ticket>,
+        work: impl FnOnce(&Connection) -> T,
     ) -> Result<T, Cancelled> {
-        let mut inner = self.lock();
-        {
-            // Check and claim under `active`, so a drop either sees the flag here or sees our id.
-            let mut active = lock_active(&self.active);
-            if ticket.is_cancelled.load(Ordering::SeqCst) {
-                return Err(Cancelled);
+        let lease = self.pool.lease();
+        let _registration = match ticket {
+            Some(ticket) => {
+                // Check and register under `active`, so a drop either sees the flag here or sees our id.
+                let mut active = lock_active(&self.active);
+                if ticket.is_cancelled() {
+                    return Err(Cancelled);
+                }
+                active.insert(ticket.id, lease.interrupt_handle());
+                Some(Registration {
+                    active: &self.active,
+                    id: ticket.id,
+                })
             }
-            *active = Some(ticket.id);
-        }
-        let result = f(&mut inner);
-        *lock_active(&self.active) = None;
-        Ok(result)
+            None => None,
+        };
+        Ok(work(&lease.conn))
     }
 }
 
@@ -88,27 +111,28 @@ impl Drop for CancelGuard {
             return;
         }
         self.ticket.is_cancelled.store(true, Ordering::SeqCst);
+        let id = self.ticket.id;
         {
             let active = lock_active(&self.engine.active);
-            if *active != Some(self.ticket.id) {
+            let Some(handle) = active.get(&id) else {
                 return;
-            }
-            self.engine.interrupt.interrupt();
+            };
+            handle.interrupt();
         }
         // DuckDB drops an interrupt that lands between statements, so keep interrupting until
-        // `run_guarded` clears `active`. Ids are unique, so this never hits another query.
+        // `read` unregisters the ticket. Interrupting under `active` means a reader that already
+        // moved on to another query is never hit.
         let engine = Arc::clone(&self.engine);
-        let id = self.ticket.id;
         let spawned = thread::Builder::new()
             .name("quark-interrupt".to_owned())
             .spawn(move || {
                 loop {
                     thread::sleep(REINTERRUPT_INTERVAL);
                     let active = lock_active(&engine.active);
-                    if *active != Some(id) {
+                    let Some(handle) = active.get(&id) else {
                         break;
-                    }
-                    engine.interrupt.interrupt();
+                    };
+                    handle.interrupt();
                 }
             });
         if spawned.is_err() {

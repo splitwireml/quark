@@ -8,6 +8,7 @@ use super::model::{DatasetEntry, LegacyNode, SourceDetail, SourceSummary};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::describe::{datasets as describe_datasets, describe};
 use crate::runtime::AppState;
+use crate::runtime::cancel::Cancelled;
 use crate::runtime::mount::ViewInfo;
 use crate::runtime::registry::{DEFAULT_PROJECT_ID, RawRecord, SourceRecord};
 use crate::runtime::state::invalid_value;
@@ -77,20 +78,24 @@ pub fn legacy_nodes(state: &AppState) -> Vec<LegacyNode> {
 /// Every table and view of the node's engine, with column names.
 pub fn datasets(state: &AppState, node_id: &str) -> ApiResult<Vec<DatasetEntry>> {
     let engine = state.engine_for_node(node_id)?;
-    let inner = engine.lock();
-    describe_datasets(&inner.conn)
-        .map_err(invalid_value)?
-        .into_iter()
-        .map(|info| {
-            let table = format!("{}.{}", quote_ident(&info.schema), quote_ident(&info.name));
-            let columns = describe(&inner.conn, &table, &[])
+    engine
+        .read(None, |conn| {
+            describe_datasets(conn)
                 .map_err(invalid_value)?
                 .into_iter()
-                .map(|column| column.name)
-                .collect();
-            Ok(DatasetEntry { info, columns })
+                .map(|info| {
+                    let table =
+                        format!("{}.{}", quote_ident(&info.schema), quote_ident(&info.name));
+                    let columns = describe(conn, &table, &[])
+                        .map_err(invalid_value)?
+                        .into_iter()
+                        .map(|column| column.name)
+                        .collect();
+                    Ok(DatasetEntry { info, columns })
+                })
+                .collect()
         })
-        .collect()
+        .map_err(|Cancelled| ApiError::internal("Internal error"))?
 }
 
 /// The lowercase extension with its dot, if the desktop build can read that kind of file.

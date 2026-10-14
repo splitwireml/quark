@@ -117,7 +117,7 @@ async fn upload_over_two_megabytes_streams() {
     assert_eq!(nodes[0]["id"], id);
     let engine = state.engine_for_node(id).unwrap();
     let count: i64 = engine
-        .lock()
+        .primary()
         .conn
         .query_row("SELECT count(*) FROM main.big_sheet", [], |row| row.get(0))
         .unwrap();

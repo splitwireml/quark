@@ -22,7 +22,7 @@ use tower::ServiceExt;
 async fn panic_while_locked(State(state): State<AppState>, Path(node_id): Path<String>) {
     let _ = blocking(move || -> ApiResult<()> {
         let engine = state.engine_for_node(&node_id)?;
-        let _inner = engine.lock();
+        let _inner = engine.primary();
         panic!("boom")
     })
     .await;

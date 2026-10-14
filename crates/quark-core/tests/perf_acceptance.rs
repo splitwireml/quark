@@ -72,7 +72,12 @@ fn timed_page(state: &AppState, dataset: &str, request: &QueryRequest) -> Durati
     let started = Instant::now();
     let engine = state.engine_for_node(NODE).unwrap();
     let target = Target::Dataset(dataset.to_owned());
-    let body = run_page(&mut engine.lock(), &target, request, Format::Arrow).unwrap();
+    let body = engine
+        .read(None, |conn| {
+            run_page(&engine, conn, &target, request, Format::Arrow)
+        })
+        .unwrap()
+        .unwrap();
     let elapsed = started.elapsed();
     let PageBody::Arrow(bytes) = body else {
         panic!("expected an Arrow page");
@@ -95,8 +100,8 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 
 fn has_result_table(state: &AppState) -> bool {
     let engine = state.engine_for_node(NODE).unwrap();
-    let inner = engine.lock();
-    let tables: i64 = inner
+    let primary = engine.primary();
+    let tables: i64 = primary
         .conn
         .query_row(
             "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'quark_results'",

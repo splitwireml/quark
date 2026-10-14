@@ -1,7 +1,9 @@
 //! Executes one page of a dataset or SQL query: counts, null fractions and JSON rows.
 
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use duckdb::Connection;
 use duckdb::arrow::record_batch::RecordBatch;
 use serde_json::{Map, Value};
 
@@ -13,7 +15,8 @@ use crate::relation::request::QueryRequest;
 use crate::relation::target::{Target, resolve};
 use crate::runtime::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
 use crate::runtime::cache::stats::stats_key;
-use crate::runtime::engine::EngineInner;
+use crate::runtime::engine::Engine;
+use crate::runtime::mount::ViewInfo;
 use crate::shared::columns::ColumnMeta;
 use crate::shared::encode::arrow::encode_page;
 use crate::shared::encode::cell::cell_json;
@@ -37,16 +40,18 @@ fn rows_json(batches: &[RecordBatch], columns: &[ColumnMeta]) -> Vec<Value> {
     rows
 }
 
-/// Runs one page of `target` with the request's filters, sorts and dedupe applied.
+/// Runs one page of `target` with the request's filters, sorts and dedupe applied, on `conn`.
+/// The engine's caches are locked one entry at a time, never while a query runs.
 pub fn run_page(
-    inner: &mut EngineInner,
+    engine: &Engine,
+    conn: &Connection,
     target: &Target,
     request: &QueryRequest,
     format: Format,
 ) -> ApiResult<PageBody> {
     let started = Instant::now();
     request.validate()?;
-    let resolved = resolve(&inner.conn, target)?;
+    let resolved = resolve(conn, target)?;
     let built = build_query(
         &resolved.table,
         &resolved.display_table,
@@ -63,18 +68,31 @@ pub fn run_page(
         || !request.dedupe_columns.is_empty();
     // A scan with no controls reads its table or view as it is; a result table would only copy it.
     let is_plain = match &resolved.plain_sql {
-        Some(sql) => is_plain_scan(request, sql, inner.mounted.values().flatten()),
+        Some(sql) => {
+            let mounted: Vec<ViewInfo> = engine
+                .primary()
+                .mounted
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            is_plain_scan(request, sql, &mounted)
+        }
         None => !has_controls,
     };
     let result_key = stats_key(&built.ordered, &params);
     let action = if is_plain {
         ResultAction::ServeDirect
     } else {
-        inner.results.note_request(&result_key)
+        engine.results().note_request(&result_key)
     };
-    for table in inner.results.take_dropped() {
-        if let Err(error) = inner.conn.execute_batch(&drop_statement(&table)) {
-            tracing::warn!(table, %error, "could not drop an evicted result table");
+    let evicted = engine.results().take_dropped();
+    if !evicted.is_empty() {
+        let primary = engine.primary();
+        for table in evicted {
+            if let Err(error) = primary.conn.execute_batch(&drop_statement(&table)) {
+                tracing::warn!(table, %error, "could not drop an evicted result table");
+            }
         }
     }
     let saved = match &action {
@@ -91,23 +109,27 @@ pub fn run_page(
         ),
     };
 
-    let conn = &inner.conn;
     let key = stats_key(&built.relation, &params);
-    let stats = match inner.stats.get(&key) {
+    let cached = engine.stats().get(&key);
+    let stats = match cached {
         Some(stats) => stats,
         None => {
-            inner.counters.count_queries += 1;
+            engine
+                .counters
+                .count_queries
+                .fetch_add(1, Ordering::Relaxed);
             let stats =
                 compute_stats(conn, relation, &resolved.columns, bound).map_err(unprocessable)?;
-            inner.stats.insert(key, stats.clone());
+            engine.stats().insert(key, stats.clone());
             stats
         }
     };
     let fetched = fetch_page(conn, ordered, bound, request).map_err(unprocessable)?;
     if let ResultAction::StartBuild(table) = &action {
-        inner
-            .results
-            .start_build(conn, &result_key, table, &built.ordered, params);
+        let primary = engine.primary();
+        engine
+            .results()
+            .start_build(&primary.conn, &result_key, table, &built.ordered, params);
     }
 
     let sql = match resolved.plain_sql {

@@ -2,19 +2,23 @@
 
 use super::*;
 use crate::runtime::engine::EngineKind;
+use crate::runtime::pool::reader_count;
 use duckdb::Connection;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const LONG_QUERY: &str = "SELECT sum(i) FROM range(10000000000) t(i)";
+/// Takes a few hundred milliseconds, so a cancel lands while it is still going.
+const SLOW_QUERY: &str =
+    "SELECT count(*) FROM range(3000) a(x), range(100000) b(y) WHERE (x + y) % 7 = 0";
 const SHORT_QUERY: &str = "SELECT count(*) FROM range(50000000)";
 
 fn engine() -> Arc<Engine> {
     let kind = EngineKind::Node {
         node_id: "s1".to_owned(),
     };
-    Arc::new(Engine::new(kind, Connection::open_in_memory().unwrap()))
+    Arc::new(Engine::new(kind, Connection::open_in_memory().unwrap()).unwrap())
 }
 
 /// Runs short queries on the ticket until `release` is set; reports each query's success.
@@ -27,12 +31,11 @@ fn spin_until(
     let engine = Arc::clone(engine);
     thread::spawn(move || {
         engine
-            .run_guarded(&ticket, |inner| {
+            .read(Some(&ticket), |conn| {
                 started.send(()).unwrap();
                 let mut is_ok = true;
                 while !release.load(Ordering::SeqCst) {
-                    is_ok &= inner
-                        .conn
+                    is_ok &= conn
                         .query_row(SHORT_QUERY, [], |row| row.get::<_, i64>(0))
                         .is_ok();
                 }
@@ -51,11 +54,9 @@ fn dropping_guard_interrupts_running_query() {
     let (done_tx, done_rx) = mpsc::channel();
     let runner = Arc::clone(&engine);
     thread::spawn(move || {
-        let outcome = runner.run_guarded(&ticket, |inner| {
+        let outcome = runner.read(Some(&ticket), |conn| {
             started_tx.send(()).unwrap();
-            inner
-                .conn
-                .query_row(LONG_QUERY, [], |row| row.get::<_, f64>(0))
+            conn.query_row(LONG_QUERY, [], |row| row.get::<_, f64>(0))
         });
         done_tx.send(outcome).unwrap();
     });
@@ -80,13 +81,11 @@ fn interrupt_between_statements_still_stops_the_next_one() {
     let (done_tx, done_rx) = mpsc::channel();
     let runner = Arc::clone(&engine);
     thread::spawn(move || {
-        let outcome = runner.run_guarded(&ticket, |inner| {
+        let outcome = runner.read(Some(&ticket), |conn| {
             started_tx.send(()).unwrap();
             // No statement is running while the guard drops.
             thread::sleep(Duration::from_millis(100));
-            inner
-                .conn
-                .query_row(LONG_QUERY, [], |row| row.get::<_, f64>(0))
+            conn.query_row(LONG_QUERY, [], |row| row.get::<_, f64>(0))
         });
         done_tx.send(outcome).unwrap();
     });
@@ -101,15 +100,15 @@ fn interrupt_between_statements_still_stops_the_next_one() {
 }
 
 #[test]
-fn cancelled_before_lock_skips_execution() {
+fn cancelled_while_waiting_for_a_reader_skips_execution() {
     let engine = engine();
     let guard = engine.guard();
     let ticket = guard.ticket();
-    let held = engine.lock();
+    let held: Vec<_> = (0..reader_count()).map(|_| engine.pool.lease()).collect();
     let runner = Arc::clone(&engine);
     let waiting = thread::spawn(move || {
         let mut has_run = false;
-        let outcome = runner.run_guarded(&ticket, |_| has_run = true);
+        let outcome = runner.read(Some(&ticket), |_| has_run = true);
         (outcome.is_err(), has_run)
     });
     thread::sleep(Duration::from_millis(50));
@@ -124,7 +123,7 @@ fn cancelled_before_lock_skips_execution() {
 fn stale_interrupt_does_not_hit_the_next_query() {
     let engine = engine();
     let first = engine.guard();
-    engine.run_guarded(&first.ticket(), |_| ()).unwrap();
+    engine.read(Some(&first.ticket()), |_| ()).unwrap();
     let second = engine.guard();
     let (started_tx, started_rx) = mpsc::channel();
     let release = Arc::new(AtomicBool::new(false));
@@ -140,31 +139,33 @@ fn stale_interrupt_does_not_hit_the_next_query() {
 }
 
 #[test]
-fn waiting_request_does_not_interrupt_running_one() {
+fn cancel_interrupts_only_its_own_reader() {
     let engine = engine();
-    let running_guard = engine.guard();
+    let cancelled = engine.guard();
+    let kept = engine.guard();
     let (started_tx, started_rx) = mpsc::channel();
-    let release = Arc::new(AtomicBool::new(false));
-    let running = spin_until(
-        &engine,
-        running_guard.ticket(),
-        started_tx,
-        Arc::clone(&release),
-    );
+    let spawn_query = |ticket: Ticket| {
+        let (engine, started) = (Arc::clone(&engine), started_tx.clone());
+        thread::spawn(move || {
+            engine
+                .read(Some(&ticket), |conn| {
+                    started.send(()).unwrap();
+                    conn.query_row(SLOW_QUERY, [], |row| row.get::<_, i64>(0))
+                })
+                .unwrap()
+        })
+    };
+    let first = spawn_query(cancelled.ticket());
+    let second = spawn_query(kept.ticket());
     started_rx.recv().unwrap();
-    let waiting_guard = engine.guard();
-    let waiting_ticket = waiting_guard.ticket();
-    let waiter = Arc::clone(&engine);
-    let waiting = thread::spawn(move || waiter.run_guarded(&waiting_ticket, |_| ()).is_err());
+    started_rx.recv().unwrap();
     thread::sleep(Duration::from_millis(50));
 
-    drop(waiting_guard);
-    thread::sleep(Duration::from_millis(100));
-    release.store(true, Ordering::SeqCst);
+    drop(cancelled);
 
-    assert!(running.join().unwrap());
-    assert!(waiting.join().unwrap());
-    drop(running_guard);
+    let error = first.join().unwrap().unwrap_err();
+    assert!(error.to_string().contains("INTERRUPT"), "{error}");
+    assert!(second.join().unwrap().unwrap() > 0);
 }
 
 #[test]
@@ -175,5 +176,5 @@ fn disarmed_guard_does_not_cancel() {
     guard.disarm();
     drop(guard);
 
-    assert_eq!(engine.run_guarded(&ticket, |_| 7).unwrap(), 7);
+    assert_eq!(engine.read(Some(&ticket), |_| 7).unwrap(), 7);
 }

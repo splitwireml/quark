@@ -13,6 +13,7 @@ use super::cache::results::ResultCache;
 use super::cache::stats::StatsCache;
 use super::dirs::{Dirs, configure_spill, lock_down_dirs};
 use super::mount::{ViewInfo, attach_cache, import_job};
+use super::pool::{ReaderPool, reader_count};
 use super::registry::SourceRecord;
 use crate::shared::sql::{quote_ident, scan_expression};
 
@@ -25,58 +26,68 @@ pub enum EngineKind {
 /// Work done so far, so tests can tell a cache hit from a recomputation.
 #[derive(Debug, Default)]
 pub struct Counters {
-    pub count_queries: u64,
+    pub count_queries: AtomicU64,
 }
 
-pub struct EngineInner {
+/// The connection that changes the catalog, and the views mounted through it by source id.
+pub struct Primary {
     pub conn: Connection,
-    /// Views mounted so far, by source id.
     pub mounted: BTreeMap<String, Vec<ViewInfo>>,
-    pub stats: StatsCache,
-    pub results: ResultCache,
-    #[doc(hidden)]
-    pub counters: Counters,
-}
-
-impl EngineInner {
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            conn,
-            mounted: BTreeMap::new(),
-            stats: StatsCache::default(),
-            results: ResultCache::default(),
-            counters: Counters::default(),
-        }
-    }
 }
 
 pub struct Engine {
     pub kind: EngineKind,
-    // ponytail: one query at a time per engine; parallel reads are the upgrade path (sub-project 2).
-    inner: Mutex<EngineInner>,
-    pub(crate) interrupt: Arc<InterruptHandle>,
-    /// Ticket of the query running now, if any (see `cancel`).
-    pub(crate) active: Mutex<Option<u64>>,
+    primary: Mutex<Primary>,
+    /// Readers cloned from the primary: queries run here, in parallel (see `cancel`).
+    pub(crate) pool: ReaderPool,
+    pub stats: Mutex<StatsCache>,
+    pub results: Mutex<ResultCache>,
+    #[doc(hidden)]
+    pub counters: Counters,
+    /// Tickets of the queries running now, with the handle that interrupts each one's reader.
+    pub(crate) active: Mutex<HashMap<u64, Arc<InterruptHandle>>>,
     pub(crate) next_ticket: AtomicU64,
     /// Cache files that were ready when this workspace opened, so its allow-list covers them.
     pub(crate) caches: HashMap<ColumnarKey, PathBuf>,
 }
 
+/// Locks `mutex`, recovering its data if a panicking thread poisoned it.
+pub fn lock_recovering<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Engine {
-    pub fn new(kind: EngineKind, conn: Connection) -> Self {
-        Self {
+    pub fn new(kind: EngineKind, conn: Connection) -> duckdb::Result<Self> {
+        let pool = ReaderPool::new(&conn, reader_count())?;
+        Ok(Self {
             kind,
-            interrupt: conn.interrupt_handle(),
-            inner: Mutex::new(EngineInner::new(conn)),
-            active: Mutex::new(None),
+            primary: Mutex::new(Primary {
+                conn,
+                mounted: BTreeMap::new(),
+            }),
+            pool,
+            stats: Mutex::new(StatsCache::default()),
+            results: Mutex::new(ResultCache::default()),
+            counters: Counters::default(),
+            active: Mutex::new(HashMap::new()),
             next_ticket: AtomicU64::new(0),
             caches: HashMap::new(),
-        }
+        })
     }
 
-    /// Locks the connection, recovering it if a panicking thread poisoned the mutex.
-    pub fn lock(&self) -> MutexGuard<'_, EngineInner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The primary connection, for catalog changes only: mounting, attaching, dropping result tables.
+    pub fn primary(&self) -> MutexGuard<'_, Primary> {
+        lock_recovering(&self.primary)
+    }
+
+    /// The count and null cache; hold the guard only to read or write one entry.
+    pub fn stats(&self) -> MutexGuard<'_, StatsCache> {
+        lock_recovering(&self.stats)
+    }
+
+    /// The result cache; hold the guard only to read or write one entry.
+    pub fn results(&self) -> MutexGuard<'_, ResultCache> {
+        lock_recovering(&self.results)
     }
 
     /// Opens a source on its own connection: databases read-only, flat files behind one view.
@@ -120,7 +131,7 @@ impl Engine {
         let kind = EngineKind::Node {
             node_id: source.id.clone(),
         };
-        Ok(Engine::new(kind, conn))
+        Ok(Engine::new(kind, conn)?)
     }
 }
 

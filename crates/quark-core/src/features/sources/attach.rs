@@ -58,7 +58,7 @@ pub fn attach_database(
         sheets: None,
     };
     let engine = state.open_node_engine(&source)?;
-    datasets(&engine.lock().conn).map_err(cannot_open)?;
+    datasets(&engine.primary().conn).map_err(cannot_open)?;
     let public = public_source(&source);
     let record = source_record(&source);
     state.register_source(source, record, engine)?;

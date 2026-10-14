@@ -1,4 +1,4 @@
-//! Tests for opening nodes and recovering the engine lock.
+//! Tests for opening nodes, recovering the primary lock and running reads side by side.
 
 use super::*;
 use crate::relation::describe::datasets;
@@ -6,6 +6,7 @@ use crate::shared::ids::dataset_id;
 use crate::shared::sql::{scan_expression, sql_string};
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 fn count_rows(conn: &Connection, file: &Path) -> duckdb::Result<i64> {
     let scan = scan_expression(&file.to_string_lossy()).unwrap();
@@ -38,7 +39,7 @@ fn open(file: &Path, dataset_name: Option<&str>, root: &Path) -> anyhow::Result<
 }
 
 fn names(engine: &Engine) -> Vec<(String, String, String)> {
-    datasets(&engine.lock().conn)
+    datasets(&engine.primary().conn)
         .unwrap()
         .into_iter()
         .map(|item| (item.schema, item.name, item.kind))
@@ -88,7 +89,7 @@ fn node_datasets_per_format() {
         vec![("main".to_owned(), "items".to_owned(), "TABLE".to_owned())]
     );
     assert_eq!(
-        datasets(&engine.lock().conn).unwrap()[0].id,
+        datasets(&engine.primary().conn).unwrap()[0].id,
         dataset_id("main", "items")
     );
 }
@@ -107,7 +108,7 @@ fn duckdb_sources_are_read_only() {
     fs::write(&outside, "a\n1\n").unwrap();
 
     let engine = open(&database, None, root.path()).unwrap();
-    let guard = engine.lock();
+    let guard = engine.primary();
 
     assert!(
         guard
@@ -142,7 +143,7 @@ fn database_node_blocks_every_file_even_beside_it() {
     fs::write(&outside, "a\n1\n").unwrap();
 
     let engine = open(&database, None, root.path()).unwrap();
-    let guard = engine.lock();
+    let guard = engine.primary();
 
     assert!(count_rows(&guard.conn, &beside).is_err());
     assert!(count_rows(&guard.conn, &outside).is_err());
@@ -157,7 +158,7 @@ fn paths_with_quotes_spaces_and_unicode() {
     fs::write(&file, "a\n1\n2\n").unwrap();
 
     let engine = open(&file, Some("we\"ird 'name'"), root.path()).unwrap();
-    let guard = engine.lock();
+    let guard = engine.primary();
 
     let rows: i64 = guard
         .conn
@@ -171,23 +172,26 @@ fn paths_with_quotes_spaces_and_unicode() {
 
 #[test]
 fn poisoned_engine_lock_recovers() {
-    let engine = std::sync::Arc::new(Engine::new(
-        EngineKind::Node {
-            node_id: "s1".to_owned(),
-        },
-        Connection::open_in_memory().unwrap(),
-    ));
+    let engine = std::sync::Arc::new(
+        Engine::new(
+            EngineKind::Node {
+                node_id: "s1".to_owned(),
+            },
+            Connection::open_in_memory().unwrap(),
+        )
+        .unwrap(),
+    );
     let held = std::sync::Arc::clone(&engine);
     let joined = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = held.primary();
         panic!("poison the engine lock");
     })
     .join();
     assert!(joined.is_err());
-    assert!(engine.inner.is_poisoned());
+    assert!(engine.primary.is_poisoned());
 
     let one: i64 = engine
-        .lock()
+        .primary()
         .conn
         .query_row("SELECT 1", [], |row| row.get(0))
         .unwrap();
@@ -200,4 +204,50 @@ fn open_node_rejects_excel_and_unknown_files() {
     let root = tempfile::tempdir().unwrap();
     assert!(open(&root.path().join("x.xlsx"), None, root.path()).is_err());
     assert!(open(&root.path().join("x.txt"), None, root.path()).is_err());
+}
+
+/// Single-threaded, so concurrent reads can only be faster than serial ones by running on separate readers.
+const SLOW_QUERY: &str =
+    "SELECT count(*) FROM range(3000) a(x), range(10000) b(y) WHERE (x + y) % 7 = 0";
+
+fn slow_engine() -> Engine {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("SET threads = 1").unwrap();
+    let kind = EngineKind::Node {
+        node_id: "s1".to_owned(),
+    };
+    Engine::new(kind, conn).unwrap()
+}
+
+fn read_slow(engine: &Engine) -> Duration {
+    let started = Instant::now();
+    let total: i64 = engine
+        .read(None, |conn| {
+            conn.query_row(SLOW_QUERY, [], |row| row.get(0))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(total > 0);
+    started.elapsed()
+}
+
+#[test]
+fn pages_of_one_engine_run_concurrently() {
+    let engine = slow_engine();
+    let single = read_slow(&engine);
+
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2).map(|_| scope.spawn(|| read_slow(&engine))).collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    let together = started.elapsed();
+
+    // Serial reads would take about twice one read.
+    assert!(
+        together < single.mul_f64(1.5),
+        "two reads took {together:?}, one takes {single:?}"
+    );
 }

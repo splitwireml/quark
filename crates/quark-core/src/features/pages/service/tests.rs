@@ -5,7 +5,7 @@ use crate::relation::describe::datasets;
 use crate::relation::request::{Direction, Filter, Sort};
 use crate::runtime::cache::results::{ResultCache, table_name};
 use crate::runtime::dirs::Dirs;
-use crate::runtime::engine::Engine;
+use crate::runtime::engine::{Engine, EngineKind};
 use crate::runtime::registry::SourceRecord;
 use crate::shared::ids::dataset_id;
 use arrow::ipc::reader::StreamReader;
@@ -17,10 +17,25 @@ use std::time::{Duration, Instant};
 
 mod results;
 
-fn inner(setup: &str) -> EngineInner {
+fn engine(setup: &str) -> Engine {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(setup).unwrap();
-    EngineInner::new(conn)
+    let kind = EngineKind::Node {
+        node_id: "s1".to_owned(),
+    };
+    Engine::new(kind, conn).unwrap()
+}
+
+/// Runs one page on a pooled reader, as the route does.
+fn fetch(
+    engine: &Engine,
+    target: &Target,
+    request: &QueryRequest,
+    format: Format,
+) -> ApiResult<PageBody> {
+    engine
+        .read(None, |conn| run_page(engine, conn, target, request, format))
+        .unwrap()
 }
 
 fn dataset(name: &str) -> Target {
@@ -52,7 +67,7 @@ fn filter(column: &str, operator: &str, value: Value) -> Filter {
 
 #[test]
 fn pages_count_and_offsets() {
-    let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(250)");
+    let engine = engine("CREATE TABLE t AS SELECT range AS a FROM range(250)");
     let sorted = |page| QueryRequest {
         page,
         sorts: vec![Sort {
@@ -62,7 +77,7 @@ fn pages_count_and_offsets() {
         ..QueryRequest::default()
     };
 
-    let second = json_body(run_page(&mut inner, &dataset("t"), &sorted(2), Format::Json).unwrap());
+    let second = json_body(fetch(&engine, &dataset("t"), &sorted(2), Format::Json).unwrap());
     assert_eq!(second["page"], 2);
     assert_eq!(second["page_size"], 100);
     assert_eq!(second["total_rows"], 250);
@@ -72,16 +87,16 @@ fn pages_count_and_offsets() {
     assert_eq!(rows[0], json!({"a": 100}));
     assert!(second["elapsed_ms"].as_f64().unwrap() >= 0.0);
 
-    let last = json_body(run_page(&mut inner, &dataset("t"), &sorted(3), Format::Json).unwrap());
+    let last = json_body(fetch(&engine, &dataset("t"), &sorted(3), Format::Json).unwrap());
     assert_eq!(last["rows"].as_array().unwrap().len(), 50);
 
-    let beyond = json_body(run_page(&mut inner, &dataset("t"), &sorted(4), Format::Json).unwrap());
+    let beyond = json_body(fetch(&engine, &dataset("t"), &sorted(4), Format::Json).unwrap());
     assert_eq!(beyond["rows"], json!([]));
     assert_eq!(beyond["total_rows"], 250);
 }
 
-fn count_queries(inner: &EngineInner) -> u64 {
-    inner.counters.count_queries
+fn count_queries(engine: &Engine) -> u64 {
+    engine.counters.count_queries.load(Ordering::Relaxed)
 }
 
 fn page_of(page: i64, sorts: Vec<Sort>, filters: Vec<Filter>) -> QueryRequest {
@@ -102,11 +117,11 @@ fn sort_a(direction: Direction) -> Vec<Sort> {
 
 #[test]
 fn second_page_skips_count_and_nulls() {
-    let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(250)");
-    let run = |inner: &mut EngineInner, page| {
+    let engine = engine("CREATE TABLE t AS SELECT range AS a FROM range(250)");
+    let run = |engine: &Engine, page| {
         json_body(
-            run_page(
-                inner,
+            fetch(
+                engine,
                 &dataset("t"),
                 &page_of(page, sort_a(Direction::Asc), Vec::new()),
                 Format::Json,
@@ -115,10 +130,10 @@ fn second_page_skips_count_and_nulls() {
         )
     };
 
-    let first = run(&mut inner, 1);
-    let second = run(&mut inner, 2);
+    let first = run(&engine, 1);
+    let second = run(&engine, 2);
 
-    assert_eq!(count_queries(&inner), 1);
+    assert_eq!(count_queries(&engine), 1);
     assert_eq!(second["total_rows"], 250);
     assert_eq!(second["columns"], first["columns"]);
     assert_eq!(second["rows"][0], json!({"a": 100}));
@@ -126,11 +141,11 @@ fn second_page_skips_count_and_nulls() {
 
 #[test]
 fn sort_change_reuses_stats() {
-    let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(10)");
-    let run = |inner: &mut EngineInner, sorts| {
+    let engine = engine("CREATE TABLE t AS SELECT range AS a FROM range(10)");
+    let run = |engine: &Engine, sorts| {
         json_body(
-            run_page(
-                inner,
+            fetch(
+                engine,
                 &dataset("t"),
                 &page_of(1, sorts, Vec::new()),
                 Format::Json,
@@ -139,10 +154,10 @@ fn sort_change_reuses_stats() {
         )
     };
 
-    let ascending = run(&mut inner, sort_a(Direction::Asc));
-    let descending = run(&mut inner, sort_a(Direction::Desc));
+    let ascending = run(&engine, sort_a(Direction::Asc));
+    let descending = run(&engine, sort_a(Direction::Desc));
 
-    assert_eq!(count_queries(&inner), 1);
+    assert_eq!(count_queries(&engine), 1);
     assert_eq!(ascending["rows"][0], json!({"a": 0}));
     assert_eq!(descending["rows"][0], json!({"a": 9}));
     assert_eq!(descending["total_rows"], 10);
@@ -150,11 +165,11 @@ fn sort_change_reuses_stats() {
 
 #[test]
 fn filter_change_misses() {
-    let mut inner = inner("CREATE TABLE t AS SELECT range AS a FROM range(10)");
-    let run = |inner: &mut EngineInner, bound| {
+    let engine = engine("CREATE TABLE t AS SELECT range AS a FROM range(10)");
+    let run = |engine: &Engine, bound| {
         json_body(
-            run_page(
-                inner,
+            fetch(
+                engine,
                 &dataset("t"),
                 &page_of(1, Vec::new(), vec![filter("a", ">", json!(bound))]),
                 Format::Json,
@@ -163,11 +178,11 @@ fn filter_change_misses() {
         )
     };
 
-    let above_two = run(&mut inner, 2);
-    let above_six = run(&mut inner, 6);
-    let above_six_again = run(&mut inner, 6);
+    let above_two = run(&engine, 2);
+    let above_six = run(&engine, 6);
+    let above_six_again = run(&engine, 6);
 
-    assert_eq!(count_queries(&inner), 2);
+    assert_eq!(count_queries(&engine), 2);
     assert_eq!(above_two["total_rows"], 7);
     assert_eq!(above_six["total_rows"], 3);
     assert_eq!(above_six_again["total_rows"], 3);
@@ -175,16 +190,16 @@ fn filter_change_misses() {
 
 #[test]
 fn arrow_format_carries_the_json_metadata() {
-    let mut inner =
-        inner("CREATE TABLE t AS SELECT range::INTEGER AS a, DATE '2024-01-02' AS d FROM range(5)");
+    let engine = engine(
+        "CREATE TABLE t AS SELECT range::INTEGER AS a, DATE '2024-01-02' AS d FROM range(5)",
+    );
     let request = QueryRequest {
         page_size: 2,
         ..QueryRequest::default()
     };
-    let mut expected =
-        json_body(run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap());
+    let mut expected = json_body(fetch(&engine, &dataset("t"), &request, Format::Json).unwrap());
 
-    let bytes = arrow_body(run_page(&mut inner, &dataset("t"), &request, Format::Arrow).unwrap());
+    let bytes = arrow_body(fetch(&engine, &dataset("t"), &request, Format::Arrow).unwrap());
 
     let reader = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
     let mut meta: Value = serde_json::from_str(&reader.schema().metadata()["quark"]).unwrap();
@@ -203,14 +218,14 @@ fn arrow_format_carries_the_json_metadata() {
 
 #[test]
 fn null_fractions_per_column() {
-    let mut inner = inner(
+    let engine = engine(
         "CREATE TABLE t (a INTEGER, b VARCHAR, c DATE);
          INSERT INTO t VALUES (1, 'x', NULL), (NULL, 'y', NULL), (3, 'z', NULL), (NULL, 'w', NULL)",
     );
 
     let body = json_body(
-        run_page(
-            &mut inner,
+        fetch(
+            &engine,
             &dataset("t"),
             &QueryRequest::default(),
             Format::Json,
@@ -250,8 +265,8 @@ fn header_only_csv_is_an_empty_page() {
     let engine = Engine::open_node(&record, &dirs).unwrap();
 
     let body = json_body(
-        run_page(
-            &mut engine.lock(),
+        fetch(
+            &engine,
             &dataset("empty"),
             &QueryRequest::default(),
             Format::Json,
@@ -270,11 +285,10 @@ fn header_only_csv_is_an_empty_page() {
 
 #[test]
 fn sql_target_display_rules() {
-    let mut inner = inner("");
+    let engine = engine("");
     let sql = Target::Sql("  select 7 as x  ".to_owned());
 
-    let plain =
-        json_body(run_page(&mut inner, &sql, &QueryRequest::default(), Format::Json).unwrap());
+    let plain = json_body(fetch(&engine, &sql, &QueryRequest::default(), Format::Json).unwrap());
     assert_eq!(plain["sql"], "select 7 as x");
     assert_eq!(plain["rows"], json!([{"x": 7}]));
 
@@ -282,7 +296,7 @@ fn sql_target_display_rules() {
         filters: vec![filter("x", ">", json!(5))],
         ..QueryRequest::default()
     };
-    let body = json_body(run_page(&mut inner, &sql, &filtered, Format::Json).unwrap());
+    let body = json_body(fetch(&engine, &sql, &filtered, Format::Json).unwrap());
     assert_eq!(
         body["sql"],
         "SELECT * FROM (SELECT * FROM (select 7 as x) WHERE \"x\" > 5)"
@@ -296,7 +310,7 @@ fn sql_target_display_rules() {
         }],
         ..QueryRequest::default()
     };
-    let body = json_body(run_page(&mut inner, &sql, &sorted, Format::Json).unwrap());
+    let body = json_body(fetch(&engine, &sql, &sorted, Format::Json).unwrap());
     assert_eq!(
         body["sql"],
         "SELECT * FROM (SELECT * FROM (select 7 as x)) ORDER BY \"x\" DESC"
@@ -305,10 +319,10 @@ fn sql_target_display_rules() {
 
 #[test]
 fn sql_target_errors_map_to_422() {
-    let mut inner = inner("");
-    let run = |inner: &mut EngineInner, sql: &str| {
-        run_page(
-            inner,
+    let engine = engine("");
+    let run = |engine: &Engine, sql: &str| {
+        fetch(
+            engine,
             &Target::Sql(sql.to_owned()),
             &QueryRequest::default(),
             Format::Json,
@@ -316,11 +330,11 @@ fn sql_target_errors_map_to_422() {
         .unwrap_err()
     };
 
-    let two = run(&mut inner, "select 1; select 2");
+    let two = run(&engine, "select 1; select 2");
     assert_eq!(two.status(), 422);
     assert_eq!(two.detail(), "SQL accepts only one read-only SELECT query");
 
-    let missing = run(&mut inner, "select * from missing_table");
+    let missing = run(&engine, "select * from missing_table");
     assert_eq!(missing.status(), 422);
     assert!(
         missing.detail().starts_with("Invalid SQL query: "),
@@ -328,7 +342,7 @@ fn sql_target_errors_map_to_422() {
         missing.detail()
     );
 
-    let conversion = run(&mut inner, "select cast('x' as integer) as v");
+    let conversion = run(&engine, "select cast('x' as integer) as v");
     assert_eq!(conversion.status(), 422);
     assert!(
         conversion.detail().starts_with("Invalid SQL query: "),
@@ -339,13 +353,13 @@ fn sql_target_errors_map_to_422() {
 
 #[test]
 fn invalid_value_maps_to_422() {
-    let mut inner = inner("CREATE TABLE t AS SELECT 1 AS a");
+    let engine = engine("CREATE TABLE t AS SELECT 1 AS a");
     let request = QueryRequest {
         filters: vec![filter("a", "=", json!("abc"))],
         ..QueryRequest::default()
     };
 
-    let error = run_page(&mut inner, &dataset("t"), &request, Format::Json).unwrap_err();
+    let error = fetch(&engine, &dataset("t"), &request, Format::Json).unwrap_err();
 
     assert_eq!(error.status(), 422);
     assert!(
@@ -357,10 +371,10 @@ fn invalid_value_maps_to_422() {
 
 #[test]
 fn unknown_dataset_is_404() {
-    let mut inner = inner("");
+    let engine = engine("");
 
-    let error = run_page(
-        &mut inner,
+    let error = fetch(
+        &engine,
         &dataset("nope"),
         &QueryRequest::default(),
         Format::Json,

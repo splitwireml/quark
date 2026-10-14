@@ -93,7 +93,7 @@ fn engine_resolution() {
 /// The rows of the project's mounted view as text, and how that view is defined.
 fn read_view(state: &AppState, view_sql: &str) -> (Vec<String>, String) {
     let engine = state.engine_for_node("project_p").unwrap();
-    let inner = engine.lock();
+    let inner = engine.primary();
     let rows = inner
         .conn
         .prepare(&format!(
@@ -337,7 +337,7 @@ fn source_deleted_during_open_is_not_resurrected() {
     release.send(()).unwrap();
     let engine = handle.join().unwrap().unwrap();
 
-    let mounted: Vec<String> = engine.lock().mounted.keys().cloned().collect();
+    let mounted: Vec<String> = engine.primary().mounted.keys().cloned().collect();
     assert_eq!(mounted, ["keep"]);
     let catalog = state.catalog();
     assert!(Arc::ptr_eq(&catalog.engines["project_p"], &engine));
@@ -380,6 +380,6 @@ fn upload_deleted_with_its_file_during_remount_is_left_out() {
     release.send(()).unwrap();
     let engine = handle.join().unwrap().unwrap();
 
-    let mounted: Vec<String> = engine.lock().mounted.keys().cloned().collect();
+    let mounted: Vec<String> = engine.primary().mounted.keys().cloned().collect();
     assert_eq!(mounted, ["keep"]);
 }

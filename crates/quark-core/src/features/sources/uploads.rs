@@ -81,7 +81,7 @@ fn add_upload(
         .project(project_id.unwrap_or(DEFAULT_PROJECT_ID))?;
     let source = upload_source(project_id, node_id, original_name, path);
     let engine = state.open_node_engine(&source)?;
-    datasets(&engine.lock().conn).map_err(cannot_open)?;
+    datasets(&engine.primary().conn).map_err(cannot_open)?;
     let public = public_source(&source);
     let record = source_record(&source);
     state.register_source(source, record, engine)?;

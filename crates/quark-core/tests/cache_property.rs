@@ -268,11 +268,13 @@ fn pages(oracle: &Oracle, case: &Case) -> Vec<i64> {
 
 fn assert_matches(engine: &Engine, case: &Case, page: i64, expected: &Expected, phase: &str) {
     let request = case.request(page);
-    let body = {
-        let mut inner = engine.lock();
-        let target = Target::Dataset(dataset_id("main", "data"));
-        run_page(&mut inner, &target, &request, Format::Json).unwrap()
-    };
+    let target = Target::Dataset(dataset_id("main", "data"));
+    let body = engine
+        .read(None, |conn| {
+            run_page(engine, conn, &target, &request, Format::Json)
+        })
+        .unwrap()
+        .unwrap();
     let PageBody::Json(body) = body else {
         panic!("expected a JSON body");
     };
@@ -328,7 +330,7 @@ fn first_second_and_built_results_match_the_oracle() {
         if case.has_controls() {
             let key = oracle.result_key(&case.request(1));
             wait_until("the result build", || {
-                let action = engine.lock().results.note_request(&key);
+                let action = engine.results().note_request(&key);
                 matches!(action, ResultAction::ServeFrom(_))
             });
         }
@@ -356,7 +358,7 @@ fn columnar_switch_matches_the_oracle() {
     wait_until("the columnar switch", || {
         let engine = state.engine_for_node("legacy").unwrap();
         let definition: String = engine
-            .lock()
+            .primary()
             .conn
             .query_row(
                 "SELECT sql FROM duckdb_views() WHERE NOT internal AND view_name = 'data'",

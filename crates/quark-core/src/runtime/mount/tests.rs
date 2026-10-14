@@ -70,7 +70,7 @@ fn workspace_views_have_python_ids_and_sql() {
     assert_eq!(json["type"], "VIEW");
     assert!(json.get("kind").is_none());
     let rows: i64 = engine
-        .lock()
+        .primary()
         .conn
         .query_row(&format!("SELECT count(*) FROM ({sql})"), [], |row| {
             row.get(0)
@@ -96,7 +96,7 @@ fn mount_is_idempotent() {
     let second = engine.mount(&project(), &source).unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(engine.lock().mounted.len(), 1);
+    assert_eq!(engine.primary().mounted.len(), 1);
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn duckdb_sources_mount_every_table_read_only() {
         ]
     );
     assert_eq!(views[2].columns, ["b", "c"]);
-    let guard = engine.lock();
+    let guard = engine.primary();
     let rows: i64 = guard
         .conn
         .query_row(
@@ -166,7 +166,7 @@ fn workspace_cannot_read_unlisted_files() {
     let rows = |file: &Path| {
         let scan = scan_expression(&file.to_string_lossy()).unwrap();
         engine
-            .lock()
+            .primary()
             .conn
             .query_row(&format!("SELECT count(*) FROM {scan}"), [], |row| {
                 row.get::<_, i64>(0)
@@ -180,7 +180,7 @@ fn workspace_cannot_read_unlisted_files() {
     let scan = scan_expression(&listed.to_string_lossy()).unwrap();
     assert!(
         empty
-            .lock()
+            .primary()
             .conn
             .query_row(&format!("SELECT count(*) FROM {scan}"), [], |row| {
                 row.get::<_, i64>(0)
@@ -225,7 +225,7 @@ fn workspace_allow_list_is_exact() {
     let sources = [flat, other];
     let engine = Engine::open_workspace(&project(), &sources, &dirs_in(root.path())).unwrap();
     let mut allowed: Vec<String> = engine
-        .lock()
+        .primary()
         .conn
         .prepare("SELECT unnest(current_setting('allowed_paths'))")
         .unwrap()
@@ -255,7 +255,7 @@ fn build_cache(source: &SourceRecord, root: &Path) -> ColumnarKey {
 
 fn rows(engine: &Engine, view_sql: &str) -> Vec<String> {
     engine
-        .lock()
+        .primary()
         .conn
         .prepare(&format!(
             "SELECT CAST(t AS VARCHAR) FROM ({view_sql}) t ORDER BY 1"
@@ -269,7 +269,7 @@ fn rows(engine: &Engine, view_sql: &str) -> Vec<String> {
 
 fn definition(engine: &Engine) -> String {
     engine
-        .lock()
+        .primary()
         .conn
         .query_row(
             "SELECT sql FROM duckdb_views() WHERE NOT internal AND view_name = 'data'",
@@ -299,7 +299,7 @@ fn ready_cache_is_attached_read_only_with_identical_rows() {
     assert!(definition(&cached).contains(&alias(&key)));
     assert!(!definition(&live).contains("cache_"));
     let insert = format!("INSERT INTO {}.main.data VALUES (3, 'z')", alias(&key));
-    assert!(cached.lock().conn.execute_batch(&insert).is_err());
+    assert!(cached.primary().conn.execute_batch(&insert).is_err());
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn engines_with_a_ready_cache_list_only_their_view() {
     let source = record(&csv(root.path(), "claims.csv"), None);
     let key = build_cache(&source, root.path());
     let listed = |engine: &Engine| -> Vec<(String, String)> {
-        crate::relation::describe::datasets(&engine.lock().conn)
+        crate::relation::describe::datasets(&engine.primary().conn)
             .unwrap()
             .into_iter()
             .map(|item| (item.name, item.kind))

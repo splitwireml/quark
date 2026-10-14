@@ -115,7 +115,7 @@ impl Engine {
             project_id: project.id.clone(),
             node_id: project.node_id.clone(),
         };
-        let mut engine = Engine::new(kind, conn);
+        let mut engine = Engine::new(kind, conn)?;
         engine.caches = caches;
         Ok(engine)
     }
@@ -126,12 +126,12 @@ impl Engine {
         project: &ProjectRecord,
         source: &SourceRecord,
     ) -> anyhow::Result<Vec<ViewInfo>> {
-        let mut inner = self.lock();
-        if let Some(views) = inner.mounted.get(&source.id) {
+        let mut primary = self.primary();
+        if let Some(views) = primary.mounted.get(&source.id) {
             return Ok(views.clone());
         }
-        let views = mount_source(&inner.conn, project, source, &self.caches)?;
-        inner.mounted.insert(source.id.clone(), views.clone());
+        let views = mount_source(&primary.conn, project, source, &self.caches)?;
+        primary.mounted.insert(source.id.clone(), views.clone());
         Ok(views)
     }
 }

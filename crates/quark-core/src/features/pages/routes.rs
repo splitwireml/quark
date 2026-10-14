@@ -56,8 +56,9 @@ async fn page(
     let mut guard = engine.guard();
     let ticket = guard.ticket();
     let outcome = blocking(move || {
-        let outcome =
-            engine.run_guarded(&ticket, |inner| run_page(inner, &target, &request, format));
+        let outcome = engine.read(Some(&ticket), |conn| {
+            run_page(&engine, conn, &target, &request, format)
+        });
         if ticket.is_cancelled() {
             tracing::debug!("discarded a page for a client that went away");
         }

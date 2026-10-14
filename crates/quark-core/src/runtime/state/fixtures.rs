@@ -96,7 +96,7 @@ pub(crate) fn project_views(state: &AppState, project_id: &str) -> ApiResult<Vec
 /// How many of the project's source views are defined over an attached cache.
 pub(crate) fn cached_view_count(state: &AppState) -> usize {
     let engine = state.engine_for_node("project_p").unwrap();
-    let inner = engine.lock();
+    let inner = engine.primary();
     let count: i64 = inner
         .conn
         .query_row(
