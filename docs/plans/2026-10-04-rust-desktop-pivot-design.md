@@ -1,6 +1,6 @@
 # Quark desktop pivot
 
-Date: 2026-10-04, updated 2026-10-08. Status: decisions approved 2026-10-01 and 2026-10-02; sub-project 1 implemented and merged into integration; sub-project 2 designed. This document is the single outline of the pivot and its sub-projects. Each sub-project has its own design, plan and implementation, linked below.
+Date: 2026-10-04, updated 2026-10-08. Status: decisions approved 2026-10-01 and 2026-10-02; sub-project 1 implemented and merged into integration; sub-project 2 implemented on `rust-desktop/parity`, exit gate awaiting H2 and deviation sign-off. This document is the single outline of the pivot and its sub-projects. Each sub-project has its own design, plan and implementation, linked below.
 
 ## 1. Context
 
@@ -27,7 +27,7 @@ Made during brainstorming on 2026-10-01 and 2026-10-02:
 | # | Sub-project | Outcome | Status |
 |---|---|---|---|
 | 1 | Walking skeleton | Tauri app and Rust core on three OSes; projects, upload, paging, filter, sort and dedupe end to end; efficiency upgrades; CI | Implemented; deviations signed off; merged into integration; remaining H2 steps moved to sub-project 2's exit gate |
-| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; ICU time zones; read pool and the other efficiency upgrades; pytest runs against Rust | Spec approved; plan written (47 units, 15 batches); not started |
+| 2 | Backend parity | Every remaining endpoint in Rust; offline XLSX; ICU time zones; read pool and the other efficiency upgrades; pytest runs against Rust | Implemented on `rust-desktop/parity`; exit gate awaiting H2 and deviation sign-off (`2026-10-13-rust-desktop-parity-exit-deviations.md`, `docs/handoffs/PARITY_H2_CHECKLIST.md`) |
 | 3 | Native files and OS integration | Open files in place, native dialogs, drag and drop, native export save, file associations, single instance, default-app card | Not started |
 | 4 | Release | Signing, notarization, installers, updates, app icon, version scheme | Not started |
 | 5 | Retire Python | Remove FastAPI and Docker; port pytest to Rust or keep it as a test-only tool; update README, PRODUCT.md and SPEC.md | Not started |

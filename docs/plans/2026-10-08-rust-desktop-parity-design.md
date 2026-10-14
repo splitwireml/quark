@@ -1,6 +1,6 @@
 # Quark desktop, sub-project 2: backend parity
 
-Date: 2026-10-08. Status: approved 2026-10-13. Implementation plan: `2026-10-08-rust-desktop-parity.md`, scheduled in `2026-10-08-rust-desktop-parity-orchestration.md`. Part 2 of the Rust desktop pivot. The pivot, all of its sub-projects and their status are in `2026-10-04-rust-desktop-pivot-design.md`.
+Date: 2026-10-08. Status: approved 2026-10-13; implemented on `rust-desktop/parity`, exit gate awaiting H2 and deviation sign-off (`2026-10-13-rust-desktop-parity-exit-deviations.md`). Implementation plan: `2026-10-08-rust-desktop-parity.md`, scheduled in `2026-10-08-rust-desktop-parity-orchestration.md`. Part 2 of the Rust desktop pivot. The pivot, all of its sub-projects and their status are in `2026-10-04-rust-desktop-pivot-design.md`.
 
 Read with: the skeleton design `2026-10-02-rust-desktop-skeleton-design.md` (section 5 sets the parity rules, section 6 the caches), the signed-off deviations `2026-10-04-skeleton-exit-deviations.md`, and the planning notes `2026-10-05-sp2-backend-parity-notes.md`.
 

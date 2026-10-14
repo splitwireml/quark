@@ -266,7 +266,7 @@ User-facing failures are `ApiError`, rendered as `{"detail": "<text>"}`. The exa
 | 422, workbooks | "Select one or more unique workbook sheets" |
 | 422, request validation | Any body, path or query value outside its declared type or range. Detail text may differ from pydantic's. |
 | 500 | "Internal error" |
-| 501 | "Not in the desktop build yet" (until E4) |
+| 501 | "Not in the desktop build yet" (until E4; replaced by FastAPI's 404/405 in E4 and L8) |
 
 A DuckDB error that no route maps on its own becomes 422 `Invalid filter value: <err>`, as Python's global handler does. This applies to stats, values, charts, joins and mounting.
 
@@ -1820,6 +1820,10 @@ The Lead records here every change to the cards, the schedule and the environmen
 - L8 · batch 15 · `fix(core): replace the last 501 answers and give the live CI job room`. Sprint 7 audit (spec §10): two internal arms still answered 501 (a join side with no scan expression, an unreachable export arm). The `live` job's timeout goes from 30 to 50 minutes, because parity pushes build cold.
 - L9 · batch 15 · `test(ui): draw every chart kind on the dashboard in the WebKit pass`. Spec §8.5 asks for every kind on both canvases; E3's dashboard had four tiles.
 - L10 · batch 15 · `test(perf): time the routes, not the response cache`. Sprint 7 audit (spec §9): the values, chart and Find Next cases repeated one request, so 4 of 5 runs were response-cache hits. compare.py also joined before the second source's import finished, and rewrote the whole results doc.
+- L11 · batch 16 · `fix(core): match Python on xlsx durations, join side errors, line spans and home expansion`. Exit review (spec §6.1, §6.2, §6): XLSX durations print as `[hh]:mm:ss`, a dataset-side join error answers 422 as Python, the line grain uses a fractional span, and `~` reads `USERPROFILE` on Windows.
+- L12 · batch 16 · `perf(core): stream export rows instead of materialising them`. Exit review (spec §6.2): export rows were collected before the writer ran, so a large export held every row in memory. The rows now stream through the writer; a closing flag row detects a stream that stopped early (deviations doc, items on L12).
+- L13 · batch 16 · `test(core): pin cancellation, export overlap, workbook and extension rules; move inline tests`. Exit review (spec §4.4, §8): inline test modules move to `tests.rs` with an architecture check; `tests/` files carry a `//!` line, also checked; new tests for an HTTP drop on a non-page route, pages during an export (not ignored), a workbook with no sheets and a file with no Excel extension; `compare.py` uses the 404/405 wording.
+- L14 · batch 16 · `test(core): give the columnar shutdown tests room on slow runners`. A Lead direct unit (7c7b224). CI run 38589489926 failed `shutdown_interrupts_a_running_import` on Windows: stopping took over 2 s under a full parallel test load. Both columnar shutdown tests now use an hours-long scan and a 20 s limit, and the first waits on a channel, so a shutdown that stops interrupting fails instead of hanging.
 
 **Schedule, exit stream**
 - E1 and E3 split their work across batches 14 and 14b after reaching the 200-line split rule; the Lead accepted their sizes and resumed them.

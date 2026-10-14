@@ -38,7 +38,30 @@
 | deep page, sorted by price | - | 2452.2 | 17.3 |
 <!-- compare.py:table:end -->
 
-Rust is faster than Python in every row (smallest ratios: workbook confirm 2.8x, stats 4.1x, CSV export 4.8x).
+Rust is faster than Python in every row (smallest speedups: workbook confirm 2.8x, histogram 3.4x, stats 4.1x).
+
+## Spec 9 summary
+
+One row per spec 9 case. The caps are provisional (H0). Rust idle and Rust under load are the `perf_acceptance` medians below; Python and the ratio come from the `compare.py` table above (the ratio is Rust over Python, so below 1 means Rust is faster). The verdict compares the `perf_acceptance` median with the cap; idle and under load agree on every row. Python was not run under load.
+
+| Case | Cap | Rust idle (ms) | Rust load (ms) | Python (ms) | Rust/Python | Verdict |
+|---|---|---|---|---|---|---|
+| Stats, numeric column, filter on | 300 ms | 338.1 | 433.3 | 1255.7 | 0.25 | MISS |
+| Category values, first page | 150 ms | 21.5 | 25.5 | 863.3 | 0.02 | within cap |
+| Bar chart | 500 ms | 23.2 | 32.1 | 802.0 | 0.03 | within cap |
+| Line chart | 500 ms | 145.9 | 199.4 | 1055.9 | 0.10 | within cap |
+| Histogram chart | 500 ms | 403.4 | 433.2 | 1209.8 | 0.29 | within cap |
+| Metric chart | 500 ms | 15.3 | 13.7 | 448.3 | 0.03 | within cap |
+| Scatter chart | 800 ms | 94.0 | 115.4 | 937.2 | 0.08 | within cap |
+| Box chart | 800 ms | 371.0 | 589.4 | 2156.9 | 0.14 | within cap |
+| Find Next after the first search | 200 ms | 51.9 | 88.1 | 1242.6 | 0.04 | within cap |
+| Join preview, one-to-one key | 1 s | 317.5 | 545.7 | 2802.2 | 0.10 | within cap |
+| CSV export, 2M rows | 5 s | 11253.3 | 9325.7 | 50320.8 | 0.21 | MISS |
+| XLSX export, 1,000,000 rows | 15 s | 15568.5 | 16423.0 | 238101.8 | 0.07 | MISS |
+| Workbook confirm, 100,000 x 10 | 3 s | 4693.1 | 5442.2 | 12228.8 | 0.36 | MISS |
+| Page at row 1,000,000 during a CSV export | 60 ms | 10.1 | 20.8 | 47498.9 | 0.0003 | within cap |
+
+Four of 14 cases miss their cap, and 5 of the 9 spec 4.6 reshape steps miss (below). Python's page during the export waits behind the export, which is a Python limit, not a measurement fault.
 
 ## perf_acceptance, idle and under load
 
