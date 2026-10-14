@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --frozen
-      - run: uv run pytest -m skeleton -q
+      - run: uv run pytest -q
         env:
           QUARK_TEST_BACKEND: rust
 

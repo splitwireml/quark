@@ -1126,6 +1126,7 @@ def test_numeric_stats_histogram_and_json_safe_values(client, tmp_path):
     assert client.get(base + "/columns/missing/stats").status_code == 404
 
 
+@pytest.mark.python_only
 def test_safe_serializes_unsafe_aggregate_integers():
     assert safe(2**53 - 1) == 2**53 - 1
     assert safe(2**53) == "9007199254740992"
