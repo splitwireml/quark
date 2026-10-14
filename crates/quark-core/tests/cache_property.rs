@@ -1,5 +1,5 @@
-//! Caches may make a page faster but never different: every page, at every stage of a query's
-//! life, equals what a plain DuckDB connection over the CSV returns for the same `build_query`.
+//! Caches may make a page faster but never different: every page equals a plain DuckDB read of the CSV.
+// This holds at every stage of a query's life, against a plain connection running the same `build_query`.
 // The helpers below are test code too, which clippy.toml's allowance does not reach in this crate.
 #![allow(clippy::unwrap_used)]
 

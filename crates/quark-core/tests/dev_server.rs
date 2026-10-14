@@ -1,3 +1,5 @@
+//! The dev server binary announces its port on stdout and then serves requests.
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};

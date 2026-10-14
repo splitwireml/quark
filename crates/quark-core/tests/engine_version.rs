@@ -1,3 +1,5 @@
+//! The bundled DuckDB engine reports the version that `uv.lock` pins for Python.
+
 use duckdb::Connection;
 
 #[test]

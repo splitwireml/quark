@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::thread;
@@ -13,6 +13,7 @@ use duckdb::Connection;
 use quark_core::router;
 use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
+use quark_core::runtime::pool::reader_count;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -58,14 +59,19 @@ impl Server {
 
     /// Sends a SQL page request and returns the open connection without reading the answer.
     fn send_sql(&self, sql: &str) -> TcpStream {
-        let body = json!({ "sql": sql }).to_string();
+        self.send_post("/api/nodes/legacy/sql", &json!({ "sql": sql }))
+    }
+
+    /// Posts a JSON body and returns the open connection without reading the answer.
+    fn send_post(&self, path: &str, body: &serde_json::Value) -> TcpStream {
+        let body = body.to_string();
         let mut stream = TcpStream::connect(self.address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         write!(
             stream,
-            "POST /api/nodes/legacy/sql HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.address,
             body.len()
@@ -150,4 +156,35 @@ fn rapid_aborts_under_parallel_load() {
 
     assert_eq!(status, 200);
     assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+}
+
+#[test]
+fn dropped_chart_requests_interrupt_their_queries_and_free_every_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(root.path());
+    let chart = json!({
+        "sql": "SELECT i FROM range(10000000000) t(i)",
+        "spec": {"chart": "metric", "metric": "sum", "encodings": {"value": "i"}},
+    });
+
+    // One slow chart per reader: a reader that is not freed leaves the next page waiting for good.
+    let mut slow: Vec<TcpStream> = (0..reader_count())
+        .map(|_| server.send_post("/api/nodes/legacy/sql/visualize", &chart))
+        .collect();
+    thread::sleep(Duration::from_millis(500));
+    for stream in &mut slow {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let answer = stream.read(&mut [0; 1]);
+        assert!(
+            matches!(&answer, Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)),
+            "the chart query should still be running, got {answer:?}"
+        );
+    }
+    drop(slow);
+
+    // The page request has no answer until a reader is free, and the socket's read timeout turns a
+    // hang into a failure, so the test needs no clock threshold of its own.
+    assert_eq!(server.status_of(QUICK_SQL), 200);
 }

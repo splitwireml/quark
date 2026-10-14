@@ -36,6 +36,80 @@ fn workbook_bytes(root: &Path) -> Vec<u8> {
     fs::read(path).unwrap()
 }
 
+/// A zip written entry by entry without compression: `rust_xlsxwriter` always adds a sheet, so a
+/// workbook with none has to be assembled by hand.
+fn stored_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        !crc
+    }
+    let (mut archive, mut directory) = (Vec::new(), Vec::new());
+    for (name, text) in entries {
+        let (size, crc) = (text.len() as u32, crc32(text.as_bytes()));
+        let offset = archive.len() as u32;
+        let common = [
+            20u16.to_le_bytes().as_slice(),
+            &[0; 8],
+            &crc.to_le_bytes(),
+            &size.to_le_bytes(),
+            &size.to_le_bytes(),
+            &(name.len() as u16).to_le_bytes(),
+            &[0; 2],
+        ]
+        .concat();
+        archive.extend_from_slice(&[b'P', b'K', 3, 4]);
+        archive.extend_from_slice(&common);
+        archive.extend_from_slice(name.as_bytes());
+        archive.extend_from_slice(text.as_bytes());
+        directory.extend_from_slice(&[b'P', b'K', 1, 2, 20, 0]);
+        directory.extend_from_slice(&common);
+        directory.extend_from_slice(&[0; 10]);
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let (count, start) = (entries.len() as u16, archive.len() as u32);
+    archive.extend_from_slice(&directory);
+    archive.extend_from_slice(&[b'P', b'K', 5, 6, 0, 0, 0, 0]);
+    archive.extend_from_slice(&count.to_le_bytes());
+    archive.extend_from_slice(&count.to_le_bytes());
+    archive.extend_from_slice(&(directory.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&start.to_le_bytes());
+    archive.extend_from_slice(&[0; 2]);
+    archive
+}
+
+fn workbook_without_sheets() -> Vec<u8> {
+    const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    const DOC: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    stored_zip(&[
+        (
+            "[Content_Types].xml",
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/></Types>",
+        ),
+        (
+            "_rels/.rels",
+            &format!(
+                "<Relationships xmlns=\"{RELS}\"><Relationship Id=\"rId1\" Type=\"{DOC}/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            &format!("<workbook xmlns=\"{MAIN}\" xmlns:r=\"{DOC}\"><sheets/></workbook>"),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            &format!("<Relationships xmlns=\"{RELS}\"/>"),
+        ),
+    ])
+}
+
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (u16, Value) {
     let request = Request::builder().method(method).uri(uri);
     let (request, body) = match body {
@@ -231,4 +305,47 @@ async fn unreadable_workbook_is_400() {
             .starts_with("Could not open source: ")
     );
     assert_eq!(uploads(&state), 0);
+}
+
+#[tokio::test]
+async fn workbook_without_sheets_is_400_and_leaves_no_file() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, state) = app(root.path());
+
+    let (status, body) = upload(&app, "/api/nodes/upload", &workbook_without_sheets()).await;
+
+    assert_eq!(status, 400);
+    assert_eq!(
+        body["detail"],
+        "Could not open source: Workbook has no sheets"
+    );
+    assert_eq!(uploads(&state), 0);
+}
+
+#[tokio::test]
+async fn importing_a_workbook_never_loads_the_excel_extension() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, state) = app(root.path());
+    let (_, staged) = upload(&app, "/api/nodes/upload", &workbook_bytes(root.path())).await;
+    let id = staged["id"].as_str().unwrap();
+    let confirm = format!("/api/nodes/upload/{id}/confirm");
+    let (status, _) = send(
+        &app,
+        Method::POST,
+        &confirm,
+        Some(json!({"sheets": ["People", "O'Reilly"]})),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let engine = state.engine_for_node(id).unwrap();
+    let primary = engine.primary();
+    let count = |sql: &str| -> i64 { primary.conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+
+    assert!(count("SELECT count(*) FROM information_schema.tables") >= 2);
+    assert_eq!(
+        count("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'read_xlsx'"),
+        0,
+        "the excel extension's reader is registered on the node's engine"
+    );
 }

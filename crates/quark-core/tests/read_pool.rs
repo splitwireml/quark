@@ -57,14 +57,19 @@ impl Server {
 
     /// Sends a SQL page request and returns the open connection without reading the answer.
     fn send_sql(&self, sql: &str) -> TcpStream {
-        let body = json!({ "sql": sql }).to_string();
+        self.send_post("/api/nodes/legacy/sql", &json!({ "sql": sql }))
+    }
+
+    /// Posts a JSON body and returns the open connection without reading the answer.
+    fn send_post(&self, path: &str, body: &Value) -> TcpStream {
+        let body = body.to_string();
         let mut stream = TcpStream::connect(self.address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
         write!(
             stream,
-            "POST /api/nodes/legacy/sql HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.address,
             body.len()
@@ -218,4 +223,38 @@ fn concurrent_sql_requests_overlap_and_keep_their_own_results() {
         together < solo.mul_f64(1.7),
         "{together:?} vs solo {solo:?}"
     );
+}
+
+#[test]
+fn page_is_served_before_a_running_export_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(root.path());
+    assert_eq!(server.answer_of(QUICK_SQL).0, 200);
+
+    // The export answers only once its file is written, so no bytes on its socket means it is running.
+    let mut export = server.send_post(
+        "/api/exports",
+        &json!({"format": "csv", "sheets": [{
+            "node_id": "legacy", "name": "Big",
+            "sql": "SELECT sum(i) AS total FROM range(2000000000) t(i)",
+        }]}),
+    );
+    thread::sleep(Duration::from_millis(200));
+    assert!(is_pending(&mut export), "the export should be running");
+
+    let (status, page) = server.answer_of(QUICK_SQL);
+    assert_eq!(status, 200);
+    assert_eq!(page["rows"].as_array().map(Vec::len), Some(3));
+    assert!(
+        is_pending(&mut export),
+        "the page should be answered while the export is still running"
+    );
+
+    export
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
+    let mut response = String::new();
+    export.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response:.200}");
+    assert!(response.contains("total"), "{response:.200}");
 }

@@ -75,7 +75,7 @@ def server(command, env, log):
 
 
 class NotAvailable(Exception):
-    """A route answered 501, or an export failed."""
+    """A route failed, or an export failed."""
 
 
 def check(response):
@@ -307,7 +307,7 @@ def compare_section(results, rows, binary, is_smoke):
         f"- Date {datetime.date.today().isoformat()}, commit {commit}, "
         f"{platform.system()} {platform.machine()} with {os.cpu_count()} cores\n"
         f"- {rows:,} rows, pages of 100, median of {RUNS} runs, every timed request new to its backend; the deep page is row 1,000,000 "
-        "in a full run and mid-file in a smaller one; `n/a` means the route answers 501 or an export failed, or no export outlasted the timed page\n"
+        "in a full run and mid-file in a smaller one; `n/a` means the route failed or an export failed, or no export outlasted the timed page\n"
         "- The export cases write 2M and 1,000,000 rows in a full run and every row of a smaller one; the page-during-export case always exports 2M rows so the export outlasts the page\n\n"
         f"{markdown_table(results)}\n"
     )

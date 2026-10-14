@@ -331,6 +331,61 @@ fn every_file_states_its_purpose() {
 }
 
 #[test]
+fn every_integration_test_file_has_one_purpose_line() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files = Vec::new();
+    collect(&root, &root, &mut files);
+    assert!(!files.is_empty(), "no integration test files were found");
+    let failures = files
+        .iter()
+        .filter(|f| !has_single_purpose_line(&f.text))
+        .map(|f| {
+            format!(
+                "tests/{}: the file must open with exactly one //! purpose line",
+                f.path
+            )
+        })
+        .collect();
+    assert_clean(failures);
+}
+
+fn has_single_purpose_line(text: &str) -> bool {
+    let mut lines = text.lines();
+    lines.next().is_some_and(|first| first.starts_with("//!"))
+        && !lines.next().is_some_and(|second| second.starts_with("//!"))
+}
+
+fn has_inline_test_module(text: &str) -> bool {
+    text.lines().any(|line| line.trim_end() == "mod tests {")
+}
+
+#[test]
+fn unit_tests_live_in_sibling_files_not_inline() {
+    let failures = sources()
+        .iter()
+        .filter(|f| has_inline_test_module(&f.text))
+        .map(|f| {
+            format!(
+                "{}: an inline `mod tests {{` block; declare `mod tests;` and move it to a sibling tests.rs",
+                f.path
+            )
+        })
+        .collect();
+    assert_clean(failures);
+}
+
+#[test]
+fn purpose_and_inline_test_scans_catch_violations() {
+    assert!(has_single_purpose_line("//! One.\n\nuse std::fs;\n"));
+    assert!(!has_single_purpose_line("//! One.\n//! Two.\n"));
+    assert!(!has_single_purpose_line("use std::fs;\n"));
+    assert!(has_inline_test_module(
+        "#[cfg(test)]\nmod tests {\n    use super::*;\n}\n"
+    ));
+    assert!(!has_inline_test_module("#[cfg(test)]\nmod tests;\n"));
+}
+
+#[test]
 fn import_scan_expands_grouped_and_multiline_use_statements() {
     let source = Source {
         path: "relation/example.rs".to_owned(),
