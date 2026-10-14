@@ -22,7 +22,7 @@ fn dirs(root: &Path) -> Dirs {
 }
 
 /// A started app with one CSV node `legacy`: table `data` with integer `a` (0 to 5999) and text `b`.
-fn app(root: &Path) -> Router {
+pub(super) fn app(root: &Path) -> Router {
     let dirs = dirs(root);
     fs::create_dir_all(&dirs.data).unwrap();
     let file = root.join("legacy.csv");
@@ -36,18 +36,18 @@ fn app(root: &Path) -> Router {
     router(AppState::load(dirs).unwrap())
 }
 
-fn exports_in(root: &Path) -> Vec<PathBuf> {
+pub(super) fn exports_in(root: &Path) -> Vec<PathBuf> {
     fs::read_dir(dirs(root).cache.join("exports"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect()
 }
 
-fn sheet(node_id: &str, sql: &str) -> Value {
+pub(super) fn sheet(node_id: &str, sql: &str) -> Value {
     json!({"node_id": node_id, "name": "Sheet", "sql": sql})
 }
 
-async fn export(app: &Router, body: Value) -> Response<Body> {
+pub(super) async fn export(app: &Router, body: Value) -> Response<Body> {
     let request = Request::post("/api/exports")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
@@ -63,12 +63,12 @@ async fn csv_export(app: &Router, sql: &str) -> Response<Body> {
     .await
 }
 
-async fn text(response: Response<Body>) -> String {
+pub(super) async fn text(response: Response<Body>) -> String {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-async fn failure(response: Response<Body>) -> (u16, String) {
+pub(super) async fn failure(response: Response<Body>) -> (u16, String) {
     let status = response.status().as_u16();
     let raw = text(response).await;
     let body: Value = serde_json::from_str(&raw).expect(&raw);

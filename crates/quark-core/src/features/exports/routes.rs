@@ -63,14 +63,8 @@ async fn export(
             .await?;
         prepared.push((engine, checked));
     }
-    let (engine, sheet) = prepared
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("Internal error"))?;
     let (format, dir) = (request.format, state.0.dirs.exports());
-    let export = Reader::new(engine)
-        .run_to_end(move |_, conn| write_export(conn, format, &sheet, &dir))
-        .await?;
+    let export = blocking(move || write_export(format, &prepared, &dir)).await?;
     download(export, format, request.filename.as_deref()).await
 }
 

@@ -13,6 +13,7 @@ calamine = "0.36.1"
 chrono.workspace = true
 duckdb.workspace = true
 getrandom.workspace = true
+rust_xlsxwriter = { version = "0.99.1", features = ["constant_memory"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -27,7 +28,6 @@ uuid.workspace = true
 [dev-dependencies]
 chrono-tz = "0.10"
 http-body-util = { version = "0.1", features = ["channel"] }
-rust_xlsxwriter = "0.99.1"
 tempfile.workspace = true
 tower.workspace = true
 
