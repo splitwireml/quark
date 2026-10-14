@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use duckdb::Connection;
 use serde_json::{Value, json};
 
+use super::groups::{Bars, rank};
 use super::model::ChartSpec;
 use crate::error::{ApiError, ApiResult};
 use crate::relation::filtered::Relation;
@@ -16,7 +17,6 @@ use crate::shared::columns::ColumnMeta;
 use crate::shared::sql::quote_ident;
 use crate::shared::types::profile_kind;
 
-const SERIES_LIMIT: usize = 6;
 const UNIFORM_TOLERANCE: f64 = 1e-6;
 
 /// How a row's value picks its bin: the SQL for the bin index and the parameters that precede the relation's.
@@ -125,15 +125,6 @@ fn uniform_width(bins: &[Value]) -> Option<f64> {
     all_equal.then_some(first)
 }
 
-/// A group's series label as Python's `str(value)` writes it: `True` and `False` for booleans.
-fn label_sql(group: &ColumnMeta, field: &str) -> String {
-    if group.type_name.eq_ignore_ascii_case("BOOLEAN") {
-        format!("CASE WHEN {field} THEN 'True' ELSE 'False' END")
-    } else {
-        format!("CAST({field} AS VARCHAR)")
-    }
-}
-
 /// Counts per bin for the six largest groups over the finite rows, with every other group folded
 /// into `"Other"`. Empty when no row has both a value and a group.
 fn series(
@@ -145,29 +136,30 @@ fn series(
 ) -> duckdb::Result<Vec<Value>> {
     let field = quote_ident(&column.name);
     let group_field = quote_ident(&group.name);
-    let label = label_sql(group, &group_field);
     let finite = if kind == "numeric" {
         format!("{field} IS NOT NULL AND isfinite({field}::DOUBLE) AND {group_field} IS NOT NULL")
     } else {
         format!("{field} IS NOT NULL AND {group_field} IS NOT NULL")
     };
-    let ranked_sql = format!(
-        "SELECT {label}, count(*) AS n FROM {} WHERE {finite} \
-         GROUP BY {group_field} ORDER BY n DESC, {group_field} LIMIT {SERIES_LIMIT}",
-        relation.sql
-    );
-    let top: Vec<String> = {
-        let mut statement = conn.prepare(&ranked_sql)?;
-        let rows = statement.query_map(bind(&relation.params), |row| row.get(0))?;
-        rows.collect::<duckdb::Result<_>>()?
+    let extra = if kind == "numeric" {
+        format!(" AND isfinite({field}::DOUBLE)")
+    } else {
+        String::new()
     };
-    if top.is_empty() {
+    // The same ranking a grouped bar chart uses: text keys to match rows, Python `str()` names to show.
+    let bars = Bars {
+        field: &field,
+        value_sql: "",
+        extra: &extra,
+    };
+    let (keys, names) = rank(conn, relation, &bars, group)?;
+    if keys.is_empty() {
         return Ok(Vec::new());
     }
     let bucket = bucket(column, kind, &field, bins);
     // The bucket's parameters sit in the SELECT, ahead of the relation's in the FROM.
     let counted_sql = format!(
-        "SELECT {label}, {} AS idx, count(*) AS n FROM {} WHERE {finite} \
+        "SELECT CAST({group_field} AS VARCHAR), {} AS idx, count(*) AS n FROM {} WHERE {finite} \
          GROUP BY {group_field}, idx",
         bucket.sql, relation.sql
     );
@@ -176,7 +168,8 @@ fn series(
         .into_iter()
         .chain(relation.params.iter().cloned())
         .collect();
-    let mut buckets: HashMap<String, HashMap<i64, i64>> = HashMap::new();
+    // Counts per bin for each ranked group, by position in `keys`; the last slot is "Other".
+    let mut buckets: Vec<HashMap<i64, i64>> = vec![HashMap::new(); keys.len() + 1];
     let mut statement = conn.prepare(&counted_sql)?;
     let rows = statement.query_map(bind(&params), |row| {
         Ok((
@@ -186,27 +179,26 @@ fn series(
         ))
     })?;
     for row in rows {
-        let (label, index, n) = row?;
-        let key = if top.contains(&label) {
-            label
-        } else {
-            "Other".to_owned()
-        };
-        *buckets.entry(key).or_default().entry(index).or_insert(0) += n;
+        let (key, index, n) = row?;
+        let slot = keys
+            .iter()
+            .position(|top| *top == key)
+            .unwrap_or(keys.len());
+        *buckets[slot].entry(index).or_insert(0) += n;
     }
-    let mut labels = top;
-    if buckets.contains_key("Other") {
+    let mut labels = names;
+    if !buckets[keys.len()].is_empty() {
         labels.push("Other".to_owned());
     }
     Ok(labels
         .into_iter()
-        .map(|label| {
-            let counts = buckets.get(&label);
+        .zip(buckets)
+        .map(|(label, counts)| {
             let bins: Vec<Value> = bins
                 .iter()
                 .zip(0_i64..)
                 .map(|(bin, index)| {
-                    let count = counts.and_then(|counts| counts.get(&index)).copied();
+                    let count = counts.get(&index).copied();
                     json!({"lower": bin["lower"], "upper": bin["upper"], "count": count.unwrap_or(0)})
                 })
                 .collect();

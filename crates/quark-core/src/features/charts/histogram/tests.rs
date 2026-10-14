@@ -9,6 +9,7 @@ use crate::relation::request::QueryRequest;
 use crate::relation::target::Target;
 use crate::runtime::engine::{Engine, EngineKind};
 use crate::shared::ids::dataset_id;
+use chrono::TimeZone;
 use duckdb::Connection;
 
 fn engine(setup: &str) -> Engine {
@@ -199,6 +200,58 @@ fn boolean_groups_are_labelled_the_way_python_prints_them() {
         4
     );
     assert_series_cover_the_bins(&payload);
+}
+
+/// The label of the one series a histogram draws when every row belongs to the group value `group`.
+fn series_label(group: &str) -> Value {
+    let engine = engine(&format!(
+        "CREATE TABLE t AS SELECT i AS amount, {group} AS g FROM range(1, 5) AS r(i)"
+    ));
+    let payload = histogram(&engine, json!({"value": "amount", "group": "g"})).unwrap();
+    payload["series"][0]["label"].clone()
+}
+
+#[test]
+fn timestamp_groups_are_labelled_the_way_python_prints_them() {
+    assert_eq!(
+        series_label("TIMESTAMP '2024-01-02 03:04:05.5'"),
+        "2024-01-02 03:04:05.500000"
+    );
+    assert_eq!(
+        series_label("TIMESTAMP '2024-01-02 03:04:05'"),
+        "2024-01-02 03:04:05"
+    );
+}
+
+#[test]
+fn timestamptz_groups_are_labelled_in_the_local_zone_with_a_colon_offset() {
+    let moment = chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
+    let local = moment.with_timezone(&chrono::Local);
+
+    assert_eq!(
+        series_label("TIMESTAMPTZ '2024-01-02 03:04:05+00'"),
+        local.format("%Y-%m-%d %H:%M:%S%:z").to_string()
+    );
+}
+
+#[test]
+fn interval_groups_are_labelled_the_way_python_prints_them() {
+    assert_eq!(series_label("INTERVAL 1 DAY"), "1 day, 0:00:00");
+}
+
+#[test]
+fn real_groups_are_labelled_with_their_double_text() {
+    assert_eq!(series_label("CAST(0.1 AS REAL)"), "0.10000000149011612");
+}
+
+#[test]
+fn list_groups_are_labelled_with_quoted_items() {
+    assert_eq!(series_label("['a', 'b']"), "['a', 'b']");
+}
+
+#[test]
+fn blob_groups_are_labelled_as_a_python_bytes_literal() {
+    assert_eq!(series_label("'\\xAA'::BLOB"), "b'\\xaa'");
 }
 
 #[test]

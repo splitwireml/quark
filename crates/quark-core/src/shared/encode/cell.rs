@@ -1,5 +1,6 @@
 //! Converts one Arrow cell, including nested lists, structs and maps, to JSON like the Python backend.
 
+use self::repr::{bytes_str, list_str};
 use super::scalar::{
     binary_json, date_json, decimal128_json, decimal256_json, float_json, hex_json, integer_json,
     interval_json, split, string_json, time_json, timestamp_json, value,
@@ -132,6 +133,11 @@ pub(crate) fn python_str<Tz: TimeZone>(array: &dyn Array, row: usize, zone: &Tz)
         DataType::Interval(IntervalUnit::MonthDayNano) => {
             timedelta_str(value::<IntervalMonthDayNanoType>(array, row))
         }
+        DataType::List(_) => list_str(&array.as_list::<i32>().value(row), zone),
+        DataType::LargeList(_) => list_str(&array.as_list::<i64>().value(row), zone),
+        DataType::FixedSizeList(..) => list_str(&array.as_fixed_size_list().value(row), zone),
+        DataType::Binary => bytes_str(array.as_binary::<i32>().value(row)),
+        DataType::LargeBinary => bytes_str(array.as_binary::<i64>().value(row)),
         data_type => match cell_json(array, row, "", zone) {
             Value::String(text) if matches!(data_type, DataType::Timestamp(..)) => {
                 text.replacen('T', " ", 1)
@@ -177,6 +183,8 @@ fn float_key(number: f64) -> String {
         python_float_repr(number)
     }
 }
+
+mod repr;
 
 #[cfg(test)]
 mod tests;

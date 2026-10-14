@@ -103,7 +103,7 @@ pub(super) fn series(
 }
 
 /// The groups with the most rows over the bars' source: their text keys and Python `str()` names.
-fn rank(
+pub(super) fn rank(
     conn: &Connection,
     relation: &Relation,
     bars: &Bars,

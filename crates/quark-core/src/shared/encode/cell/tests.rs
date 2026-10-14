@@ -249,6 +249,24 @@ fn interval_keys_print_like_a_python_timedelta() {
 }
 
 #[test]
+fn list_and_blob_keys_print_like_python() {
+    let key = |expression: &str| -> String {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut statement = conn.prepare(&format!("SELECT {expression}")).unwrap();
+        let batch = statement.query_arrow([]).unwrap().next().unwrap();
+        python_str(batch.column(0).as_ref(), 0, &chrono::Utc)
+    };
+
+    assert_eq!(
+        key(r#"[NULL, 'it''s', 'say "hi"', 'both''"']"#),
+        r#"[None, "it's", 'say "hi"', 'both\'"']"#
+    );
+    assert_eq!(key("[[1, 2], [3]]"), "[[1, 2], [3]]");
+    assert_eq!(key("[true]"), "[True]");
+    assert_eq!(key(r"'a''b\x01'::BLOB"), r#"b"a'b\x01""#);
+}
+
+#[test]
 fn lists_structs_maps() {
     for (sql, expected) in [
         ("[1, NULL]", "[1,null]"),

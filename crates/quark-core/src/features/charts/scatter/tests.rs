@@ -2,7 +2,9 @@
 
 use super::super::model::VisualizeRequest;
 use super::super::service::visualize;
+use super::chart;
 use crate::error::ApiResult;
+use crate::relation::filtered::filtered;
 use crate::relation::target::Target;
 use crate::runtime::engine::{Engine, EngineKind};
 use crate::shared::ids::dataset_id;
@@ -43,14 +45,29 @@ fn detail(result: ApiResult<Value>) -> String {
     error.detail().to_owned()
 }
 
-#[test]
-fn sample_is_repeatable() {
+/// The scatter chart itself, on a connection of its own: nothing a response cache could replay.
+fn fresh_points(encodings: &Value) -> Value {
     let engine = big_engine();
+    let request: VisualizeRequest = serde_json::from_value(json!({
+        "spec": {"chart": "scatter", "encodings": encodings},
+    }))
+    .unwrap();
+    let target = Target::Dataset(dataset_id("main", "t"));
+    engine
+        .read(None, |conn| {
+            let relation = filtered(conn, &target, &request.query())?;
+            chart(conn, &relation, &request.spec)
+        })
+        .unwrap()
+        .unwrap()["points"]
+        .clone()
+}
+
+#[test]
+fn sample_is_repeatable_across_fresh_connections() {
     let encodings = json!({"x": "x", "y": "y", "color": "region", "size": "weight"});
 
-    let runs: Vec<Value> = (0..5)
-        .map(|_| scatter(&engine, encodings.clone(), json!([])).unwrap()["points"].clone())
-        .collect();
+    let runs: Vec<Value> = (0..3).map(|_| fresh_points(&encodings)).collect();
 
     assert_eq!(runs[0].as_array().unwrap().len(), 5000);
     assert!(runs.iter().all(|points| points == &runs[0]));

@@ -2260,13 +2260,16 @@ def test_visualize_scatter_rejects_a_non_numeric_size(client):
 
 
 @pytest.mark.rust_only
-def test_visualize_scatter_sample_is_repeatable(client):
+def test_visualize_scatter_sample_is_repeatable(tmp_path):
     body = b"x,y,region\n" + b"".join(f"{i},{i * 2},r{i % 3}\n".encode() for i in range(20000))
-    node = upload(client, "repeat.csv", body)
-    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'repeat')['id']}"
     request = {"spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "region"}}}
-    first = client.post(base + "/visualize", json=request).json()
-    second = client.post(base + "/visualize", json=request).json()
+    with make_client(tmp_path) as client:
+        node = upload(client, "repeat.csv", body)
+        base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'repeat')['id']}"
+        first = client.post(base + "/visualize", json=request).json()
+    # A new server run starts with empty caches, so the second sample is drawn afresh.
+    with make_client(tmp_path) as restarted:
+        second = restarted.post(base + "/visualize", json=request).json()
     assert len(first["points"]) == 5000
     assert first["points"] == second["points"]
 
