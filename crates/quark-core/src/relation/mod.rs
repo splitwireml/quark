@@ -5,6 +5,7 @@ pub mod describe;
 pub mod filtered;
 pub mod guard;
 pub mod params;
+pub mod profile;
 pub mod request;
 pub mod rows;
 pub mod target;
