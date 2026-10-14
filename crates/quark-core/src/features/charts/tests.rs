@@ -9,7 +9,7 @@ use crate::shared::ids::dataset_id;
 use duckdb::Connection;
 use serde_json::{Value, json};
 
-fn engine(setup: &str) -> Engine {
+pub(super) fn engine(setup: &str) -> Engine {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(setup).unwrap();
     let kind = EngineKind::Node {
@@ -24,11 +24,11 @@ fn formula_engine() -> Engine {
     )
 }
 
-fn dataset() -> Target {
+pub(super) fn dataset() -> Target {
     Target::Dataset(dataset_id("main", "t"))
 }
 
-fn run(engine: &Engine, target: &Target, request: Value) -> ApiResult<Value> {
+pub(super) fn run(engine: &Engine, target: &Target, request: Value) -> ApiResult<Value> {
     let request: VisualizeRequest = serde_json::from_value(request).unwrap();
     engine
         .read(None, |conn| visualize(engine, conn, target, &request))
@@ -39,7 +39,7 @@ fn metric(engine: &Engine, spec: Value) -> ApiResult<Value> {
     run(engine, &dataset(), json!({"spec": spec}))
 }
 
-fn detail(result: ApiResult<Value>) -> String {
+pub(super) fn detail(result: ApiResult<Value>) -> String {
     let error = result.unwrap_err();
     assert_eq!(error.status().as_u16(), 422);
     error.detail().to_owned()
@@ -143,9 +143,9 @@ fn metric_formula_rejects_placeholders_and_multiple_statements() {
 fn chart_kinds_without_a_builder_are_not_available_yet() {
     let engine = formula_engine();
 
-    let bar = metric(&engine, json!({"chart": "bar"}));
+    let line = metric(&engine, json!({"chart": "line"}));
 
-    assert_eq!(detail(bar), "Chart type bar is not available yet");
+    assert_eq!(detail(line), "Chart type line is not available yet");
 }
 
 #[test]

@@ -6,7 +6,7 @@ use duckdb::Connection;
 use serde_json::Value;
 
 use super::model::{ChartKind, ChartSpec, VisualizeRequest};
-use super::{box_plot, metric};
+use super::{bar, box_plot, metric};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::filtered::{Relation, filtered};
 use crate::relation::target::Target;
@@ -67,8 +67,7 @@ fn formula_is_cacheable(
 fn chart(conn: &Connection, relation: &Relation, spec: &ChartSpec) -> ApiResult<Value> {
     match spec.chart {
         ChartKind::Metric => metric::chart(conn, relation, spec),
-        ChartKind::Bar => unavailable("bar"),
-        ChartKind::Pie => unavailable("pie"),
+        ChartKind::Bar | ChartKind::Pie => bar::chart(conn, relation, spec),
         ChartKind::Histogram => unavailable("histogram"),
         ChartKind::Box => box_plot::chart(conn, relation, spec),
         ChartKind::Scatter => unavailable("scatter"),
