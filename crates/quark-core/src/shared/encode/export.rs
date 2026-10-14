@@ -47,7 +47,7 @@ pub fn export_cell<Tz: TimeZone>(
     }
 }
 
-fn is_illegal_xml(c: char) -> bool {
+pub(crate) fn is_illegal_xml(c: char) -> bool {
     matches!(c, '\0'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}')
 }
 
