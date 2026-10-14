@@ -33,6 +33,8 @@ fn csv(expression: &str, type_name: &str) -> Option<String> {
     csv_text(&cell(expression, type_name))
 }
 
+mod decimals;
+
 #[test]
 fn scalars_keep_their_types() {
     assert_eq!(cell("NULL::BIGINT", "BIGINT"), ExportCell::Null);

@@ -191,10 +191,36 @@ fn decimal_text(text: String) -> ExportCell {
         .skip_while(|digit| *digit == b'0')
         .count();
     if digits > MAX_DECIMAL_DIGITS {
-        ExportCell::Text(text)
+        ExportCell::Text(python_decimal_str(&text))
     } else {
-        ExportCell::Decimal(text)
+        ExportCell::Decimal(python_decimal_str(&text))
     }
+}
+
+/// Python's `Decimal.__str__` for Arrow's plain decimal text: scientific notation when the
+/// adjusted exponent is below -6, with the coefficient's digits and the scale kept as they are.
+fn python_decimal_str(plain: &str) -> String {
+    let (sign, unsigned) = plain
+        .strip_prefix('-')
+        .map_or(("", plain), |rest| ("-", rest));
+    let scale = unsigned
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let coefficient: String = unsigned.chars().filter(char::is_ascii_digit).collect();
+    let significant = coefficient.trim_start_matches('0');
+    let digit_count = significant.len().max(1);
+    let adjusted = digit_count as i64 - 1 - scale as i64;
+    if adjusted >= -6 {
+        return plain.to_owned();
+    }
+    let digits = if significant.is_empty() {
+        "0"
+    } else {
+        significant
+    };
+    let (first, rest) = digits.split_at(1);
+    let point = if rest.is_empty() { "" } else { "." };
+    format!("{sign}{first}{point}{rest}E{adjusted}")
 }
 
 mod csv;
