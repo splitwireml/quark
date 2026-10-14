@@ -3,6 +3,7 @@
 use duckdb::Connection;
 use serde_json::{Value, json};
 
+use super::groups::{Bars, series};
 use super::model::{ChartKind, ChartSpec, Metric, metric_sql};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::filtered::Relation;
@@ -13,6 +14,7 @@ use crate::shared::types::profile_kind;
 
 const BAR_LIMIT: usize = 30;
 const PIE_LIMIT: usize = 8;
+pub(super) const NAN_BAR: &str = "\0nan";
 
 /// The chart's `{chart, rows: [{label, value, n}], series, other_count}`; `other_count` is the
 /// non-null rows that fall outside the shown categories.
@@ -33,7 +35,8 @@ pub(super) fn chart(conn: &Connection, relation: &Relation, spec: &ChartSpec) ->
     let (value_sql, extra) = measure(relation, spec, label)?;
     // The window total rides on every row, so the non-null count needs no second scan.
     let sql = format!(
-        "SELECT label, value, n, (sum(n) OVER ())::BIGINT AS non_null FROM (\
+        "SELECT label, value, n, (sum(n) OVER ())::BIGINT AS non_null, \
+         CAST(label AS VARCHAR) AS label_key FROM (\
          SELECT {field} AS label, {value_sql} AS value, count(*) AS n \
          FROM {} WHERE {field} IS NOT NULL{extra} GROUP BY 1) \
          ORDER BY value DESC NULLS LAST, label LIMIT {limit}",
@@ -42,32 +45,68 @@ pub(super) fn chart(conn: &Connection, relation: &Relation, spec: &ChartSpec) ->
     let (_, table) = json_rows(conn, &sql, &relation.params).map_err(invalid_value)?;
     let non_null = table.first().and_then(|row| row[3].as_i64()).unwrap_or(0);
     let shown: i64 = table.iter().filter_map(|row| row[2].as_i64()).sum();
-    // Series are C4's; the group column is checked here, after the rows ran, as Python does.
+    // The group column is checked after the rows ran, as Python does.
     let group = spec
         .encodings
         .group
         .as_deref()
-        .filter(|name| !is_pie && !name.is_empty());
-    if group.is_some_and(|name| !has_column(relation, name)) {
-        return Err(ApiError::unprocessable(format!(
-            "{label} group column was not found"
-        )));
-    }
+        .filter(|name| !is_pie && !name.is_empty())
+        .map(|name| {
+            relation
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .ok_or_else(|| {
+                    ApiError::unprocessable(format!("{label} group column was not found"))
+                })
+        })
+        .transpose()?;
     if is_pie && table.iter().any(|row| is_negative(&row[1])) {
         return Err(ApiError::unprocessable(
             "A pie chart cannot show negative values; use a bar chart instead",
         ));
     }
+    let labels: Vec<String> = table.iter().map(|row| bar_key(row)).collect();
+    let bars = Bars {
+        field: &field,
+        value_sql: &value_sql,
+        extra: &extra,
+    };
+    let grouped = group
+        .map(|group| series(conn, relation, &bars, group, &labels).map_err(invalid_value))
+        .transpose()?
+        .flatten();
     let rows: Vec<Value> = table
         .into_iter()
-        .map(|row| json!({"label": row[0], "value": row[1], "n": row[2]}))
+        .map(|row| {
+            let mut bar = json!({"label": row[0], "value": row[1], "n": row[2]});
+            if let Some(values) = grouped
+                .as_ref()
+                .and_then(|grouped| grouped.values.get(&bar_key(&row)))
+            {
+                bar["values"] = Value::Array(values.clone());
+            }
+            bar
+        })
         .collect();
     Ok(json!({
         "chart": name,
         "rows": rows,
-        "series": null,
+        "series": grouped.map(|grouped| grouped.names),
         "other_count": non_null - shown,
     }))
+}
+
+/// Bars are matched to their series on `CAST(label AS VARCHAR)`, which survives what a JSON round
+/// trip would not. Python looks cells up by the label object, and a NaN never equals itself, so a
+/// NaN bar (the only null label that can reach a bar) keeps its zeros; `NAN_BAR` matches no text.
+fn bar_key(row: &[Value]) -> String {
+    let key = row[4].as_str().unwrap_or_default();
+    if row[0].is_null() && key == "nan" {
+        NAN_BAR.to_owned()
+    } else {
+        key.to_owned()
+    }
 }
 
 fn has_column(relation: &Relation, name: &str) -> bool {

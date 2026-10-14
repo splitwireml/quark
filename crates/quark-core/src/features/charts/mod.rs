@@ -2,6 +2,7 @@
 
 mod bar;
 mod box_plot;
+mod groups;
 mod histogram;
 mod metric;
 pub mod model;
