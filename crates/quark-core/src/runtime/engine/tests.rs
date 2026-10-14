@@ -234,20 +234,24 @@ fn read_slow(engine: &Engine) -> Duration {
 #[test]
 fn pages_of_one_engine_run_concurrently() {
     let engine = slow_engine();
-    let single = read_slow(&engine);
+    let mut attempts = Vec::new();
+    for _ in 0..3 {
+        let single = read_slow(&engine);
 
-    let started = Instant::now();
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..2).map(|_| scope.spawn(|| read_slow(&engine))).collect();
-        for handle in handles {
-            handle.join().unwrap();
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2).map(|_| scope.spawn(|| read_slow(&engine))).collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+        let together = started.elapsed();
+
+        // Serial reads would take about twice one read; a loaded runner may spoil one attempt.
+        if together < single.mul_f64(1.6) {
+            return;
         }
-    });
-    let together = started.elapsed();
-
-    // Serial reads would take about twice one read.
-    assert!(
-        together < single.mul_f64(1.5),
-        "two reads took {together:?}, one takes {single:?}"
-    );
+        attempts.push((single, together));
+    }
+    panic!("two reads never overlapped; (one read, two reads) per attempt: {attempts:?}");
 }

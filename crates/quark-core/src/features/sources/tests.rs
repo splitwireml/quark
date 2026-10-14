@@ -1,5 +1,6 @@
 //! Tests for listing sources, views and datasets, in the services and over HTTP.
 
+use super::attach::expand_path;
 use super::service::{datasets, legacy_nodes, project_sources, project_views, source_detail};
 use crate::http::router;
 use crate::runtime::AppState;
@@ -274,6 +275,9 @@ async fn attach_rejects_other_suffixes_before_missing_files() {
 async fn attached_database_is_read_only() {
     let root = tempfile::tempdir().unwrap();
     let file = database_file(root.path(), "data.duckdb");
+    let resolved = expand_path(&file.to_string_lossy())
+        .to_string_lossy()
+        .into_owned();
     let app = app(root.path(), &[], &[project("p")]);
 
     let (status, node) = send(
@@ -286,7 +290,7 @@ async fn attached_database_is_read_only() {
     assert_eq!(status, 201);
     assert_eq!(node["kind"], "attached");
     assert_eq!(node["name"], "data.duckdb");
-    assert_eq!(node["source"], file.to_string_lossy().as_ref());
+    assert_eq!(node["source"], resolved.as_ref());
     assert_eq!(node["id"].as_str().unwrap().len(), 32);
 
     let (status, scoped) = send(
@@ -334,6 +338,9 @@ async fn deleting_an_attachment_keeps_the_file() {
 async fn source_path_is_absolute() {
     let root = tempfile::tempdir().unwrap();
     let file = database_file(root.path(), "where.db");
+    let resolved = expand_path(&file.to_string_lossy())
+        .to_string_lossy()
+        .into_owned();
     let app = app(
         root.path(),
         &[entry(root.path(), "one", Some("p"))],
@@ -352,10 +359,7 @@ async fn source_path_is_absolute() {
         node["id"].as_str().unwrap()
     );
     let (status, reply) = get_json(&app, &uri).await;
-    assert_eq!(
-        (status, reply),
-        (200, json!({"path": file.to_string_lossy()}))
-    );
+    assert_eq!((status, reply), (200, json!({"path": resolved})));
     let (status, reply) = get_json(&app, "/api/projects/p/sources/one/path").await;
     assert_eq!(status, 200);
     assert!(std::path::Path::new(reply["path"].as_str().unwrap()).is_absolute());
