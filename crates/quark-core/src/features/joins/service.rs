@@ -9,7 +9,7 @@ use super::model::{Identity, JoinPreview, JoinReference, JoinWorkspaceRequest, R
 use super::queries::{has_unique_keys, inner_join_rows, row_count};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::describe::{datasets, describe};
-use crate::relation::target::{Target, internal, resolve};
+use crate::relation::target::{Target, resolve};
 use crate::runtime::AppState;
 use crate::runtime::cache::stats::stats_key;
 use crate::runtime::cancel::Cancelled;
@@ -183,12 +183,12 @@ fn resolve_side(conn: &Connection, reference: &JoinReference) -> ApiResult<Side>
     }
     let id = reference.dataset.as_deref().unwrap_or_default();
     let item = datasets(conn)
-        .map_err(internal)?
+        .map_err(invalid_value)?
         .into_iter()
         .find(|item| item.id == id)
         .ok_or_else(|| ApiError::not_found("Dataset not found"))?;
     let table = format!("{}.{}", quote_ident(&item.schema), quote_ident(&item.name));
-    let columns = describe(conn, &table, &[]).map_err(internal)?;
+    let columns = describe(conn, &table, &[]).map_err(invalid_value)?;
     Ok(Side {
         table,
         columns,

@@ -198,7 +198,8 @@ fn name_of(grain: Grain) -> &'static str {
         .map_or("year", |(_, name, _)| name)
 }
 
-/// The finest grain whose bucket count over the data's span fits the point budget, else `year`.
+/// The finest grain whose bucket count over the data's fractional span, in seconds as Python's
+/// `total_seconds()` counts them, fits the point budget, else `year`.
 fn automatic_grain(
     conn: &Connection,
     relation: &Relation,
@@ -206,7 +207,7 @@ fn automatic_grain(
     filter: &str,
 ) -> ApiResult<&'static str> {
     let sql = format!(
-        "SELECT date_diff('second', min({x_field}), max({x_field})) FROM {} WHERE {filter}",
+        "SELECT epoch(max({x_field})) - epoch(min({x_field})) FROM {} WHERE {filter}",
         relation.sql
     );
     let (_, rows) = json_rows(conn, &sql, &relation.params).map_err(invalid_value)?;

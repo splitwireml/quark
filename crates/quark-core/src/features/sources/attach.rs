@@ -1,6 +1,7 @@
 //! Attaching a DuckDB file by path and reporting where a source lives on disk.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, PathBuf};
 
@@ -79,8 +80,13 @@ pub fn source_path(state: &AppState, project_id: &str, source_id: &str) -> ApiRe
 /// the path absolute, follows symlinks through the longest existing ancestor and appends
 /// the rest lexically (`..` pops). The path need not exist and its case is never changed.
 pub(crate) fn expand_path(raw: &str) -> PathBuf {
+    expand_with_home(raw, home_folder())
+}
+
+/// `expand_path` with the home folder passed in, so tests need no process environment.
+pub(crate) fn expand_with_home(raw: &str, home: Option<PathBuf>) -> PathBuf {
     let expanded = match raw.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => match home_folder() {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => match home {
             Some(home) => home.join(rest.trim_start_matches(['/', '\\'])),
             None => PathBuf::from(raw),
         },
@@ -119,8 +125,23 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 fn home_folder() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+    home_from(
+        cfg!(windows),
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+    )
 }
+
+/// The variable Python's `expanduser` reads: `USERPROFILE` on Windows (3.8+ ignores `HOME`
+/// there), `HOME` everywhere else.
+pub(crate) fn home_from(
+    is_windows: bool,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+) -> Option<PathBuf> {
+    let chosen = if is_windows { user_profile } else { home };
+    chosen.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests;

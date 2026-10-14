@@ -309,3 +309,36 @@ fn cross_source_preview_keeps_a_join_engine_only_when_it_succeeds() {
     assert!(state.engine_for_node(&result.node_id).is_ok());
     assert_eq!(state.catalog().joins.len(), 1);
 }
+
+/// A database source whose view `v` reads a table that no longer exists, next to a healthy table `ok`.
+fn database_entry(root: &std::path::Path, id: &str) -> serde_json::Value {
+    let file = root.join(format!("{id}.duckdb"));
+    let conn = Connection::open(&file).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE gone(a INTEGER); CREATE VIEW v AS SELECT * FROM gone; DROP TABLE gone;
+         CREATE TABLE ok(a INTEGER); INSERT INTO ok VALUES (1);",
+    )
+    .unwrap();
+    json!({"id": id, "name": id.to_uppercase(), "kind": "duckdb", "source": file.to_string_lossy()})
+}
+
+#[test]
+fn a_dataset_side_that_fails_to_describe_answers_python_422_on_both_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let state = started(
+        root.path(),
+        &[
+            database_entry(root.path(), "d1"),
+            database_entry(root.path(), "d2"),
+        ],
+        &[],
+    );
+    // Python: DESCRIBE raises duckdb.Error, which its global handler answers as 422 "Invalid filter value: <err>".
+    let same_engine = request(dataset("d1", "v"), dataset("d1", "ok"), &["a"], &["a"]);
+    let cross_source = request(dataset("d1", "v"), dataset("d2", "ok"), &["a"], &["a"]);
+    for join in [same_engine, cross_source] {
+        let (status, detail) = failure(preview(&state, &join));
+        assert_eq!(status, 422);
+        assert!(detail.starts_with("Invalid filter value: "), "{detail}");
+    }
+}

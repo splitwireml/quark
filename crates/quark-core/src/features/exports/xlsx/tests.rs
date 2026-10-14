@@ -7,10 +7,11 @@ use axum::http::Response;
 use calamine::{Data, Reader, Xlsx};
 use chrono::NaiveDate;
 use http_body_util::BodyExt;
+use rust_xlsxwriter::Format;
 use serde_json::{Value, json};
 
 use super::super::tests::{app, export, exports_in, failure, sheet};
-use super::{date_serial, date_time_serial};
+use super::{Formats, date_serial, date_time_serial};
 
 async fn workbook(response: Response<Body>) -> Xlsx<Cursor<Vec<u8>>> {
     assert_eq!(response.status(), 200);
@@ -95,6 +96,16 @@ async fn typed_cells_keep_numbers_dates_durations_and_empty_cells() {
     let (moment, is_duration) = serial(&row[6]);
     assert!((moment - 46_266.521_354_166_67).abs() < 1e-9 && !is_duration);
     assert_eq!(serial(&row[7]), (26.0 / 24.0, true));
+}
+
+#[test]
+fn duration_cells_use_the_openpyxl_timedelta_format() {
+    // `openpyxl.styles.numbers.FORMAT_DATE_TIMEDELTA` is "[hh]:mm:ss". calamine reads "[h]:mm:ss"
+    // and "[hh]:mm:ss" alike as a duration, so the string is pinned on the format the writer applies.
+    assert_eq!(
+        Formats::new().duration,
+        Format::new().set_num_format("[hh]:mm:ss")
+    );
 }
 
 #[tokio::test]

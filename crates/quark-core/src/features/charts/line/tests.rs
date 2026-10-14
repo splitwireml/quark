@@ -80,6 +80,23 @@ fn automatic_grain_picks_the_first_fit() {
 }
 
 #[test]
+fn automatic_grain_uses_the_fractional_span_like_python() {
+    let grain = |values: &str| line(&dates(values), spec(json!({}))).unwrap()["grain"].clone();
+
+    // 400 hours of hour buckets is 1_440_000 s. Python's (high - low).total_seconds() gives
+    // 1_440_000.5 for the second pair, 400.00014 hours, so it picks "day"; whole-second
+    // boundary counting would see exactly 400 and pick "hour".
+    assert_eq!(
+        grain("(TIMESTAMP '2026-01-01 00:00:00', 1), (TIMESTAMP '2026-01-17 16:00:00', 1)"),
+        "hour"
+    );
+    assert_eq!(
+        grain("(TIMESTAMP '2026-01-01 00:00:00', 1), (TIMESTAMP '2026-01-17 16:00:00.5', 1)"),
+        "day"
+    );
+}
+
+#[test]
 fn explicit_grain_is_honoured() {
     let values = "(DATE '2026-01-01', 1), (DATE '2026-01-15', 2), (DATE '2026-02-03', 4)";
 

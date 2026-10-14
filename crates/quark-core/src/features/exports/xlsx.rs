@@ -37,7 +37,7 @@ impl Formats {
             date: Format::new().set_num_format("yyyy-mm-dd"),
             date_time: Format::new().set_num_format("yyyy-mm-dd h:mm:ss"),
             time: Format::new().set_num_format("h:mm:ss"),
-            duration: Format::new().set_num_format("[h]:mm:ss"),
+            duration: Format::new().set_num_format("[hh]:mm:ss"),
         }
     }
 }
