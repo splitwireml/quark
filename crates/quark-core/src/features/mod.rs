@@ -2,6 +2,7 @@
 
 pub mod charts;
 pub mod exports;
+pub mod find;
 pub mod joins;
 pub mod pages;
 pub mod projects;

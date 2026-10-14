@@ -3,6 +3,7 @@
 pub mod columnar;
 mod columnar_files;
 pub mod columnar_key;
+pub mod numbered;
 pub mod responses;
 mod result_build;
 pub mod results;

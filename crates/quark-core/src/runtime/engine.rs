@@ -9,6 +9,7 @@ use anyhow::{Context, bail};
 use duckdb::{AccessMode, Config, Connection, InterruptHandle};
 
 use super::cache::columnar_key::ColumnarKey;
+use super::cache::numbered::NumberedCache;
 use super::cache::responses::{ResponseCache, source_files};
 use super::cache::results::ResultCache;
 use super::cache::stats::StatsCache;
@@ -44,6 +45,7 @@ pub struct Engine {
     pub(crate) pool: ReaderPool,
     pub stats: Mutex<StatsCache>,
     pub results: Mutex<ResultCache>,
+    pub(crate) numbered: Mutex<NumberedCache>,
     pub(crate) responses: Mutex<ResponseCache>,
     /// Functions and macros that make a response uncacheable, read from the catalog on first use.
     pub(crate) volatile: OnceLock<HashSet<String>>,
@@ -77,6 +79,7 @@ impl Engine {
             pool,
             stats: Mutex::new(StatsCache::default()),
             results: Mutex::new(ResultCache::default()),
+            numbered: Mutex::new(NumberedCache::default()),
             responses: Mutex::new(ResponseCache::default()),
             volatile: OnceLock::new(),
             source_files: Vec::new(),
@@ -101,6 +104,11 @@ impl Engine {
     /// The result cache; hold the guard only to read or write one entry.
     pub fn results(&self) -> MutexGuard<'_, ResultCache> {
         lock_recovering(&self.results)
+    }
+
+    /// The numbered tables find searches read; hold the guard only to read or write one entry.
+    pub fn numbered(&self) -> MutexGuard<'_, NumberedCache> {
+        lock_recovering(&self.numbered)
     }
 
     /// Opens a source on its own connection: databases read-only, flat files behind one view.
