@@ -8,8 +8,8 @@ use quark_core::http::secure::{
 use quark_core::router;
 use quark_core::runtime::AppState;
 use quark_core::runtime::dirs::Dirs;
-use tauri::webview::PageLoadEvent;
-use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::{DownloadEvent, PageLoadEvent};
+use tauri::{App, Manager, RunEvent, Webview, WebviewUrl, WebviewWindowBuilder};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
 
@@ -103,6 +103,29 @@ fn init_logging(folder: &Path) -> SetupResult<WorkerGuard> {
     Ok(guard)
 }
 
+/// Saves the app's own blob downloads (exports) to the Downloads folder under the offered name.
+/// WebKitGTK writes nothing without a handler; the default destination already avoids overwrites.
+fn on_download(_: Webview, event: DownloadEvent<'_>) -> bool {
+    match event {
+        DownloadEvent::Requested { url, destination } => {
+            let is_blob = url.scheme() == "blob";
+            if is_blob {
+                tracing::info!(destination = %destination.display(), "saving a download");
+            } else {
+                tracing::warn!(%url, "refused a download that is not the app's own");
+            }
+            is_blob
+        }
+        DownloadEvent::Finished { path, success, .. } => {
+            if !success {
+                tracing::error!(?path, "a download failed");
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
 fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupResult {
     let script = format!(
         "window.__QUARK_API__ = Object.freeze({{ base: {}, token: {} }});",
@@ -120,6 +143,7 @@ fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupRe
             }
         })
         .on_navigation(|url| is_app_origin(url.as_str(), cfg!(debug_assertions)))
+        .on_download(on_download)
         .build()?;
     Ok(())
 }
