@@ -155,26 +155,6 @@ pub fn build_query(
     if !is_valid_dedupe {
         return Err(ApiError::unprocessable("Invalid dedupe column"));
     }
-    let qualify = if request.dedupe_columns.is_empty() {
-        String::new()
-    } else {
-        let keys: Vec<String> = request
-            .dedupe_columns
-            .iter()
-            .map(|key| quote_ident(key))
-            .collect();
-        format!(
-            " QUALIFY row_number() OVER (PARTITION BY {}) = 1",
-            keys.join(", ")
-        )
-    };
-    let (where_sql, where_shown) = match folded {
-        Some((sql, shown)) => (format!(" WHERE {sql}"), format!(" WHERE {shown}")),
-        None => (String::new(), String::new()),
-    };
-    let relation = format!("(SELECT * FROM {table}{where_sql}{qualify})");
-    let display_relation = format!("(SELECT * FROM {display_table}{where_shown}{qualify})");
-
     let mut orders = Vec::with_capacity(request.sorts.len());
     for sort in &request.sorts {
         if !columns.iter().any(|meta| meta.name == sort.column) {
@@ -186,6 +166,36 @@ pub fn build_query(
         };
         orders.push(format!("{} {direction}", quote_ident(&sort.column)));
     }
+
+    let qualify = if request.dedupe_columns.is_empty() {
+        String::new()
+    } else {
+        let keys: Vec<String> = request
+            .dedupe_columns
+            .iter()
+            .map(|key| quote_ident(key))
+            .collect();
+        // Each group keeps the row the View's sort puts first and every other column breaks
+        // ties, both when choosing the row and when ordering the result, so a page, an export
+        // and a find all see the same rows in the same order. The tie-break stays off plain
+        // sorts: on 2M rows it costs several times the sort itself.
+        let ties = columns
+            .iter()
+            .filter(|meta| !request.sorts.iter().any(|sort| sort.column == meta.name))
+            .map(|meta| format!("{} ASC", quote_ident(&meta.name)));
+        orders.extend(ties);
+        format!(
+            " QUALIFY row_number() OVER (PARTITION BY {} ORDER BY {}) = 1",
+            keys.join(", "),
+            orders.join(", ")
+        )
+    };
+    let (where_sql, where_shown) = match folded {
+        Some((sql, shown)) => (format!(" WHERE {sql}"), format!(" WHERE {shown}")),
+        None => (String::new(), String::new()),
+    };
+    let relation = format!("(SELECT * FROM {table}{where_sql}{qualify})");
+    let display_relation = format!("(SELECT * FROM {display_table}{where_shown}{qualify})");
     let order = if orders.is_empty() {
         String::new()
     } else {

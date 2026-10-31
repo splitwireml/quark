@@ -18,18 +18,24 @@ pub struct Relation {
     pub columns: Vec<ColumnMeta>,
 }
 
-/// Resolves `target` and applies the request's filters and dedupe. Sorts are dropped unvalidated.
+/// Resolves `target` and applies the request's filters and dedupe. Sorts on unknown columns are
+/// dropped; the rest only choose which row a dedupe keeps, as the View's page does.
 pub fn filtered(conn: &Connection, target: &Target, request: &QueryRequest) -> ApiResult<Relation> {
     let resolved = resolve(conn, target)?;
-    let unsorted = QueryRequest {
-        sorts: Vec::new(),
+    let known_sorts = QueryRequest {
+        sorts: request
+            .sorts
+            .iter()
+            .filter(|sort| resolved.columns.iter().any(|meta| meta.name == sort.column))
+            .cloned()
+            .collect(),
         ..request.clone()
     };
     let built = build_query(
         &resolved.table,
         &resolved.display_table,
         &resolved.columns,
-        &unsorted,
+        &known_sorts,
     )?;
     let mut params = resolved.lead;
     params.extend(built.params);

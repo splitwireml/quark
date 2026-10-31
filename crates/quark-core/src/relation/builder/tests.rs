@@ -121,8 +121,10 @@ fn builder_in_between_dedupe_sorts() {
         ..QueryRequest::default()
     };
     let query = built(&request);
-    let qualify = " QUALIFY row_number() OVER (PARTITION BY \"name\", \"a\") = 1";
-    let order = " ORDER BY \"price\" ASC, \"name\" DESC";
+    let keep = "\"price\" ASC, \"name\" DESC, \"a\" ASC, \"b\" ASC, \"c\" ASC";
+    let qualify =
+        format!(" QUALIFY row_number() OVER (PARTITION BY \"name\", \"a\" ORDER BY {keep}) = 1");
+    let order = format!(" ORDER BY {keep}");
     assert_eq!(
         query.relation,
         format!(
