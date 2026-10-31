@@ -109,6 +109,26 @@ fn duration_cells_use_the_openpyxl_timedelta_format() {
 }
 
 #[tokio::test]
+async fn too_many_rows_is_422_and_leaves_no_file() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path());
+    let sql = "SELECT 1 AS one FROM range(1048576)";
+
+    let failed = export(&app, xlsx_request(&[named("Big", sql)])).await;
+
+    assert_eq!(
+        failure(failed).await,
+        (
+            422,
+            "XLSX holds at most 1,048,575 rows per sheet; \
+             filter the View or export it as CSV, Parquet or JSON"
+                .to_owned()
+        )
+    );
+    assert!(exports_in(root.path()).is_empty());
+}
+
+#[tokio::test]
 async fn oversized_text_is_422_and_leaves_no_file() {
     let root = tempfile::tempdir().unwrap();
     let app = app(root.path());

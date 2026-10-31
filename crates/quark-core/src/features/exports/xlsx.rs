@@ -19,6 +19,8 @@ use crate::shared::encode::export::{ExportCell, export_cell, is_illegal_xml};
 
 /// Excel's longest cell text.
 const EXCEL_TEXT_LIMIT: usize = 32_767;
+/// Excel's data rows per sheet: 1,048,576 rows less the header.
+const EXCEL_ROW_LIMIT: u32 = 1_048_575;
 /// `Datelike::num_days_from_ce` of 1899-12-30, the epoch `openpyxl` counts days from.
 const EXCEL_EPOCH_DAYS_FROM_CE: i32 = 693_594;
 const SECONDS_PER_DAY: f64 = 86_400.0;
@@ -89,6 +91,12 @@ fn write_sheet(
     let mut row_number = 1;
     for_each_batch(conn, &select, |batch| {
         for row in 0..batch.num_rows() {
+            if row_number > EXCEL_ROW_LIMIT {
+                return Err(ApiError::unprocessable(
+                    "XLSX holds at most 1,048,575 rows per sheet; \
+                     filter the View or export it as CSV, Parquet or JSON",
+                ));
+            }
             for (column, (meta, array)) in (0..).zip(sheet.columns.iter().zip(batch.columns())) {
                 let cell = export_cell(array.as_ref(), row, &meta.type_name, &chrono::Local);
                 write_cell(worksheet, row_number, column, cell, formats)?;
