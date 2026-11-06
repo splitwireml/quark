@@ -75,6 +75,7 @@ pub(super) fn compute_stats(
 pub(super) fn fetch_page(
     conn: &Connection,
     ordered: &str,
+    page: Option<&str>,
     columns: &[ColumnMeta],
     params: &[Value],
     request: &QueryRequest,
@@ -84,10 +85,12 @@ pub(super) fn fetch_page(
         Value::from((request.page - 1).saturating_mul(request.page_size)),
     ];
     let params: Vec<Value> = params.iter().cloned().chain(paging).collect();
-    let mut statement = conn.prepare(&format!(
-        "SELECT {} FROM ({ordered}) AS result LIMIT ? OFFSET ?",
-        select_list(columns)
-    ))?;
+    let select = select_list(columns);
+    let query = match page {
+        Some(page) => format!("SELECT {select} FROM ({page}) AS result"),
+        None => format!("SELECT {select} FROM ({ordered}) AS result LIMIT ? OFFSET ?"),
+    };
+    let mut statement = conn.prepare(&query)?;
     let arrow = statement.query_arrow(bind(&params))?;
     let schema = arrow.get_schema();
     let batches = arrow.collect();

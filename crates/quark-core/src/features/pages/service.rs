@@ -125,8 +125,13 @@ pub fn run_page(
             stats
         }
     };
-    let fetched =
-        fetch_page(conn, ordered, &resolved.columns, bound, request).map_err(unprocessable)?;
+    let page = if saved.is_none() {
+        built.page.as_deref()
+    } else {
+        None
+    };
+    let fetched = fetch_page(conn, ordered, page, &resolved.columns, bound, request)
+        .map_err(unprocessable)?;
     if let ResultAction::StartBuild(table) = &action {
         let primary = engine.primary();
         engine

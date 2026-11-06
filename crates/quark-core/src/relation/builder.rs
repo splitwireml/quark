@@ -10,6 +10,8 @@ use crate::shared::literal::literal;
 use crate::shared::sql::quote_ident;
 use crate::shared::types::is_text;
 
+mod dedupe;
+
 /// The SQL for one request: a filtered relation, its ordered form, the bound
 /// parameters, and a display form with the parameters inlined as literals.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +20,7 @@ pub struct BuiltQuery {
     pub ordered: String,
     pub params: Vec<Value>,
     pub display: String,
+    pub(crate) page: Option<String>,
 }
 
 const OPERATORS: [&str; 13] = [
@@ -181,6 +184,7 @@ pub(crate) fn build_with_rowid(
         Some((sql, shown)) => (format!(" WHERE {sql}"), format!(" WHERE {shown}")),
         None => (String::new(), String::new()),
     };
+    let mut page = None;
     let (relation, display_relation, select) = if request.dedupe_columns.is_empty() {
         (
             format!("(SELECT * FROM {table}{where_sql})"),
@@ -188,14 +192,7 @@ pub(crate) fn build_with_rowid(
             "*".to_owned(),
         )
     } else {
-        let mut position = "__quark_position".to_owned();
-        while columns
-            .iter()
-            .any(|meta| meta.name.eq_ignore_ascii_case(&position))
-        {
-            position.push('_');
-        }
-        let position = quote_ident(&position);
+        let position = dedupe::position(columns);
         orders.push(format!("{position} ASC"));
         let keys: Vec<String> = request
             .dedupe_columns
@@ -213,11 +210,12 @@ pub(crate) fn build_with_rowid(
             )
         };
         let relation = match rowid_table {
-            // Window only the keys and sorts; fetch the payload after picking each group's row.
-            Some(cache) => format!(
-                "(SELECT rowid AS {position}, * FROM {cache} WHERE rowid IN \
-                 (SELECT rowid AS {position} FROM {cache}{where_sql}{qualify}))"
-            ),
+            Some(cache) => {
+                let (relation, query) =
+                    dedupe::cached(cache, &position, &where_sql, &qualify, &orders.join(", "));
+                page = Some(query);
+                relation
+            }
             None => numbered(table, &where_sql),
         };
         (
@@ -236,6 +234,7 @@ pub(crate) fn build_with_rowid(
         display: format!("SELECT {select} FROM {display_relation}{order}"),
         relation,
         params,
+        page,
     })
 }
 
