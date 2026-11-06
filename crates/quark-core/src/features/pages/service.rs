@@ -115,12 +115,31 @@ pub fn run_page(
     let stats = match cached {
         Some(stats) => stats,
         None => {
+            let source = if let Some(table) = &resolved.rowid_table {
+                let source_key = stats_key(table, &[]);
+                let cached = engine.stats().get(&source_key);
+                Some(match cached {
+                    Some(stats) => stats,
+                    None => {
+                        engine
+                            .counters
+                            .count_queries
+                            .fetch_add(1, Ordering::Relaxed);
+                        let stats = compute_stats(conn, table, &resolved.columns, &[], None)
+                            .map_err(unprocessable)?;
+                        engine.stats().insert(source_key, stats.clone());
+                        stats
+                    }
+                })
+            } else {
+                None
+            };
             engine
                 .counters
                 .count_queries
                 .fetch_add(1, Ordering::Relaxed);
-            let stats =
-                compute_stats(conn, relation, &resolved.columns, bound).map_err(unprocessable)?;
+            let stats = compute_stats(conn, relation, &resolved.columns, bound, source.as_ref())
+                .map_err(unprocessable)?;
             engine.stats().insert(key, stats.clone());
             stats
         }

@@ -25,6 +25,7 @@ pub(super) fn compute_stats(
     relation: &str,
     columns: &[ColumnMeta],
     params: &[Value],
+    source: Option<&StatsEntry>,
 ) -> duckdb::Result<StatsEntry> {
     let total_rows = conn.query_row(
         &format!("SELECT count(*) FROM {relation}"),
@@ -32,28 +33,43 @@ pub(super) fn compute_stats(
         |row| row.get(0),
     )?;
 
-    let null_fractions: Vec<f64> = if columns.is_empty() {
-        Vec::new()
-    } else {
-        let averages: Vec<String> = columns
+    // Selecting rows cannot introduce nulls into a source column that has none.
+    let nullable: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .filter(|(index, meta)| {
+            source.is_none_or(|stats| {
+                stats
+                    .columns
+                    .get(*index)
+                    .is_none_or(|column| column.name != meta.name || column.null_fraction != 0.0)
+            })
+        })
+        .collect();
+    let mut null_fractions = vec![0.0; columns.len()];
+    if !nullable.is_empty() {
+        let averages: Vec<String> = nullable
             .iter()
-            .map(|meta| {
+            .map(|(_, meta)| {
                 format!(
-                    "avg(CASE WHEN {} IS NULL THEN 1.0 ELSE 0.0 END)",
+                    "(count(*) - count({}))::DOUBLE / nullif(count(*), 0)",
                     quote_ident(&meta.name)
                 )
             })
             .collect();
-        conn.query_row(
+        let measured: Vec<f64> = conn.query_row(
             &format!("SELECT {} FROM {relation}", averages.join(", ")),
             bind(params),
             |row| {
-                (0..columns.len())
+                (0..nullable.len())
                     .map(|index| Ok(row.get::<_, Option<f64>>(index)?.unwrap_or(0.0)))
                     .collect()
             },
-        )?
-    };
+        )?;
+        for ((index, _), fraction) in nullable.into_iter().zip(measured) {
+            null_fractions[index] = fraction;
+        }
+    }
 
     let columns = columns
         .iter()
