@@ -3,13 +3,14 @@
 // Ignored because timings depend on the machine. Run on the development Mac with:
 // `cargo test -p quark-core --release --test perf_acceptance -- --ignored --nocapture`
 // The 2M-row setup and the timing helpers live here; `routes.rs` holds the spec section 9 cases and
-// `dedupe.rs` the dedupe width case (SPL-13).
+// `dedupe.rs` the dedupe width cases and `dedupe_parity.rs` the rowid parity check (SPL-13).
 // Every case takes `SERIAL` first, so the cases never time each other. The route cases drive the
 // router over one shared 2M-row CSV and assert the median of a few runs against the confirmed cap.
 // clippy.toml allows unwrap only inside `#[test]` fns; the helpers below are test code too.
 #![allow(clippy::unwrap_used)]
 
 mod dedupe;
+mod dedupe_parity;
 mod routes;
 
 use std::io::Cursor;
