@@ -85,15 +85,35 @@ pub(crate) fn resolve_query(
         Target::Sql(sql) => {
             let sql = check_select(conn, sql)?;
             let columns = describe(conn, "query(?)", &[&sql]).map_err(describe_error)?;
-            Ok(Resolved {
+            let mut resolved = Resolved {
                 table: "query(?)".to_owned(),
                 display_table: format!("({sql})"),
                 columns,
                 rowid_table: None,
                 lead: vec![Value::String(sql.clone())],
-                plain_sql: Some(sql),
+                plain_sql: Some(sql.clone()),
                 error_prefix: "Invalid SQL query: ",
-            })
+            };
+            if dedupe
+                && !resolved
+                    .columns
+                    .iter()
+                    .any(|meta| meta.name.eq_ignore_ascii_case("rowid"))
+            {
+                for item in datasets(conn).map_err(internal)? {
+                    let table =
+                        format!("{}.{}", quote_ident(&item.schema), quote_ident(&item.name));
+                    if item.kind == "VIEW" && sql == format!("SELECT * FROM {table}") {
+                        if let Some(cache) = cache_table(conn, &item.schema, &item.name)? {
+                            resolved.table = table;
+                            resolved.rowid_table = Some(cache);
+                            resolved.lead.clear();
+                        }
+                        break;
+                    }
+                }
+            }
+            Ok(resolved)
         }
     }
 }
@@ -101,8 +121,9 @@ pub(crate) fn resolve_query(
 fn cache_table(conn: &Connection, schema: &str, name: &str) -> ApiResult<Option<String>> {
     let comment: Option<String> = conn
         .query_row(
-            "SELECT max(comment) FROM duckdb_views() WHERE database_name = current_database() \
-         AND schema_name = ? AND view_name = ?",
+            "SELECT max(v.comment) FROM duckdb_views() v JOIN duckdb_databases() d \
+             ON v.comment = 'quark:columnar:\"' || d.database_name || '\".main.data' \
+             WHERE v.database_name = current_database() AND v.schema_name = ? AND v.view_name = ?",
             [schema, name],
             |row| row.get(0),
         )
