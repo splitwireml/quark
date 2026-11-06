@@ -111,7 +111,7 @@ async fn timed_json(app: &Router, uri: &str, body: Value) -> Value {
 
 /// Whether the node's engine reads its source from a columnar cache file. An engine opened
 /// before the import finished scans the CSV; once the import is done the next open reads the cache.
-fn reads_cache(state: &AppState, node_id: &str) -> bool {
+pub(super) fn reads_cache(state: &AppState, node_id: &str) -> bool {
     let engine = state.engine_for_node(node_id).unwrap();
     let views: i64 = engine
         .primary()
