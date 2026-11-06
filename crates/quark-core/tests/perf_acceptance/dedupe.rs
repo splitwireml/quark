@@ -1,6 +1,7 @@
-//! A deduped View costs the same at any width: 2M rows deduped on a 50-value key and sorted by a
-//! number, as an 8-column source and as a 52-column one (30 VARCHAR), both read from the columnar
-//! cache. The 52-column count and first page may take at most 1.5x the 8-column ones.
+//! A deduped View costs the same at any width: 52 columns within 1.5x of 8.
+// 2M rows deduped on a 50-value key and sorted by a number, as an 8-column source and as a
+// 52-column one (30 VARCHAR), both read from the columnar cache. The 52-column count and first
+// page may take at most 1.5x the 8-column ones.
 // clippy.toml allows unwrap only inside `#[test]` fns; the helpers below are test code too.
 
 use super::routes::reads_cache;
