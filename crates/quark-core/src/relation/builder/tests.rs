@@ -148,6 +148,19 @@ fn builder_in_between_dedupe_sorts() {
 /// One `ORDER BY` term: its column (empty for any other expression) and whether it descends.
 type Term = (String, bool);
 
+/// DuckDB's parse tree of `sql`, as JSON.
+fn syntax_tree(sql: &str) -> Value {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let text: String = conn
+        .query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let tree: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(tree["error"], false, "{sql}: {tree}");
+    tree
+}
+
 /// The terms of every `ORDER BY` inside a dedupe window (one with a `PARTITION BY`) in `sql`, and
 /// of the statement's own `ORDER BY`.
 fn order_terms(sql: &str) -> (Vec<Vec<Term>>, Vec<Term>) {
@@ -189,14 +202,7 @@ fn order_terms(sql: &str) -> (Vec<Vec<Term>>, Vec<Term>) {
             _ => {}
         }
     }
-    let conn = duckdb::Connection::open_in_memory().unwrap();
-    let text: String = conn
-        .query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    let tree: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(tree["error"], false, "{sql}: {tree}");
+    let tree = syntax_tree(sql);
     let mut found = Vec::new();
     windows(&tree, &mut found);
     let statement = &tree["statements"][0]["node"];
@@ -266,6 +272,65 @@ fn deduped_sql_orders_by_the_sorts_then_one_position() {
             if name != "relation" {
                 check(&outer, &format!("{name} ORDER BY"));
             }
+        }
+    }
+}
+
+/// Every SELECT in `node` that numbers its rows with a bare `row_number() OVER ()`.
+fn numbering_selects<'a>(node: &'a Value, found: &mut Vec<&'a Value>) {
+    match node {
+        Value::Object(map) => {
+            let numbers = map
+                .get("select_list")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["type"] == "WINDOW_ROW_NUMBER"
+                            && item["partitions"].as_array().is_some_and(Vec::is_empty)
+                            && item["orders"].as_array().is_some_and(Vec::is_empty)
+                    })
+                });
+            if numbers {
+                found.push(node);
+            }
+            map.values()
+                .for_each(|value| numbering_selects(value, found));
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|value| numbering_selects(value, found)),
+        _ => {}
+    }
+}
+
+#[test]
+fn deduped_sql_numbers_rows_after_the_filters() {
+    // Numbering the filtered rows lets a filter prune the scan; numbering first reads every row.
+    let request = QueryRequest {
+        filters: vec![and("a", ">", json!(1)), and("name", "=", json!("x"))],
+        sorts: vec![Sort {
+            column: "price".to_owned(),
+            direction: Direction::Desc,
+        }],
+        dedupe_columns: vec!["name".to_owned()],
+        ..QueryRequest::default()
+    };
+    let query = built(&request);
+    for (sql, name) in [
+        (format!("SELECT * FROM {}", query.relation), "relation"),
+        (query.ordered.clone(), "ordered"),
+        (query.display.clone(), "display"),
+    ] {
+        let tree = syntax_tree(&sql);
+        let mut numbering = Vec::new();
+        numbering_selects(&tree, &mut numbering);
+        assert!(!numbering.is_empty(), "{name} numbers no rows: {sql}");
+        for select in numbering {
+            let filter = select["where_clause"].to_string();
+            assert!(
+                filter.contains("\"a\"") && filter.contains("\"name\""),
+                "{name} must filter inside the numbering: {sql}"
+            );
         }
     }
 }

@@ -1353,6 +1353,64 @@ def test_deduped_view_sql_orders_by_the_sorts_then_one_position_at_any_width(cli
         assert outer == [3], (width, outer)
 
 
+def numbering_filters(sql):
+    """The WHERE clause, as JSON text, of each SELECT that numbers its rows with `row_number() OVER ()`."""
+    tree = json.loads(duckdb.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()[0])
+    assert tree["error"] is False, tree
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if any(
+                item.get("type") == "WINDOW_ROW_NUMBER" and not item["partitions"] and not item["orders"]
+                for item in node.get("select_list") or []
+            ):
+                found.append(json.dumps(node["where_clause"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(tree)
+    return found
+
+
+def test_deduped_view_sql_numbers_rows_after_the_filters(client):
+    # The position is numbered over the filtered rows, so a filter can prune the scan.
+    node = upload(client, "pruned.csv", b"id,grp,price\n1,a,5\n2,a,6\n3,b,7\n")
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'pruned')['id']}/query"
+    response = client.post(url, json={
+        "filters": [{"column": "id", "operator": ">", "value": 1}],
+        "sorts": [{"column": "price", "direction": "desc"}],
+        "dedupe_columns": ["grp"],
+    })
+    assert response.status_code == 200, response.text
+    filters = numbering_filters(response.json()["sql"])
+    assert filters and all('"id"' in where for where in filters), response.json()["sql"]
+
+
+def test_deduped_aggregate_view_keeps_the_same_rows_on_every_request(client):
+    # The app's aggregate View orders by every group key, so each row's position is stable even
+    # though the GROUP BY runs over threads: every request keeps each group's first row.
+    count = 600_000
+    content = "a,b\n" + "".join(f"{i % 50},{i // 50 % 100 + i % 50}\n" for i in range(count))
+    node = upload(client, "grouped.csv", content.encode())
+    sql = (
+        'SELECT "a", "b", count("a") AS "count" FROM (SELECT * FROM "grouped") AS filtered '
+        'GROUP BY "a", "b" ORDER BY "a", "b"'
+    )
+    url = f"/api/nodes/{node['id']}/sql"
+    expected = [{"a": a, "b": a, "count": count // 5000} for a in range(50)]
+    # The same request three times (live, while its result builds, from the result), then
+    # requests that differ only by an always-true filter.
+    always_true = [[{"column": "count", "operator": ">", "value": -floor}] for floor in (1, 2, 3)]
+    for filters in [[], [], [], *always_true]:
+        response = client.post(url, json={"sql": sql, "dedupe_columns": ["a"], "filters": filters})
+        assert response.status_code == 200, response.text
+        assert response.json()["rows"] == expected, filters
+
+
 def test_deduped_stats_keep_the_rows_the_sorted_page_shows(client):
     # Stats see the rows the page keeps: the sort's first row per group, NULLs last under DESC.
     node = upload(client, "kept.csv", b"group,score\na,1\na,\na,3\nb,2\nb,4\n")
