@@ -684,6 +684,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         workspace["mounted_sources"].add(source_id)
         return source_views
 
+    def query_order(columns: list[tuple[str, str]], request: Query) -> str:
+        column_names = {name for name, _ in columns}
+        orders = [
+            f"{quote(sort.column)} {sort.direction.upper()}"
+            for sort in request.sorts if sort.column in column_names
+        ]
+        if request.dedupe_columns:
+            sorted_columns = {sort.column for sort in request.sorts}
+            orders.extend(f"{quote(name)} ASC" for name, _ in columns if name not in sorted_columns)
+        return " ORDER BY " + ", ".join(orders) if orders else ""
+
     def filtered_relation(
         table: str, columns: list[tuple[str, str]], request: Query, display_table: str | None = None,
     ) -> tuple[str, list[Any], str]:
@@ -735,7 +746,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         display_where = f" WHERE {display_where}" if display_where else ""
         if request.dedupe_columns:
             keys = ", ".join(quote(column) for column in request.dedupe_columns)
-            qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}) = 1"
+            qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}{query_order(columns, request)}) = 1"
             return f"(SELECT * FROM {table}{where}{qualify})", values, f"(SELECT * FROM {display_table}{display_where}{qualify})"
         return f"(SELECT * FROM {table}{where})", values, f"(SELECT * FROM {display_table}{display_where})"
 
@@ -746,9 +757,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         column_names = {name for name, _ in columns}
         if any(sort.column not in column_names for sort in request.sorts):
             raise HTTPException(422, "Invalid sort column")
-        order = " ORDER BY " + ", ".join(
-            f"{quote(sort.column)} {sort.direction.upper()}" for sort in request.sorts
-        ) if request.sorts else ""
+        order = query_order(columns, request)
         return f"SELECT * FROM {source}{order}", values, f"SELECT * FROM {display_source}{order}"
 
     def read_only_sql(con: duckdb.DuckDBPyConnection, sql: str) -> str:
