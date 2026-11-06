@@ -684,6 +684,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         workspace["mounted_sources"].add(source_id)
         return source_views
 
+    def dedupe_position(columns: list[tuple[str, str]]) -> str:
+        names = {name.lower() for name, _ in columns}
+        position = "__quark_position"
+        while position in names:
+            position += "_"
+        return quote(position)
+
     def query_order(columns: list[tuple[str, str]], request: Query) -> str:
         column_names = {name for name, _ in columns}
         orders = [
@@ -691,8 +698,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             for sort in request.sorts if sort.column in column_names
         ]
         if request.dedupe_columns:
-            sorted_columns = {sort.column for sort in request.sorts}
-            orders.extend(f"{quote(name)} ASC" for name, _ in columns if name not in sorted_columns)
+            orders.append(f"{dedupe_position(columns)} ASC")
         return " ORDER BY " + ", ".join(orders) if orders else ""
 
     def filtered_relation(
@@ -745,6 +751,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         where = f" WHERE {where}" if where else ""
         display_where = f" WHERE {display_where}" if display_where else ""
         if request.dedupe_columns:
+            position = dedupe_position(columns)
+            table = f"(SELECT row_number() OVER () AS {position}, * FROM {table})"
+            display_table = f"(SELECT row_number() OVER () AS {position}, * FROM {display_table})"
             keys = ", ".join(quote(column) for column in request.dedupe_columns)
             qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}{query_order(columns, request)}) = 1"
             return f"(SELECT * FROM {table}{where}{qualify})", values, f"(SELECT * FROM {display_table}{display_where}{qualify})"
@@ -758,7 +767,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if any(sort.column not in column_names for sort in request.sorts):
             raise HTTPException(422, "Invalid sort column")
         order = query_order(columns, request)
-        return f"SELECT * FROM {source}{order}", values, f"SELECT * FROM {display_source}{order}"
+        select = f"* EXCLUDE ({dedupe_position(columns)})" if request.dedupe_columns else "*"
+        return f"SELECT {select} FROM {source}{order}", values, f"SELECT {select} FROM {display_source}{order}"
 
     def read_only_sql(con: duckdb.DuckDBPyConnection, sql: str) -> str:
         try:
