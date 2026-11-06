@@ -752,11 +752,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         display_where = f" WHERE {display_where}" if display_where else ""
         if request.dedupe_columns:
             position = dedupe_position(columns)
-            table = f"(SELECT row_number() OVER () AS {position}, * FROM {table})"
-            display_table = f"(SELECT row_number() OVER () AS {position}, * FROM {display_table})"
+            table = f"(SELECT row_number() OVER () AS {position}, * FROM {table}{where})"
+            display_table = f"(SELECT row_number() OVER () AS {position}, * FROM {display_table}{display_where})"
             keys = ", ".join(quote(column) for column in request.dedupe_columns)
             qualify = f" QUALIFY row_number() OVER (PARTITION BY {keys}{query_order(columns, request)}) = 1"
-            return f"(SELECT * FROM {table}{where}{qualify})", values, f"(SELECT * FROM {display_table}{display_where}{qualify})"
+            return f"(SELECT * FROM {table}{qualify})", values, f"(SELECT * FROM {display_table}{qualify})"
         return f"(SELECT * FROM {table}{where})", values, f"(SELECT * FROM {display_table}{display_where})"
 
     def controlled_query(

@@ -209,7 +209,7 @@ pub(crate) fn build_with_rowid(
         );
         let numbered = |source: &str, filters: &str| {
             format!(
-                "(SELECT * FROM (SELECT row_number() OVER () AS {position}, * FROM {source}){filters}{qualify})"
+                "(SELECT * FROM (SELECT row_number() OVER () AS {position}, * FROM {source}{filters}){qualify})"
             )
         };
         let relation = match rowid_table {
