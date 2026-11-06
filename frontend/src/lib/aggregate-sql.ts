@@ -28,6 +28,6 @@ export function buildAggregateSql(
   })), []);
   const select = [...indexes.map(quoteIdentifier), ...metricSelect];
   const groupBy = indexes.length ? ` GROUP BY ${indexes.map(quoteIdentifier).join(', ')}` : '';
-  const orderBy = indexes.length ? ` ORDER BY ${quoteIdentifier(indexes[0])}` : '';
+  const orderBy = indexes.length ? ` ORDER BY ${indexes.map(quoteIdentifier).join(', ')}` : '';
   return `SELECT ${select.join(', ')} FROM (${source}) AS filtered${groupBy}${orderBy}`;
 }
