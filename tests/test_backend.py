@@ -1218,8 +1218,8 @@ def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
     assert response.status_code == 200, response.text
     assert response.json()["rows"] == [
         {"group": "b", "kind": "x", "score": 4, "label": "fourth"},
+        {"group": "a", "kind": "x", "score": 3, "label": "second"},
         {"group": "a", "kind": "y", "score": 2, "label": "third"},
-        {"group": "a", "kind": "x", "score": 1, "label": "first"},
     ]
     assert (response.json()["total_rows"], response.json()["total_pages"]) == (3, 1)
     assert client.post(url, json={"dedupe_columns": ["group", "group"]}).status_code == 422
@@ -1272,6 +1272,53 @@ def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
     amount = client.post(base + "/columns/amount/stats", json=request)
     assert amount.status_code == 200, amount.text
     assert (amount.json()["min"], amount.json()["max"]) == (1, 1)
+
+
+def test_deduped_query_without_sorts_keeps_and_orders_by_every_column(client):
+    # No sort: every column, left to right, ascending, NULLs last, picks each group's row
+    # and orders the result. Each group's expected row is inserted last.
+    node = upload(client, "unsorted.csv", b"group,score,label\nb,2,late\nb,1,early\na,,blank\na,9,z\na,1,y\n")
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'unsorted')['id']}/query"
+    response = client.post(url, json={"dedupe_columns": ["group"], "page_size": 10})
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [
+        {"group": "a", "score": 1, "label": "y"},
+        {"group": "b", "score": 1, "label": "early"},
+    ]
+
+
+def test_deduped_query_breaks_sort_ties_with_the_other_columns_ascending(client):
+    # A tie on the sort falls to the other columns, ascending even under a descending sort,
+    # both for the row a group keeps and for the order of the kept rows.
+    node = upload(client, "tied.csv", b"group,score,label\nb,5,only\na,5,zeta\na,1,low\na,5,alpha\n")
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'tied')['id']}/query"
+    response = client.post(url, json={
+        "dedupe_columns": ["group"],
+        "sorts": [{"column": "score", "direction": "desc"}],
+        "page_size": 10,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [
+        {"group": "a", "score": 5, "label": "alpha"},
+        {"group": "b", "score": 5, "label": "only"},
+    ]
+
+
+def test_deduped_stats_keep_the_rows_the_sorted_page_shows(client):
+    # Stats see the rows the page keeps: the sort's first row per group, NULLs last under DESC.
+    node = upload(client, "kept.csv", b"group,score\na,1\na,\na,3\nb,2\nb,4\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'kept')['id']}"
+    request = {"dedupe_columns": ["group"], "sorts": [{"column": "score", "direction": "desc"}]}
+
+    page = client.post(base + "/query", json={**request, "page_size": 10})
+    assert page.status_code == 200, page.text
+    assert page.json()["rows"] == [{"group": "b", "score": 4}, {"group": "a", "score": 3}]
+    assert page.json()["total_rows"] == 2
+
+    stats = client.post(base + "/columns/score/stats", json=request)
+    assert stats.status_code == 200, stats.text
+    body = stats.json()
+    assert (body["row_count"], body["null_count"], body["min"], body["max"]) == (2, 0, 3, 4)
 
 
 def test_stats_invalid_filter_value_returns_422(tmp_path):
