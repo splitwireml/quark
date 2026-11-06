@@ -8,7 +8,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use serde_json::{Map, Value};
 
 use super::model::{Format, PageBody, PageMeta};
-use super::queries::{compute_stats, fetch_page};
+use super::queries::{compute_stats, fetch_page, source_stats};
 use crate::error::{ApiError, ApiResult};
 use crate::relation::builder::build_with_rowid;
 use crate::relation::request::QueryRequest;
@@ -125,8 +125,8 @@ pub fn run_page(
                             .counters
                             .count_queries
                             .fetch_add(1, Ordering::Relaxed);
-                        let stats = compute_stats(conn, table, &resolved.columns, &[], None)
-                            .map_err(unprocessable)?;
+                        let stats =
+                            source_stats(conn, table, &resolved.columns).map_err(unprocessable)?;
                         engine.stats().insert(source_key, stats.clone());
                         stats
                     }

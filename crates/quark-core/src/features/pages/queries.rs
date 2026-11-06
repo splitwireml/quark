@@ -19,6 +19,39 @@ pub(super) struct Fetched {
     pub(super) batches: Vec<RecordBatch>,
 }
 
+/// Counts can use storage metadata when a cache column has no nulls.
+pub(super) fn source_stats(
+    conn: &Connection,
+    table: &str,
+    columns: &[ColumnMeta],
+) -> duckdb::Result<StatsEntry> {
+    let counts = std::iter::once("count(*)".to_owned())
+        .chain(
+            columns
+                .iter()
+                .map(|meta| format!("count({})", quote_ident(&meta.name))),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.query_row(&format!("SELECT {counts} FROM {table}"), [], |row| {
+        let total_rows: u64 = row.get(0)?;
+        let fractions = (0..columns.len())
+            .map(|index| {
+                let present: u64 = row.get(index + 1)?;
+                Ok(if total_rows == 0 {
+                    0.0
+                } else {
+                    (total_rows - present) as f64 / total_rows as f64
+                })
+            })
+            .collect::<duckdb::Result<Vec<_>>>()?;
+        Ok(StatsEntry {
+            columns: summaries(columns, fractions),
+            total_rows,
+        })
+    })
+}
+
 /// Counts the relation's rows and measures each column's null fraction.
 pub(super) fn compute_stats(
     conn: &Connection,
@@ -52,7 +85,7 @@ pub(super) fn compute_stats(
             .iter()
             .map(|(_, meta)| {
                 format!(
-                    "(count(*) - count({}))::DOUBLE / nullif(count(*), 0)",
+                    "avg(CASE WHEN {} IS NULL THEN 1.0 ELSE 0.0 END)",
                     quote_ident(&meta.name)
                 )
             })
@@ -71,7 +104,14 @@ pub(super) fn compute_stats(
         }
     }
 
-    let columns = columns
+    Ok(StatsEntry {
+        columns: summaries(columns, null_fractions),
+        total_rows,
+    })
+}
+
+fn summaries(columns: &[ColumnMeta], null_fractions: Vec<f64>) -> Vec<ColumnSummary> {
+    columns
         .iter()
         .zip(null_fractions)
         .map(|(meta, null_fraction)| ColumnSummary {
@@ -81,11 +121,7 @@ pub(super) fn compute_stats(
             profile_kind: profile_kind(&meta.type_name),
             null_fraction,
         })
-        .collect();
-    Ok(StatsEntry {
-        columns,
-        total_rows,
-    })
+        .collect()
 }
 
 pub(super) fn fetch_page(
