@@ -1,9 +1,21 @@
-//! The datasets a source holds: the tables and views of a database, or the sheets of a workbook.
+//! Dataset metadata: table and sheet listings, and the physical cache behind a flat-file view.
 
 use duckdb::{Connection, params};
 
 use crate::relation::describe::DatasetInfo;
 use crate::shared::ids::dataset_id;
+use crate::shared::sql::sql_string;
+
+/// Records a flat-file view's physical cache table without exposing its row id as a column.
+pub(crate) fn mark_cache_view(conn: &Connection, target: &str, origin: &str) -> duckdb::Result<()> {
+    if origin.starts_with("\"cache_") && origin.ends_with("\".main.data") {
+        conn.execute_batch(&format!(
+            "COMMENT ON VIEW {target} IS {}",
+            sql_string(&format!("quark:columnar:{origin}"))
+        ))?;
+    }
+    Ok(())
+}
 
 /// Tables and views of the database attached as `alias`, ordered by schema then name.
 pub(super) fn attached_datasets(

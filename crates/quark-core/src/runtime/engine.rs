@@ -15,7 +15,7 @@ use super::cache::results::ResultCache;
 use super::cache::stats::StatsCache;
 use super::dirs::{Dirs, configure_spill, lock_down_dirs};
 use super::mount::workbook::open_node as workbook_node;
-use super::mount::{ViewInfo, attach_cache, import_job};
+use super::mount::{ViewInfo, attach_cache, import_job, mark_cache_view};
 use super::pool::{ReaderPool, reader_count};
 use super::registry::SourceRecord;
 use crate::shared::sql::{quote_ident, scan_expression};
@@ -144,6 +144,7 @@ impl Engine {
                 };
                 conn.execute_batch(&format!("CREATE VIEW {name} AS SELECT * FROM {origin}"))
                     .context("could not read source")?;
+                mark_cache_view(&conn, &name, &origin).context("could not mark cached source")?;
                 let parent = source.source.parent().unwrap_or(&source.source);
                 lock_down_dirs(&conn, &[parent.to_string_lossy().into_owned()])?;
                 conn

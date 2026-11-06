@@ -128,6 +128,16 @@ pub fn build_query(
     columns: &[ColumnMeta],
     request: &QueryRequest,
 ) -> ApiResult<BuiltQuery> {
+    build_with_rowid(table, display_table, columns, request, None)
+}
+
+pub(crate) fn build_with_rowid(
+    table: &str,
+    display_table: &str,
+    columns: &[ColumnMeta],
+    request: &QueryRequest,
+    rowid_table: Option<&str>,
+) -> ApiResult<BuiltQuery> {
     let mut params = Vec::new();
     let mut folded: Option<(String, String)> = None;
     for filter in &request.filters {
@@ -167,43 +177,63 @@ pub fn build_query(
         orders.push(format!("{} {direction}", quote_ident(&sort.column)));
     }
 
-    let qualify = if request.dedupe_columns.is_empty() {
-        String::new()
+    let (where_sql, where_shown) = match folded {
+        Some((sql, shown)) => (format!(" WHERE {sql}"), format!(" WHERE {shown}")),
+        None => (String::new(), String::new()),
+    };
+    let (relation, display_relation, select) = if request.dedupe_columns.is_empty() {
+        (
+            format!("(SELECT * FROM {table}{where_sql})"),
+            format!("(SELECT * FROM {display_table}{where_shown})"),
+            "*".to_owned(),
+        )
     } else {
+        let mut position = "__quark_position".to_owned();
+        while columns
+            .iter()
+            .any(|meta| meta.name.eq_ignore_ascii_case(&position))
+        {
+            position.push('_');
+        }
+        let position = quote_ident(&position);
+        orders.push(format!("{position} ASC"));
         let keys: Vec<String> = request
             .dedupe_columns
             .iter()
             .map(|key| quote_ident(key))
             .collect();
-        // Each group keeps the row the View's sort puts first and every other column breaks
-        // ties, both when choosing the row and when ordering the result, so a page, an export
-        // and a find all see the same rows in the same order. The tie-break stays off plain
-        // sorts: on 2M rows it costs several times the sort itself.
-        let ties = columns
-            .iter()
-            .filter(|meta| !request.sorts.iter().any(|sort| sort.column == meta.name))
-            .map(|meta| format!("{} ASC", quote_ident(&meta.name)));
-        orders.extend(ties);
-        format!(
+        let qualify = format!(
             " QUALIFY row_number() OVER (PARTITION BY {} ORDER BY {}) = 1",
             keys.join(", "),
             orders.join(", ")
+        );
+        let numbered = |source: &str, filters: &str| {
+            format!(
+                "(SELECT * FROM (SELECT row_number() OVER () AS {position}, * FROM {source}){filters}{qualify})"
+            )
+        };
+        let relation = match rowid_table {
+            // Window only the keys and sorts; fetch the payload after picking each group's row.
+            Some(cache) => format!(
+                "(SELECT rowid AS {position}, * FROM {cache} WHERE rowid IN \
+                 (SELECT rowid AS {position} FROM {cache}{where_sql}{qualify}))"
+            ),
+            None => numbered(table, &where_sql),
+        };
+        (
+            relation,
+            numbered(display_table, &where_shown),
+            format!("* EXCLUDE ({position})"),
         )
     };
-    let (where_sql, where_shown) = match folded {
-        Some((sql, shown)) => (format!(" WHERE {sql}"), format!(" WHERE {shown}")),
-        None => (String::new(), String::new()),
-    };
-    let relation = format!("(SELECT * FROM {table}{where_sql}{qualify})");
-    let display_relation = format!("(SELECT * FROM {display_table}{where_shown}{qualify})");
     let order = if orders.is_empty() {
         String::new()
     } else {
         format!(" ORDER BY {}", orders.join(", "))
     };
     Ok(BuiltQuery {
-        ordered: format!("SELECT * FROM {relation}{order}"),
-        display: format!("SELECT * FROM {display_relation}{order}"),
+        ordered: format!("SELECT {select} FROM {relation}{order}"),
+        display: format!("SELECT {select} FROM {display_relation}{order}"),
         relation,
         params,
     })

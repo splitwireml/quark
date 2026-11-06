@@ -20,6 +20,8 @@ pub(crate) struct Resolved {
     pub(crate) table: String,
     pub(crate) display_table: String,
     pub(crate) columns: Vec<ColumnMeta>,
+    /// Physical flat-file cache table, only resolved for dedupe requests.
+    pub(crate) rowid_table: Option<String>,
     /// Parameters for placeholders inside `table`, bound before the filters'.
     pub(crate) lead: Vec<Value>,
     /// The `sql` to report when the request adds no filters, sorts or dedupe.
@@ -42,6 +44,14 @@ pub(crate) fn describe_error(error: duckdb::Error) -> ApiError {
 }
 
 pub(crate) fn resolve(conn: &Connection, target: &Target) -> ApiResult<Resolved> {
+    resolve_query(conn, target, false)
+}
+
+pub(crate) fn resolve_query(
+    conn: &Connection,
+    target: &Target,
+    dedupe: bool,
+) -> ApiResult<Resolved> {
     match target {
         Target::Dataset(id) => {
             let item = datasets(conn)
@@ -51,10 +61,22 @@ pub(crate) fn resolve(conn: &Connection, target: &Target) -> ApiResult<Resolved>
                 .ok_or_else(|| ApiError::not_found("Dataset not found"))?;
             let table = format!("{}.{}", quote_ident(&item.schema), quote_ident(&item.name));
             let columns = describe(conn, &table, &[]).map_err(internal)?;
+            // A real column named rowid shadows DuckDB's physical row id.
+            let rowid_table = if dedupe
+                && item.kind == "VIEW"
+                && !columns
+                    .iter()
+                    .any(|meta| meta.name.eq_ignore_ascii_case("rowid"))
+            {
+                cache_table(conn, &item.schema, &item.name)?
+            } else {
+                None
+            };
             Ok(Resolved {
                 display_table: table.clone(),
                 table,
                 columns,
+                rowid_table,
                 lead: Vec::new(),
                 plain_sql: None,
                 error_prefix: "Invalid filter value: ",
@@ -67,12 +89,31 @@ pub(crate) fn resolve(conn: &Connection, target: &Target) -> ApiResult<Resolved>
                 table: "query(?)".to_owned(),
                 display_table: format!("({sql})"),
                 columns,
+                rowid_table: None,
                 lead: vec![Value::String(sql.clone())],
                 plain_sql: Some(sql),
                 error_prefix: "Invalid SQL query: ",
             })
         }
     }
+}
+
+fn cache_table(conn: &Connection, schema: &str, name: &str) -> ApiResult<Option<String>> {
+    let comment: Option<String> = conn
+        .query_row(
+            "SELECT max(comment) FROM duckdb_views() WHERE database_name = current_database() \
+         AND schema_name = ? AND view_name = ?",
+            [schema, name],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    Ok(comment.and_then(|comment| {
+        let hash = comment
+            .strip_prefix("quark:columnar:\"cache_")?
+            .strip_suffix("\".main.data")?;
+        (hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| format!("\"cache_{hash}\".main.data"))
+    }))
 }
 
 #[cfg(test)]

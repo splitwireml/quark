@@ -10,9 +10,9 @@ use serde_json::{Map, Value};
 use super::model::{Format, PageBody, PageMeta};
 use super::queries::{compute_stats, fetch_page};
 use crate::error::{ApiError, ApiResult};
-use crate::relation::builder::build_query;
+use crate::relation::builder::build_with_rowid;
 use crate::relation::request::QueryRequest;
-use crate::relation::target::{Target, resolve};
+use crate::relation::target::{Target, resolve_query};
 use crate::runtime::cache::results::{RESULTS_SCHEMA, ResultAction, drop_statement, is_plain_scan};
 use crate::runtime::cache::stats::stats_key;
 use crate::runtime::engine::Engine;
@@ -51,12 +51,13 @@ pub fn run_page(
 ) -> ApiResult<PageBody> {
     let started = Instant::now();
     request.validate()?;
-    let resolved = resolve(conn, target)?;
-    let built = build_query(
+    let resolved = resolve_query(conn, target, !request.dedupe_columns.is_empty())?;
+    let built = build_with_rowid(
         &resolved.table,
         &resolved.display_table,
         &resolved.columns,
         request,
+        resolved.rowid_table.as_deref(),
     )?;
     let unprocessable =
         |error: duckdb::Error| ApiError::unprocessable(format!("{}{error}", resolved.error_prefix));

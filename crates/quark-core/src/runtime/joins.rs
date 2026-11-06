@@ -16,7 +16,9 @@ use crate::runtime::cache::responses::source_files;
 use crate::runtime::dirs::{configure_spill, lock_down_paths};
 use crate::runtime::engine::{Engine, EngineKind};
 use crate::runtime::mount::workbook::{attach_sheet, is_workbook};
-use crate::runtime::mount::{attach_cache, database_paths, import_job, is_database};
+use crate::runtime::mount::{
+    attach_cache, database_paths, import_job, is_database, mark_cache_view,
+};
 use crate::runtime::registry::SourceRecord;
 use crate::runtime::state::{AppState, cannot_open, invalid_value};
 use crate::shared::sql::{quote_ident, scan_expression, sql_string};
@@ -159,6 +161,9 @@ fn mount_side(
         quote_ident(schema)
     ))
     .map_err(invalid_value)?;
+    if !is_database(&source.source) && !is_workbook(&source.source) {
+        mark_cache_view(conn, &target, &origin).map_err(invalid_value)?;
+    }
     Ok(mounted)
 }
 

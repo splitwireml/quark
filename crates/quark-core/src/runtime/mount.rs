@@ -9,6 +9,7 @@ use duckdb::Connection;
 use serde::Serialize;
 
 use self::datasets::attached_datasets;
+pub(crate) use self::datasets::mark_cache_view;
 use self::workbook::is_workbook;
 use crate::relation::describe::{DatasetInfo, describe};
 use crate::runtime::cache::columnar_key::{ColumnarJob, ColumnarKey};
@@ -219,6 +220,9 @@ fn mount_dataset(
     let target = format!("{schema}.{}", quote_ident(&item.name));
     conn.execute_batch(&format!("CREATE SCHEMA {schema}"))?;
     conn.execute_batch(&format!("CREATE VIEW {target} AS SELECT * FROM {origin}"))?;
+    if !is_database(&source.source) && !is_workbook(&source.source) {
+        mark_cache_view(conn, &target, origin)?;
+    }
     let columns = describe(conn, &target, &[])?
         .into_iter()
         .map(|column| column.name)
