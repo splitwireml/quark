@@ -57,6 +57,7 @@ pub fn desktop_origins(debug: bool) -> Vec<HeaderValue> {
 
 /// True when `url` stays on one of the desktop origins; the webview may navigate there.
 pub fn is_app_origin(url: &str, debug: bool) -> bool {
+    let url = url.strip_prefix("blob:").unwrap_or(url);
     let after_scheme = url.find("://").map_or(0, |at| at + 3);
     let end = url[after_scheme..]
         .find(['/', '?', '#'])
