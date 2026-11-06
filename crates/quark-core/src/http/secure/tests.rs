@@ -131,6 +131,41 @@ fn navigation_stays_on_app_origin() {
     assert!(is_app_origin("http://localhost:5173/index.html?a=b", true));
 }
 
+const BLOB_ID: &str = "0b6e4c7a-3f1d-4a5e-9c2b-8d7f6e5a4b3c";
+
+#[test]
+fn navigation_allows_the_apps_own_blob_downloads() {
+    for (origin, debug) in [
+        ("tauri://localhost", false),
+        ("http://tauri.localhost", false),
+        ("tauri://localhost", true),
+        ("http://tauri.localhost", true),
+        ("http://localhost:5173", true),
+    ] {
+        let url = format!("blob:{origin}/{BLOB_ID}");
+        assert!(is_app_origin(&url, debug), "{url} debug={debug}");
+    }
+}
+
+#[test]
+fn navigation_rejects_blobs_from_other_origins() {
+    for debug in [false, true] {
+        for url in [
+            format!("blob:https://evil.example/{BLOB_ID}"),
+            format!("blob:http://127.0.0.1:1234/{BLOB_ID}"),
+            format!("blob:null/{BLOB_ID}"),
+            format!("blob:blob:tauri://localhost/{BLOB_ID}"),
+            format!("blob:tauri://localhost.evil.example/{BLOB_ID}"),
+            format!("blob:tauri://localhost:1/{BLOB_ID}"),
+            "blob:".to_owned(),
+        ] {
+            assert!(!is_app_origin(&url, debug), "{url} debug={debug}");
+        }
+    }
+    let dev = format!("blob:http://localhost:5173/{BLOB_ID}");
+    assert!(!is_app_origin(&dev, false), "{dev} debug=false");
+}
+
 #[tokio::test]
 async fn foreign_origin_gets_no_cors_headers() {
     let request = get_request(
