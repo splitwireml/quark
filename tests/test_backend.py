@@ -1274,34 +1274,83 @@ def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
     assert (amount.json()["min"], amount.json()["max"]) == (1, 1)
 
 
-def test_deduped_query_without_sorts_keeps_and_orders_by_every_column(client):
-    # No sort: every column, left to right, ascending, NULLs last, picks each group's row
-    # and orders the result. Each group's expected row is inserted last.
-    node = upload(client, "unsorted.csv", b"group,score,label\nb,2,late\nb,1,early\na,,blank\na,9,z\na,1,y\n")
+def test_deduped_query_without_sorts_keeps_each_groups_first_row_in_source_order(client):
+    # No sort: each group keeps its first row and the kept rows stay in source order. 200,000 rows
+    # spread the work over threads, so keeping any row of a group cannot pass by luck, and `id`
+    # counts down, so ordering by the columns would keep each group's last row instead.
+    count = 200_000
+    content = "group,id,label\n" + "".join(f"{i * 3 % 7},{count - i},row{i}\n" for i in range(count))
+    node = upload(client, "unsorted.csv", content.encode())
     url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'unsorted')['id']}/query"
     response = client.post(url, json={"dedupe_columns": ["group"], "page_size": 10})
     assert response.status_code == 200, response.text
     assert response.json()["rows"] == [
-        {"group": "a", "score": 1, "label": "y"},
-        {"group": "b", "score": 1, "label": "early"},
+        {"group": i * 3 % 7, "id": count - i, "label": f"row{i}"} for i in range(7)
     ]
 
 
-def test_deduped_query_breaks_sort_ties_with_the_other_columns_ascending(client):
-    # A tie on the sort falls to the other columns, ascending even under a descending sort,
-    # both for the row a group keeps and for the order of the kept rows.
-    node = upload(client, "tied.csv", b"group,score,label\nb,5,only\na,5,zeta\na,1,low\na,5,alpha\n")
-    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'tied')['id']}/query"
-    response = client.post(url, json={
-        "dedupe_columns": ["group"],
-        "sorts": [{"column": "score", "direction": "desc"}],
-        "page_size": 10,
-    })
+def test_deduped_query_breaks_sort_ties_by_source_position(client):
+    # A tie on the sort falls to the row's position in its source, first row first, for the row a
+    # group keeps, the order of the kept rows and the stats over them. Each group has about 2,857
+    # rows on the top score; `id` counts down, so a tie-break on the columns would keep the last.
+    count = 200_000
+    content = "group,score,id,label\n" + "".join(
+        f"{i * 3 % 7},{i // 7 % 10},{count - i},row{i}\n" for i in range(count)
+    )
+    node = upload(client, "tied.csv", content.encode())
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'tied')['id']}"
+    request = {"dedupe_columns": ["group"], "sorts": [{"column": "score", "direction": "desc"}]}
+
+    response = client.post(base + "/query", json={**request, "page_size": 10})
     assert response.status_code == 200, response.text
+    # Rows 63 to 69 are the first to score 9, one per group.
     assert response.json()["rows"] == [
-        {"group": "a", "score": 5, "label": "alpha"},
-        {"group": "b", "score": 5, "label": "only"},
+        {"group": i * 3 % 7, "score": 9, "id": count - i, "label": f"row{i}"} for i in range(63, 70)
     ]
+
+    stats = client.post(base + "/columns/id/stats", json=request)
+    assert stats.status_code == 200, stats.text
+    body = stats.json()
+    assert (body["row_count"], body["min"], body["max"]) == (7, count - 69, count - 63)
+
+
+def order_terms(sql):
+    """How many terms each dedupe window (one with a PARTITION BY) and the statement order by."""
+    tree = json.loads(duckdb.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()[0])
+    assert tree["error"] is False, tree
+    windows = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("class") == "WINDOW" and node.get("partitions"):
+                windows.append(len(node["orders"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(tree)
+    modifiers = tree["statements"][0]["node"]["modifiers"]
+    return windows, [len(item["orders"]) for item in modifiers if item["type"] == "ORDER_MODIFIER"]
+
+
+def test_deduped_view_sql_orders_by_the_sorts_then_one_position_at_any_width(client):
+    # A deduped View's SQL orders its window and its rows by the two sorts and one position term,
+    # however many columns the View has, so its cost does not grow with the View's width.
+    for width in (3, 60):
+        header = ",".join(f"c{index}" for index in range(width))
+        row = ",".join(str(index) for index in range(width))
+        node = upload(client, f"wide{width}.csv", f"{header}\n{row}\n{row}\n".encode())
+        url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, f'wide{width}')['id']}/query"
+        response = client.post(url, json={
+            "dedupe_columns": ["c0"],
+            "sorts": [{"column": "c1", "direction": "desc"}, {"column": "c2", "direction": "asc"}],
+        })
+        assert response.status_code == 200, response.text
+        windows, outer = order_terms(response.json()["sql"])
+        assert windows and set(windows) == {3}, (width, windows)
+        assert outer == [3], (width, outer)
 
 
 def test_deduped_stats_keep_the_rows_the_sorted_page_shows(client):

@@ -91,7 +91,8 @@ fn duplicate_dedupe_key_is_422() {
 fn dedupe_keeps_the_row_the_sort_puts_first_every_time() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
-        "CREATE TABLE t AS SELECT i AS id, i % 7 AS grp, (i * 7919) % 1000 AS price FROM range(200000) r(i)",
+        // `id` counts down, so the first row of a tie has the highest id.
+        "CREATE TABLE t AS SELECT 199999 - i AS id, i % 7 AS grp, (i * 7919) % 1000 AS price FROM range(200000) r(i)",
     )
     .unwrap();
     let request = QueryRequest {
@@ -113,10 +114,10 @@ fn dedupe_keeps_the_row_the_sort_puts_first_every_time() {
             .collect()
     };
 
-    // Per group: the highest price, then the lowest id among rows sharing it.
+    // Per group: the highest price, then the first of the rows sharing it.
     let mut statement = conn
         .prepare(
-            "SELECT grp, min(id) FROM t WHERE (grp, price) IN \
+            "SELECT grp, max(id) FROM t WHERE (grp, price) IN \
              (SELECT (grp, max(price)) FROM t GROUP BY grp) GROUP BY grp ORDER BY grp",
         )
         .unwrap();
@@ -134,9 +135,10 @@ fn dedupe_keeps_the_row_the_sort_puts_first_every_time() {
 #[test]
 fn deduped_view_orders_tied_sort_keys_the_same_way_every_time() {
     let conn = Connection::open_in_memory().unwrap();
-    // Every group's lowest price is 0, so the View's sort alone leaves the groups tied.
+    // Every group's lowest price is 0, so the View's sort alone leaves the groups tied. `id` counts
+    // down, so ordering ties by any column instead of by position would turn the order around.
     conn.execute_batch(
-        "CREATE TABLE t AS SELECT i AS id, i % 40 AS grp, (i // 40) % 1000 AS price FROM range(200000) r(i)",
+        "CREATE TABLE t AS SELECT 199999 - i AS id, i % 40 AS grp, (i // 40) % 1000 AS price FROM range(200000) r(i)",
     )
     .unwrap();
     let columns = crate::relation::describe::describe(&conn, "t", &[]).unwrap();
@@ -159,12 +161,19 @@ fn deduped_view_orders_tied_sort_keys_the_same_way_every_time() {
             .collect()
     };
 
-    let first = ids();
-    let mut sorted = first.clone();
-    sorted.sort_unstable();
-    assert_eq!(first.len(), 40);
-    assert_eq!(first, sorted, "tied prices fall back to id order");
+    // Each group keeps its first row (rows 0 to 39), and the tied groups keep their source order.
+    let expected: Vec<i64> = (0..40).map(|row| 199_999 - row).collect();
     for _ in 0..5 {
-        assert_eq!(ids(), first);
+        assert_eq!(ids(), expected, "tied prices fall back to source order");
+    }
+    // Pages, result tables and exports read every column of these, so the position stays hidden.
+    for sql in [&built.ordered, &built.display] {
+        let mut statement = conn.prepare(&format!("DESCRIBE {sql}")).unwrap();
+        let names: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(names, ["id", "grp", "price"], "{sql}");
     }
 }

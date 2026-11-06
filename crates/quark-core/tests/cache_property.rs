@@ -101,8 +101,9 @@ impl Case {
     }
 }
 
-/// 8 filter sets (0 to 3 filters, with `or`, `in`, `between` and `contains`) times 4 sort and
-/// dedupe shapes (every sort list ends with `id`), so 32 cases.
+/// 8 filter sets (0 to 3 filters, with `or`, `in`, `between` and `contains`) times 5 sort and
+/// dedupe shapes, so 40 cases. Every plain sort list ends with `id`, so its order is total; the last
+/// shape leaves `n` ties inside each category to the row's position in the CSV.
 fn cases() -> Vec<Case> {
     use Connector::{And, Or};
     let any_of = |connector| filter("cat", "in", json!(["alpha", "gamma"]), connector);
@@ -137,6 +138,11 @@ fn cases() -> Vec<Case> {
             "deduped on n, by n then id",
             vec![sort("n", Direction::Desc), sort("id", Direction::Asc)],
             vec!["n".to_owned()],
+        ),
+        (
+            "deduped on cat, by n",
+            vec![sort("n", Direction::Desc)],
+            vec!["cat".to_owned()],
         ),
     ];
     let mut cases = Vec::new();
@@ -239,22 +245,6 @@ impl Oracle {
     }
 }
 
-/// DuckDB keeps an arbitrary row of each dedupe group, so a deduped page is compared on its key
-/// columns only; every other page is compared whole.
-fn comparable(case: &Case, rows: Vec<Value>) -> Vec<Value> {
-    if case.dedupe.is_empty() {
-        return rows;
-    }
-    let keys = |row: Value| {
-        let kept = case
-            .dedupe
-            .iter()
-            .map(|key| (key.clone(), row[key].clone()));
-        Value::Object(kept.collect())
-    };
-    rows.into_iter().map(keys).collect()
-}
-
 /// The first page, a middle one, the last, and one past the end.
 fn pages(oracle: &Oracle, case: &Case) -> Vec<i64> {
     let total = oracle.expect(&case.request(1)).total_rows;
@@ -280,9 +270,10 @@ fn assert_matches(engine: &Engine, case: &Case, page: i64, expected: &Expected, 
     };
     let context = format!("{} / page {page} / {phase}", case.name);
     assert_eq!(body["total_rows"], expected.total_rows, "{context}");
-    let rows = body["rows"].as_array().unwrap().clone();
-    assert!(
-        comparable(case, rows) == comparable(case, expected.rows.clone()),
+    // A dedupe keeps a fixed row of each group, so every page is compared whole.
+    assert_eq!(
+        body["rows"].as_array().unwrap(),
+        &expected.rows,
         "{context}"
     );
 }

@@ -121,18 +121,11 @@ fn builder_in_between_dedupe_sorts() {
         ..QueryRequest::default()
     };
     let query = built(&request);
-    let keep = "\"price\" ASC, \"name\" DESC, \"a\" ASC, \"b\" ASC, \"c\" ASC";
-    let qualify =
-        format!(" QUALIFY row_number() OVER (PARTITION BY \"name\", \"a\" ORDER BY {keep}) = 1");
-    let order = format!(" ORDER BY {keep}");
-    assert_eq!(
-        query.relation,
-        format!(
-            "(SELECT * FROM \"main\".\"x\" WHERE (((((\"a\" IN (?, ?, ?) AND \"price\" BETWEEN ? AND ?) \
-             AND \"b\" IS NULL) AND \"c\" IS NOT NULL) AND starts_with(\"name\", ?)) \
-             AND ends_with(\"name\", ?)){qualify})"
-        )
-    );
+    // The dedupe and its order are pinned by `deduped_sql_orders_by_the_sorts_then_one_position`.
+    assert!(query.relation.contains(
+        "(((((\"a\" IN (?, ?, ?) AND \"price\" BETWEEN ? AND ?) AND \"b\" IS NULL) \
+         AND \"c\" IS NOT NULL) AND starts_with(\"name\", ?)) AND ends_with(\"name\", ?))"
+    ));
     assert_eq!(
         query.params,
         [
@@ -145,18 +138,136 @@ fn builder_in_between_dedupe_sorts() {
             json!("2.5")
         ]
     );
-    assert_eq!(
-        query.display,
-        format!(
-            "SELECT * FROM (SELECT * FROM \"shown\" WHERE (((((\"a\" IN (1, 2, 3) AND \"price\" BETWEEN 1.5 AND 'z') \
-             AND \"b\" IS NULL) AND \"c\" IS NOT NULL) AND starts_with(\"name\", 'True')) \
-             AND ends_with(\"name\", '2.5')){qualify}){order}"
-        )
-    );
-    assert_eq!(
-        query.ordered,
-        format!("SELECT * FROM {}{order}", query.relation)
-    );
+    assert!(query.display.contains(
+        "(((((\"a\" IN (1, 2, 3) AND \"price\" BETWEEN 1.5 AND 'z') AND \"b\" IS NULL) \
+         AND \"c\" IS NOT NULL) AND starts_with(\"name\", 'True')) AND ends_with(\"name\", '2.5'))"
+    ));
+    assert!(!query.display.contains('?'));
+}
+
+/// One `ORDER BY` term: its column (empty for any other expression) and whether it descends.
+type Term = (String, bool);
+
+/// The terms of every `ORDER BY` inside a dedupe window (one with a `PARTITION BY`) in `sql`, and
+/// of the statement's own `ORDER BY`.
+fn order_terms(sql: &str) -> (Vec<Vec<Term>>, Vec<Term>) {
+    fn terms(orders: &Value) -> Vec<Term> {
+        orders
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|order| {
+                let expression = &order["expression"];
+                let column = match expression["class"].as_str() {
+                    Some("COLUMN_REF") => expression["column_names"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    _ => String::new(),
+                };
+                (column, order["type"] == "DESCENDING")
+            })
+            .collect()
+    }
+    fn windows(node: &Value, found: &mut Vec<Vec<Term>>) {
+        match node {
+            Value::Object(map) => {
+                let is_dedupe = map.get("class").is_some_and(|class| class == "WINDOW")
+                    && map["partitions"]
+                        .as_array()
+                        .is_some_and(|keys| !keys.is_empty());
+                if is_dedupe {
+                    found.push(terms(&map["orders"]));
+                }
+                map.values().for_each(|value| windows(value, found));
+            }
+            Value::Array(items) => items.iter().for_each(|value| windows(value, found)),
+            _ => {}
+        }
+    }
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let text: String = conn
+        .query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let tree: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(tree["error"], false, "{sql}: {tree}");
+    let mut found = Vec::new();
+    windows(&tree, &mut found);
+    let statement = &tree["statements"][0]["node"];
+    let outer = statement["modifiers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|modifier| modifier["type"] == "ORDER_MODIFIER")
+        .map_or_else(Vec::new, |modifier| terms(&modifier["orders"]));
+    (found, outer)
+}
+
+#[test]
+fn deduped_sql_orders_by_the_sorts_then_one_position() {
+    // The View's sorts, then one position term that is none of the View's columns: the same
+    // number of terms whatever the View's width, so the cost does not grow with it.
+    for width in [3, 60] {
+        let columns: Vec<ColumnMeta> = (0..width)
+            .map(|index| ColumnMeta {
+                name: format!("c{index}"),
+                type_name: if index % 2 == 0 { "VARCHAR" } else { "BIGINT" }.to_owned(),
+            })
+            .collect();
+        let request = QueryRequest {
+            sorts: vec![
+                Sort {
+                    column: "c1".to_owned(),
+                    direction: Direction::Desc,
+                },
+                Sort {
+                    column: "c2".to_owned(),
+                    direction: Direction::Asc,
+                },
+            ],
+            dedupe_columns: vec!["c0".to_owned()],
+            ..QueryRequest::default()
+        };
+        let query = build_query("\"main\".\"x\"", "\"shown\"", &columns, &request).unwrap();
+        let sorts = [("c1".to_owned(), true), ("c2".to_owned(), false)];
+        let is_view_column = |name: &str| columns.iter().any(|meta| meta.name == name);
+        let check = |terms: &[Term], what: &str| {
+            assert_eq!(terms.len(), 3, "{width} columns, {what}: {terms:?}");
+            assert_eq!(terms[..2], sorts, "{width} columns, {what}");
+            assert!(
+                !is_view_column(&terms[2].0),
+                "{width} columns, {what}: {terms:?}"
+            );
+        };
+        for (sql, name) in [
+            (&query.relation, "relation"),
+            (&query.ordered, "ordered"),
+            (&query.display, "display"),
+        ] {
+            let sql = if name == "relation" {
+                format!("SELECT * FROM {sql}")
+            } else {
+                sql.clone()
+            };
+            let (windows, outer) = order_terms(&sql);
+            assert!(
+                !windows.is_empty(),
+                "{width} columns, {name}: no dedupe window"
+            );
+            for window in &windows {
+                check(window, &format!("{name} window"));
+            }
+            if name != "relation" {
+                check(&outer, &format!("{name} ORDER BY"));
+            }
+        }
+    }
 }
 
 #[test]
