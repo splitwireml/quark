@@ -39,10 +39,6 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
 
-    pub fn not_implemented(detail: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_IMPLEMENTED, detail)
-    }
-
     pub fn unauthorized(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, detail)
     }
@@ -74,39 +70,4 @@ impl IntoResponse for ApiError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::future::Future;
-    use std::task::{Context, Poll, Waker};
-
-    /// Body reads on an in-memory body are immediately ready, so one poll suffices.
-    fn body_bytes(response: Response) -> Vec<u8> {
-        let mut future = std::pin::pin!(axum::body::to_bytes(response.into_body(), usize::MAX));
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(bytes) => bytes.unwrap().to_vec(),
-            Poll::Pending => panic!("in-memory body was not ready"),
-        }
-    }
-
-    #[test]
-    fn renders_status_and_detail_json() {
-        let response = ApiError::not_found("Project not found").into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body: serde_json::Value = serde_json::from_slice(&body_bytes(response)).unwrap();
-        assert_eq!(body, serde_json::json!({"detail": "Project not found"}));
-    }
-
-    #[test]
-    fn not_implemented_is_501() {
-        let error = ApiError::not_implemented("Not in the desktop build yet");
-        assert_eq!(error.status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(error.detail(), "Not in the desktop build yet");
-        assert_eq!(
-            error.to_string(),
-            "501 Not Implemented: Not in the desktop build yet"
-        );
-    }
-}
+mod tests;

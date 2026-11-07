@@ -9,14 +9,17 @@ anyhow.workspace = true
 arrow = { version = "=58.4.0", default-features = false, features = ["ipc"] }
 axum.workspace = true
 base64.workspace = true
+calamine = "0.36.1"
 chrono.workspace = true
 duckdb.workspace = true
 getrandom.workspace = true
+rust_xlsxwriter = { version = "0.99.1", features = ["constant_memory"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { version = "0.7.20", features = ["io"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

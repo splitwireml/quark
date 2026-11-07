@@ -7,7 +7,15 @@ const source = 'SELECT * FROM "main"."cars" WHERE "active" = true';
 test('a column can be grouped and measured with multiple operations', () => {
   assert.equal(
     buildAggregateSql('SELECT * FROM "main"."orders_2024"', ['customer', 'status'], [{ column: 'status', metrics: ['count', 'distinct'] }]),
-    'SELECT "customer", "status", count("status") AS "count", count(DISTINCT "status") AS "distinct" FROM (SELECT * FROM "main"."orders_2024") AS filtered GROUP BY "customer", "status" ORDER BY "customer"'
+    'SELECT "customer", "status", count("status") AS "count", count(DISTINCT "status") AS "distinct" FROM (SELECT * FROM "main"."orders_2024") AS filtered GROUP BY "customer", "status" ORDER BY "customer", "status"'
+  );
+});
+
+test('orders by every group key in group order, so each row keeps a stable position', () => {
+  // Dedupe ties fall to row position, which is stable only under a total order.
+  assert.equal(
+    buildAggregateSql(source, ['Year', 'Make', 'Model'], [{ column: 'Price', metrics: ['avg'] }]),
+    'SELECT "Year", "Make", "Model", avg("Price") AS "avg" FROM (SELECT * FROM "main"."cars" WHERE "active" = true) AS filtered GROUP BY "Year", "Make", "Model" ORDER BY "Year", "Make", "Model"'
   );
 });
 
@@ -28,7 +36,7 @@ test('count on a field remains an aggregate within a group', () => {
 test('indexes are independent from an aggregate field', () => {
   assert.equal(
     buildAggregateSql(source, ['Make', 'Model'], [{ column: 'Price', metrics: ['count', 'sum'] }]),
-    'SELECT "Make", "Model", count("Price") AS "count", sum("Price") AS "sum" FROM (SELECT * FROM "main"."cars" WHERE "active" = true) AS filtered GROUP BY "Make", "Model" ORDER BY "Make"'
+    'SELECT "Make", "Model", count("Price") AS "count", sum("Price") AS "sum" FROM (SELECT * FROM "main"."cars" WHERE "active" = true) AS filtered GROUP BY "Make", "Model" ORDER BY "Make", "Model"'
   );
 });
 

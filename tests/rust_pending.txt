@@ -1,0 +1,2 @@
+# Tests the Rust backend has not ported yet (strict xfail in QUARK_TEST_BACKEND=rust mode).
+# One function name per line; delete a line when its test starts passing.

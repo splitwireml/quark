@@ -1,5 +1,5 @@
-//! Caches may make a page faster but never different: every page, at every stage of a query's
-//! life, equals what a plain DuckDB connection over the CSV returns for the same `build_query`.
+//! Caches may make a page faster but never different: every page equals a plain DuckDB read of the CSV.
+// This holds at every stage of a query's life, against a plain connection running the same `build_query`.
 // The helpers below are test code too, which clippy.toml's allowance does not reach in this crate.
 #![allow(clippy::unwrap_used)]
 
@@ -13,17 +13,21 @@ use chrono::{DateTime, Days, NaiveDate};
 use duckdb::Connection;
 use duckdb::params_from_iter;
 use duckdb::types::Value as Cell;
-use quark_core::cache::results::ResultAction;
-use quark_core::cache::stats::stats_key;
-use quark_core::engine::{Dirs, Engine, describe};
-use quark_core::ids::dataset_id;
-use quark_core::page::{Format, PageBody, PageTarget, run_page};
-use quark_core::query::{
-    ColumnMeta, Connector, Direction, Filter, QueryRequest, Sort, build_query,
-};
-use quark_core::registry::SourceRecord;
-use quark_core::sql::scan_expression;
-use quark_core::state::AppState;
+use quark_core::features::pages::model::{Format, PageBody};
+use quark_core::features::pages::service::run_page;
+use quark_core::relation::builder::build_query;
+use quark_core::relation::describe::describe;
+use quark_core::relation::request::{Connector, Direction, Filter, QueryRequest, Sort};
+use quark_core::relation::target::Target;
+use quark_core::runtime::AppState;
+use quark_core::runtime::cache::results::ResultAction;
+use quark_core::runtime::cache::stats::stats_key;
+use quark_core::runtime::dirs::Dirs;
+use quark_core::runtime::engine::Engine;
+use quark_core::runtime::registry::SourceRecord;
+use quark_core::shared::columns::ColumnMeta;
+use quark_core::shared::ids::dataset_id;
+use quark_core::shared::sql::scan_expression;
 use serde_json::{Value, json};
 
 const ROWS: i64 = 20_000;
@@ -97,8 +101,9 @@ impl Case {
     }
 }
 
-/// 8 filter sets (0 to 3 filters, with `or`, `in`, `between` and `contains`) times 4 sort and
-/// dedupe shapes (every sort list ends with `id`), so 32 cases.
+/// 8 filter sets (0 to 3 filters, with `or`, `in`, `between` and `contains`) times 5 sort and
+/// dedupe shapes, so 40 cases. Every plain sort list ends with `id`, so its order is total; the last
+/// shape leaves `n` ties inside each category to the row's position in the CSV.
 fn cases() -> Vec<Case> {
     use Connector::{And, Or};
     let any_of = |connector| filter("cat", "in", json!(["alpha", "gamma"]), connector);
@@ -133,6 +138,11 @@ fn cases() -> Vec<Case> {
             "deduped on n, by n then id",
             vec![sort("n", Direction::Desc), sort("id", Direction::Asc)],
             vec!["n".to_owned()],
+        ),
+        (
+            "deduped on cat, by n",
+            vec![sort("n", Direction::Desc)],
+            vec!["cat".to_owned()],
         ),
     ];
     let mut cases = Vec::new();
@@ -235,22 +245,6 @@ impl Oracle {
     }
 }
 
-/// DuckDB keeps an arbitrary row of each dedupe group, so a deduped page is compared on its key
-/// columns only; every other page is compared whole.
-fn comparable(case: &Case, rows: Vec<Value>) -> Vec<Value> {
-    if case.dedupe.is_empty() {
-        return rows;
-    }
-    let keys = |row: Value| {
-        let kept = case
-            .dedupe
-            .iter()
-            .map(|key| (key.clone(), row[key].clone()));
-        Value::Object(kept.collect())
-    };
-    rows.into_iter().map(keys).collect()
-}
-
 /// The first page, a middle one, the last, and one past the end.
 fn pages(oracle: &Oracle, case: &Case) -> Vec<i64> {
     let total = oracle.expect(&case.request(1)).total_rows;
@@ -264,19 +258,22 @@ fn pages(oracle: &Oracle, case: &Case) -> Vec<i64> {
 
 fn assert_matches(engine: &Engine, case: &Case, page: i64, expected: &Expected, phase: &str) {
     let request = case.request(page);
-    let body = {
-        let mut inner = engine.lock();
-        let target = PageTarget::Dataset(dataset_id("main", "data"));
-        run_page(&mut inner, &target, &request, Format::Json).unwrap()
-    };
+    let target = Target::Dataset(dataset_id("main", "data"));
+    let body = engine
+        .read(None, |conn| {
+            run_page(engine, conn, &target, &request, Format::Json)
+        })
+        .unwrap()
+        .unwrap();
     let PageBody::Json(body) = body else {
         panic!("expected a JSON body");
     };
     let context = format!("{} / page {page} / {phase}", case.name);
     assert_eq!(body["total_rows"], expected.total_rows, "{context}");
-    let rows = body["rows"].as_array().unwrap().clone();
-    assert!(
-        comparable(case, rows) == comparable(case, expected.rows.clone()),
+    // A dedupe keeps a fixed row of each group, so every page is compared whole.
+    assert_eq!(
+        body["rows"].as_array().unwrap(),
+        &expected.rows,
         "{context}"
     );
 }
@@ -315,7 +312,7 @@ fn first_second_and_built_results_match_the_oracle() {
             .iter()
             .map(|&page| oracle.expect(&case.request(page)))
             .collect();
-        let engine = Engine::open_node(&source, &dirs, 1).unwrap();
+        let engine = Engine::open_node(&source, &dirs).unwrap();
         let check = |at: usize, phase| {
             assert_matches(&engine, case, offsets[at], &expected[at], phase);
         };
@@ -324,7 +321,7 @@ fn first_second_and_built_results_match_the_oracle() {
         if case.has_controls() {
             let key = oracle.result_key(&case.request(1));
             wait_until("the result build", || {
-                let action = engine.lock().results.note_request(&key);
+                let action = engine.results().note_request(&key);
                 matches!(action, ResultAction::ServeFrom(_))
             });
         }
@@ -352,7 +349,7 @@ fn columnar_switch_matches_the_oracle() {
     wait_until("the columnar switch", || {
         let engine = state.engine_for_node("legacy").unwrap();
         let definition: String = engine
-            .lock()
+            .primary()
             .conn
             .query_row(
                 "SELECT sql FROM duckdb_views() WHERE NOT internal AND view_name = 'data'",

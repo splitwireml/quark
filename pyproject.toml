@@ -21,4 +21,5 @@ testpaths = ["tests"]
 markers = [
     "skeleton: behavior the Rust desktop skeleton must reproduce",
     "python_only: behavior that only applies to the Python backend",
+    "rust_only: behavior that only applies to the Rust backend",
 ]

@@ -1,0 +1,3 @@
+[env]
+# libduckdb-sys builds DuckDB through CMake; this file pins the engine version.
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/duckdb-version.cmake", relative = true }

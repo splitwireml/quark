@@ -2,12 +2,14 @@ use std::error::Error;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
-use quark_core::api::router;
-use quark_core::engine::Dirs;
-use quark_core::secure::{SecurityConfig, desktop_origins, generate_token, is_app_origin, secure};
-use quark_core::state::AppState;
-use tauri::webview::PageLoadEvent;
-use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use quark_core::http::secure::{
+    SecurityConfig, desktop_origins, generate_token, is_app_origin, secure,
+};
+use quark_core::router;
+use quark_core::runtime::AppState;
+use quark_core::runtime::dirs::Dirs;
+use tauri::webview::{DownloadEvent, PageLoadEvent};
+use tauri::{App, Manager, RunEvent, Webview, WebviewUrl, WebviewWindowBuilder};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
 
@@ -83,6 +85,9 @@ fn start(app: &mut App) -> SetupResult {
 
 /// Writes `quark.log.<date>` files, keeping the newest three. The guard flushes on drop.
 fn init_logging(folder: &Path) -> SetupResult<WorkerGuard> {
+    // The appender prunes old logs before it creates the folder, and prints "Error reading the
+    // log directory/files" on a first launch when the folder is missing.
+    std::fs::create_dir_all(folder)?;
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix("quark.log")
@@ -96,6 +101,29 @@ fn init_logging(folder: &Path) -> SetupResult<WorkerGuard> {
         .try_init()
         .ok();
     Ok(guard)
+}
+
+/// Saves the app's own blob downloads (exports) to the Downloads folder under the offered name.
+/// WebKitGTK writes nothing without a handler; the default destination already avoids overwrites.
+fn on_download(_: Webview, event: DownloadEvent<'_>) -> bool {
+    match event {
+        DownloadEvent::Requested { url, destination } => {
+            let is_blob = url.scheme() == "blob";
+            if is_blob {
+                tracing::info!(destination = %destination.display(), "saving a download");
+            } else {
+                tracing::warn!(%url, "refused a download that is not the app's own");
+            }
+            is_blob
+        }
+        DownloadEvent::Finished { path, success, .. } => {
+            if !success {
+                tracing::error!(?path, "a download failed");
+            }
+            true
+        }
+        _ => true,
+    }
 }
 
 fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupResult {
@@ -115,6 +143,7 @@ fn open_window(app: &App, port: u16, token: &str, is_self_test: bool) -> SetupRe
             }
         })
         .on_navigation(|url| is_app_origin(url.as_str(), cfg!(debug_assertions)))
+        .on_download(on_download)
         .build()?;
     Ok(())
 }

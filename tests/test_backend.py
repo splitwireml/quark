@@ -3,6 +3,7 @@ import csv
 import datetime as dt
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -587,6 +588,14 @@ def test_restart_discards_unconfirmed_workbook_upload(tmp_path):
     assert source.exists() is False
 
 
+@pytest.mark.rust_only
+def test_unreadable_workbook_upload_is_400(client, tmp_path):
+    response = client.post("/api/nodes/upload", files={"file": ("broken.xlsx", b"not a zip")})
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Could not open source: ")
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
 def test_attach_is_read_only_and_missing_paths_fail(client, tmp_path):
     db = tmp_path / "existing.duckdb"
     with duckdb.connect(str(db)) as con:
@@ -1126,6 +1135,7 @@ def test_numeric_stats_histogram_and_json_safe_values(client, tmp_path):
     assert client.get(base + "/columns/missing/stats").status_code == 404
 
 
+@pytest.mark.python_only
 def test_safe_serializes_unsafe_aggregate_integers():
     assert safe(2**53 - 1) == 2**53 - 1
     assert safe(2**53) == "9007199254740992"
@@ -1209,8 +1219,8 @@ def test_query_dedupes_filtered_multi_column_rows_and_validates_keys(client):
     assert response.status_code == 200, response.text
     assert response.json()["rows"] == [
         {"group": "b", "kind": "x", "score": 4, "label": "fourth"},
+        {"group": "a", "kind": "x", "score": 3, "label": "second"},
         {"group": "a", "kind": "y", "score": 2, "label": "third"},
-        {"group": "a", "kind": "x", "score": 1, "label": "first"},
     ]
     assert (response.json()["total_rows"], response.json()["total_pages"]) == (3, 1)
     assert client.post(url, json={"dedupe_columns": ["group", "group"]}).status_code == 422
@@ -1263,6 +1273,397 @@ def test_filtered_deduped_query_metadata_and_stats_share_rows(client):
     amount = client.post(base + "/columns/amount/stats", json=request)
     assert amount.status_code == 200, amount.text
     assert (amount.json()["min"], amount.json()["max"]) == (1, 1)
+
+
+def test_deduped_query_without_sorts_keeps_each_groups_first_row_in_source_order(client):
+    # No sort: each group keeps its first row and the kept rows stay in source order. 200,000 rows
+    # spread the work over threads, so keeping any row of a group cannot pass by luck, and `id`
+    # counts down, so ordering by the columns would keep each group's last row instead.
+    count = 200_000
+    content = "group,id,label\n" + "".join(f"{i * 3 % 7},{count - i},row{i}\n" for i in range(count))
+    node = upload(client, "unsorted.csv", content.encode())
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'unsorted')['id']}/query"
+    response = client.post(url, json={"dedupe_columns": ["group"], "page_size": 10})
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == [
+        {"group": i * 3 % 7, "id": count - i, "label": f"row{i}"} for i in range(7)
+    ]
+
+
+def test_deduped_query_breaks_sort_ties_by_source_position(client):
+    # A tie on the sort falls to the row's position in its source, first row first, for the row a
+    # group keeps, the order of the kept rows and the stats over them. Each group has about 2,857
+    # rows on the top score; `id` counts down, so a tie-break on the columns would keep the last.
+    count = 200_000
+    content = "group,score,id,label\n" + "".join(
+        f"{i * 3 % 7},{i // 7 % 10},{count - i},row{i}\n" for i in range(count)
+    )
+    node = upload(client, "tied.csv", content.encode())
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'tied')['id']}"
+    request = {"dedupe_columns": ["group"], "sorts": [{"column": "score", "direction": "desc"}]}
+
+    response = client.post(base + "/query", json={**request, "page_size": 10})
+    assert response.status_code == 200, response.text
+    # Rows 63 to 69 are the first to score 9, one per group.
+    assert response.json()["rows"] == [
+        {"group": i * 3 % 7, "score": 9, "id": count - i, "label": f"row{i}"} for i in range(63, 70)
+    ]
+
+    stats = client.post(base + "/columns/id/stats", json=request)
+    assert stats.status_code == 200, stats.text
+    body = stats.json()
+    assert (body["row_count"], body["min"], body["max"]) == (7, count - 69, count - 63)
+
+
+def order_terms(sql):
+    """How many terms each dedupe window (one with a PARTITION BY) and the statement order by."""
+    tree = json.loads(duckdb.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()[0])
+    assert tree["error"] is False, tree
+    windows = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("class") == "WINDOW" and node.get("partitions"):
+                windows.append(len(node["orders"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(tree)
+    modifiers = tree["statements"][0]["node"]["modifiers"]
+    return windows, [len(item["orders"]) for item in modifiers if item["type"] == "ORDER_MODIFIER"]
+
+
+def test_deduped_view_sql_orders_by_the_sorts_then_one_position_at_any_width(client):
+    # A deduped View's SQL orders its window and its rows by the two sorts and one position term,
+    # however many columns the View has, so its cost does not grow with the View's width.
+    for width in (3, 60):
+        header = ",".join(f"c{index}" for index in range(width))
+        row = ",".join(str(index) for index in range(width))
+        node = upload(client, f"wide{width}.csv", f"{header}\n{row}\n{row}\n".encode())
+        url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, f'wide{width}')['id']}/query"
+        response = client.post(url, json={
+            "dedupe_columns": ["c0"],
+            "sorts": [{"column": "c1", "direction": "desc"}, {"column": "c2", "direction": "asc"}],
+        })
+        assert response.status_code == 200, response.text
+        windows, outer = order_terms(response.json()["sql"])
+        assert windows and set(windows) == {3}, (width, windows)
+        assert outer == [3], (width, outer)
+
+
+def numbering_filters(sql):
+    """The WHERE clause, as JSON text, of each SELECT that numbers its rows with `row_number() OVER ()`."""
+    tree = json.loads(duckdb.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()[0])
+    assert tree["error"] is False, tree
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if any(
+                item.get("type") == "WINDOW_ROW_NUMBER" and not item["partitions"] and not item["orders"]
+                for item in node.get("select_list") or []
+            ):
+                found.append(json.dumps(node["where_clause"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(tree)
+    return found
+
+
+def test_deduped_view_sql_numbers_rows_after_the_filters(client):
+    # The position is numbered over the filtered rows, so a filter can prune the scan.
+    node = upload(client, "pruned.csv", b"id,grp,price\n1,a,5\n2,a,6\n3,b,7\n")
+    url = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'pruned')['id']}/query"
+    response = client.post(url, json={
+        "filters": [{"column": "id", "operator": ">", "value": 1}],
+        "sorts": [{"column": "price", "direction": "desc"}],
+        "dedupe_columns": ["grp"],
+    })
+    assert response.status_code == 200, response.text
+    filters = numbering_filters(response.json()["sql"])
+    assert filters and all('"id"' in where for where in filters), response.json()["sql"]
+
+
+def test_deduped_aggregate_view_keeps_the_same_rows_on_every_request(client):
+    # The app's aggregate View orders by every group key, so each row's position is stable even
+    # though the GROUP BY runs over threads: every request keeps each group's first row.
+    count = 600_000
+    content = "a,b\n" + "".join(f"{i % 50},{i // 50 % 100 + i % 50}\n" for i in range(count))
+    node = upload(client, "grouped.csv", content.encode())
+    sql = (
+        'SELECT "a", "b", count("a") AS "count" FROM (SELECT * FROM "grouped") AS filtered '
+        'GROUP BY "a", "b" ORDER BY "a", "b"'
+    )
+    url = f"/api/nodes/{node['id']}/sql"
+    expected = [{"a": a, "b": a, "count": count // 5000} for a in range(50)]
+    # The same request three times (live, while its result builds, from the result), then
+    # requests that differ only by an always-true filter.
+    always_true = [[{"column": "count", "operator": ">", "value": -floor}] for floor in (1, 2, 3)]
+    for filters in [[], [], [], *always_true]:
+        response = client.post(url, json={"sql": sql, "dedupe_columns": ["a"], "filters": filters})
+        assert response.status_code == 200, response.text
+        assert response.json()["rows"] == expected, filters
+
+
+def mutation_sql(source_sql, columns, index, expression, alias):
+    """`buildMutationSql` (frontend/src/lib/mutation-sql.ts): the View with a formula column at `index`."""
+    select = [f'"{column}"' for column in columns]
+    select.insert(index, f'{expression} AS "{alias}"')
+    return f"SELECT {', '.join(select)} FROM (\n{source_sql}\n) AS mutation_source"
+
+
+def replacement_sql(source_sql, columns, target, expression):
+    """`buildColumnReplacementSql`: the View with `target` replaced in place by a formula of the same name."""
+    index = columns.index(target)
+    return mutation_sql(source_sql, columns[:index] + columns[index + 1:], index, expression, target)
+
+
+def cell_edit_sql(source_sql, columns, row_number, target, value):
+    """`buildCellEditSql`: the View with one cell, found by its row number, set to `value`."""
+    select = [
+        f'CASE WHEN "__quark_row_number" = {row_number} THEN cast_to_type(\'{value}\', "{column}") '
+        f'ELSE "{column}" END AS "{column}"' if column == target else f'"{column}"'
+        for column in columns
+    ]
+    return (
+        f"SELECT {', '.join(select)} FROM (\nSELECT *, row_number() OVER () AS \"__quark_row_number\" "
+        f"FROM (\n{source_sql}\n) AS cell_edit_source\n) AS cell_edit_numbered"
+    )
+
+
+def wait_for_columnar_cache(path):
+    """On the Rust backend, waits until the upload reads its columnar cache; Python has none."""
+    if os.environ.get("QUARK_TEST_BACKEND") != "rust":
+        return
+    deadline = time.monotonic() + 60
+    while not list((path / ".quark-cache" / "columnar").glob("*.duckdb")):
+        assert time.monotonic() < deadline, "the columnar import never finished"
+        time.sleep(0.05)
+    # ponytail: the server forgets the live-file engines just after the file lands; no route says when.
+    time.sleep(0.5)
+
+
+def cached_view_and_truth(client, tmp_path, name, content, count):
+    """Uploads the CSV `content`, whose `id` counts down from `count`, and waits for its columnar
+    cache. Returns its project View and DuckDB holding the same CSV as `src`, with `pos` its row's
+    source position."""
+    path = tmp_path / "expected" / name
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(content)
+    node = upload(client, name, content.encode())
+    view = next(view for view in client.get("/api/projects/default/views").json() if view["source_id"] == node["id"])
+    wait_for_columnar_cache(tmp_path)
+    truth = duckdb.connect()
+    truth.execute(f"CREATE TABLE src AS SELECT *, {count} - id AS pos FROM read_csv(?)", [str(path)])
+    return view, truth
+
+
+def first_rows(truth, view, request):
+    """The page of `view` (SQL over `src` that keeps `pos`) that dedupe `request` keeps: per key, the
+    first row by the sorts, then by source position, in that order."""
+    key = request["dedupe_columns"][0]
+    order = ", ".join([*(f'"{s["column"]}" {s["direction"]}' for s in request["sorts"]), "pos"])
+    page, size = request.get("page", 1), request.get("page_size", 100)
+    cursor = truth.execute(
+        f"SELECT * EXCLUDE (pos) FROM ({view}) "
+        f'QUALIFY row_number() OVER (PARTITION BY "{key}" ORDER BY {order}) = 1 '
+        f"ORDER BY {order} LIMIT {size} OFFSET {(page - 1) * size}"
+    )
+    names = [item[0] for item in cursor.description]
+    return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
+def by(column, direction):
+    return {"column": column, "direction": direction}
+
+
+def test_deduped_mutation_views_keep_each_groups_first_row_over_every_row(client, tmp_path):
+    # A View the user changed (a formula, a replaced column, an edited cell) keeps, per dedupe group,
+    # its first row by the sorts, then by source position, and evaluates every formula over all of
+    # the View's rows. The answer comes from DuckDB over the same CSV with the position spelled out.
+    # Formulas that read other rows (a window, a cell edit by row number) catch a projection
+    # evaluated over only the kept rows or the page; 200,000 rows run over every thread.
+    count = 200_000
+    content = "id,grp,price,label\n" + "".join(
+        f"{count - i},{i * 3 % 7},{i // 7 % 10},row{i}\n" for i in range(count)
+    )
+    view, truth = cached_view_and_truth(client, tmp_path, "ties.csv", content, count)
+    columns = view["columns"]
+    assert columns == ["id", "grp", "price", "label"]
+    formula = mutation_sql(view["sql"], columns, 4, '"price" * 2', "p2")
+    stacked = replacement_sql(formula, [*columns, "p2"], "label", 'upper("label")')
+    window = mutation_sql(view["sql"], columns, 4, '"price" - avg("price") OVER ()', "spread")
+    # Row 12 is the source's 12th row: group 5, price 1, now the group's highest price.
+    edited = cell_edit_sql(view["sql"], columns, 12, "price", "50")
+    cases = [
+        # (View SQL, request, the same View over `src` keeping `pos` last)
+        (formula, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")]},
+         'SELECT id, grp, price, label, price * 2 AS p2, pos FROM src'),
+        (formula, {"dedupe_columns": ["p2"], "sorts": [by("grp", "asc")]},
+         'SELECT id, grp, price, label, price * 2 AS p2, pos FROM src'),
+        (formula, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")],
+                   "filters": [{"column": "p2", "operator": "<", "value": 10}]},
+         'SELECT id, grp, price, label, price * 2 AS p2, pos FROM src WHERE p2 < 10'),
+        (stacked, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")]},
+         'SELECT id, grp, price, upper(label) AS label, price * 2 AS p2, pos FROM src'),
+        (window, {"dedupe_columns": ["grp"], "sorts": [by("spread", "desc")]},
+         'SELECT id, grp, price, label, price - avg(price) OVER () AS spread, pos FROM src'),
+        (window, {"dedupe_columns": ["label"], "sorts": [by("spread", "asc")], "page": 3, "page_size": 50},
+         'SELECT id, grp, price, label, price - avg(price) OVER () AS spread, pos FROM src'),
+        (edited, {"dedupe_columns": ["grp"], "sorts": [by("price", "desc")]},
+         'SELECT id, grp, CASE WHEN pos = 11 THEN 50 ELSE price END AS price, label, pos FROM src'),
+    ]
+    for sql, request, expected_view in cases:
+        expected = first_rows(truth, expected_view, request)
+        assert expected, expected_view
+        response = client.post(f"/api/nodes/{view['node_id']}/sql", json={"sql": sql, **request})
+        assert response.status_code == 200, response.text
+        assert response.json()["rows"] == expected, (request, expected_view)
+
+    # A volatile formula has no answer to compare; it still loads.
+    volatile = mutation_sql(view["sql"], columns, 4, "random()", "r")
+    response = client.post(f"/api/nodes/{view['node_id']}/sql", json={
+        "sql": volatile, "dedupe_columns": ["grp"], "sorts": [by("price", "desc")],
+    })
+    assert response.status_code == 200, response.text
+    assert len(response.json()["rows"]) == 7
+
+
+def literal_rows(count=20_000):
+    """`count` rows: `id` counts down, 7 groups, `qty` from 0 to 99, a name and a day."""
+    return "id,grp,qty,name,d\n" + "".join(
+        f"{count - i},{i * 3 % 7},{i % 100},name{i:05d},2024-01-{i % 28 + 1:02d}\n" for i in range(count)
+    )
+
+
+def pages_on_both_paths(client, view, sql, request, accept="application/json"):
+    """The page of `sql` as sent, and of the same SQL wrapped so the server takes its generic path."""
+    responses = [
+        client.post(f"/api/nodes/{view['node_id']}/sql", json={"sql": item, **request}, headers={"Accept": accept})
+        for item in (sql, f"SELECT * FROM ({sql}) AS generic_check")
+    ]
+    for response in responses:
+        assert response.status_code == 200, response.text
+    return responses
+
+
+def picked(rows, keys):
+    return [{key: row[key] for key in keys} for row in rows]
+
+
+def test_deduped_changed_view_keeps_scientific_literals_double(client, tmp_path):
+    # `1e-3` and `1e3` are DOUBLE literals. A deduped View that reads the columnar cache must keep
+    # them DOUBLE: re-rendered as `0.001` and `1000.0` they turn the column into a DECIMAL, which the
+    # grid reads as unscaled integers (99 for 0.099). Type and values must match the generic path.
+    count = 20_000
+    view, truth = cached_view_and_truth(client, tmp_path, "literals.csv", literal_rows(count), count)
+    columns = view["columns"]
+    assert columns == ["id", "grp", "qty", "name", "d"]
+    milli = mutation_sql(view["sql"], columns, 3, '"qty" * 1e-3', "m")
+    sql = mutation_sql(milli, [*columns[:3], "m", *columns[3:]], 4, '"qty" * 1e3', "k")
+    request = {"dedupe_columns": ["grp"], "sorts": [by("qty", "desc")]}
+    keys = ["id", "grp", "qty", "m", "k"]
+    expected = first_rows(truth, "SELECT id, grp, qty, qty * 1e-3 AS m, qty * 1e3 AS k, pos FROM src", request)
+    assert len(expected) == 7 and expected[0]["m"] == 99 * 1e-3
+
+    page, generic = (response.json() for response in pages_on_both_paths(client, view, sql, request))
+    assert page["columns"] == generic["columns"]
+    assert page["rows"] == generic["rows"]
+    assert picked(page["rows"], keys) == expected
+
+    import pyarrow as pa
+
+    page, generic = (
+        pa.ipc.open_stream(response.content).read_all()
+        for response in pages_on_both_paths(client, view, sql, request, backend_app.ARROW_MEDIA_TYPE)
+    )
+    assert [(field.name, field.type) for field in page.schema] == [(field.name, field.type) for field in generic.schema]
+    assert pa.types.is_float64(page.schema.field("m").type), page.schema
+    assert pa.types.is_float64(page.schema.field("k").type), page.schema
+    assert page.select(keys).to_pylist() == expected
+
+
+def test_deduped_changed_view_filters_a_formula_alike_on_page_stats_and_export(client, tmp_path):
+    # DuckDB computes `36 * 1e-3` as the DOUBLE 0.036000000000000004, so `m = 0.036` keeps no row,
+    # while a range around it keeps one row per group. The page, the column's stats and the display
+    # SQL that export runs must keep the same rows as the generic path and DuckDB itself.
+    count = 20_000
+    view, truth = cached_view_and_truth(client, tmp_path, "filtered.csv", literal_rows(count), count)
+    sql = mutation_sql(view["sql"], view["columns"], 3, '"qty" * 1e-3', "m")
+    keys = ["id", "grp", "qty", "m"]
+
+    def m(operator, value):
+        return {"column": "m", "operator": operator, "value": value}
+
+    for filters, where, kept in [
+        ([m("=", 0.036)], "m = 0.036", 0),
+        ([m(">", 0.0355), m("<", 0.0365)], "m > 0.0355 AND m < 0.0365", 7),
+    ]:
+        request = {"dedupe_columns": ["grp"], "sorts": [by("qty", "desc")], "filters": filters}
+        expected = first_rows(truth, f"SELECT * FROM (SELECT id, grp, qty, qty * 1e-3 AS m, pos FROM src) WHERE {where}", request)
+        assert len(expected) == kept
+
+        page, generic = (response.json() for response in pages_on_both_paths(client, view, sql, request))
+        assert picked(page["rows"], keys) == picked(generic["rows"], keys) == expected, where
+        assert page["total_rows"] == generic["total_rows"] == kept, where
+
+        stats = [
+            client.post(f"/api/nodes/{view['node_id']}/sql/columns/m/stats", json={"sql": item, **request})
+            for item in (sql, f"SELECT * FROM ({sql}) AS generic_check")
+        ]
+        for response in stats:
+            assert response.status_code == 200, response.text
+        summary = [{key: response.json().get(key) for key in ("row_count", "min", "max")} for response in stats]
+        assert summary[0] == summary[1], where
+        assert summary[0]["row_count"] == kept, where
+
+        sheet = {"node_id": view["node_id"], "name": "Kept", "sql": page["sql"]}
+        export = client.post("/api/exports", json={"format": "json", "filename": "kept", "sheets": [sheet]})
+        assert export.status_code == 200, export.text
+        assert picked(json.loads(export.text), keys) == expected, where
+
+
+@pytest.mark.parametrize("expression", ['CAST("name" AS VARCHAR(3))', '"d" + INTERVAL 1 DAY'])
+def test_deduped_changed_view_keeps_unaliased_expression_names(client, tmp_path, expression):
+    # Hand-written SQL may leave an expression unaliased, and DuckDB names the column after its text.
+    # A deduped View that reads the columnar cache must keep those names and answer like the
+    # generic path, not rename `VARCHAR(3)` to `VARCHAR` or rewrite the INTERVAL and fail with 422.
+    count = 20_000
+    view, truth = cached_view_and_truth(client, tmp_path, "unaliased.csv", literal_rows(count), count)
+    request = {"dedupe_columns": ["grp"], "sorts": [by("qty", "desc")]}
+    sql = f'SELECT "id", "grp", "qty", {expression} FROM (\n{view["sql"]}\n) AS mutation_source'
+    expected = first_rows(truth, f'SELECT "id", "grp", "qty", {expression}, pos FROM src', request)
+    assert len(expected) == 7
+
+    page, generic = (response.json() for response in pages_on_both_paths(client, view, sql, request))
+    assert page["columns"] == generic["columns"]
+    assert page["rows"] == generic["rows"]
+    assert [column["name"] for column in page["columns"]] == list(expected[0])
+    assert [row["id"] for row in page["rows"]] == [row["id"] for row in expected]
+
+
+def test_deduped_stats_keep_the_rows_the_sorted_page_shows(client):
+    # Stats see the rows the page keeps: the sort's first row per group, NULLs last under DESC.
+    node = upload(client, "kept.csv", b"group,score\na,1\na,\na,3\nb,2\nb,4\n")
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'kept')['id']}"
+    request = {"dedupe_columns": ["group"], "sorts": [{"column": "score", "direction": "desc"}]}
+
+    page = client.post(base + "/query", json={**request, "page_size": 10})
+    assert page.status_code == 200, page.text
+    assert page.json()["rows"] == [{"group": "b", "score": 4}, {"group": "a", "score": 3}]
+    assert page.json()["total_rows"] == 2
+
+    stats = client.post(base + "/columns/score/stats", json=request)
+    assert stats.status_code == 200, stats.text
+    body = stats.json()
+    assert (body["row_count"], body["null_count"], body["min"], body["max"]) == (2, 0, 3, 4)
 
 
 def test_stats_invalid_filter_value_returns_422(tmp_path):
@@ -1538,6 +1939,7 @@ def test_join_workspace_rejects_invalid_references_and_keys(client):
         assert response.status_code == status, response.text
 
 
+@pytest.mark.python_only
 def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
     first = upload(client, "first.csv", b"id\n1\n")
     second = upload(client, "second.csv", b"id\n1\n")
@@ -1567,6 +1969,35 @@ def test_cross_node_join_workspace_replaces_previous_without_listing_it(client):
     assert {node["id"] for node in client.get("/api/nodes").json()} == {
         first["id"], second["id"], third["id"],
     }
+
+
+@pytest.mark.rust_only
+def test_cross_node_join_workspaces_stay_open_until_evicted(client):
+    left = upload(client, "left.csv", b"id\n1\n2\n")
+    right = upload(client, "right.csv", b"id\n1\n")
+
+    def join():
+        response = client.post("/api/join-workspaces", json=join_payload(
+            left, dataset(client, left, "left"),
+            right, dataset(client, right, "right"), ["id"], ["id"],
+        ))
+        assert response.status_code == 200, response.text
+        return response.json()["node_id"]
+
+    def query(workspace):
+        return client.post(
+            f"/api/nodes/{workspace}/sql",
+            json={"sql": 'SELECT count(*) AS n FROM "left_source"."left"'},
+        )
+
+    first, second = join(), join()
+    assert first != second
+    assert query(first).json()["rows"] == [{"n": 2}]
+    assert query(second).json()["rows"] == [{"n": 2}]
+    later = [join() for _ in range(3)]
+    assert query(first).status_code == 404
+    assert all(query(workspace).status_code == 200 for workspace in [second, *later])
+    assert {node["id"] for node in client.get("/api/nodes").json()} == {left["id"], right["id"]}
 
 
 def create_project(client, name):
@@ -2220,6 +2651,21 @@ def test_visualize_scatter_rejects_a_non_numeric_size(client):
     }).status_code == 422
 
 
+@pytest.mark.rust_only
+def test_visualize_scatter_sample_is_repeatable(tmp_path):
+    body = b"x,y,region\n" + b"".join(f"{i},{i * 2},r{i % 3}\n".encode() for i in range(20000))
+    request = {"spec": {"chart": "scatter", "encodings": {"x": "x", "y": "y", "color": "region"}}}
+    with make_client(tmp_path) as client:
+        node = upload(client, "repeat.csv", body)
+        base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'repeat')['id']}"
+        first = client.post(base + "/visualize", json=request).json()
+    # A new server run starts with empty caches, so the second sample is drawn afresh.
+    with make_client(tmp_path) as restarted:
+        second = restarted.post(base + "/visualize", json=request).json()
+    assert len(first["points"]) == 5000
+    assert first["points"] == second["points"]
+
+
 def test_visualize_line_buckets_by_an_automatic_grain(client):
     body = b"day,amount\n" + b"".join(f"2026-01-{i:02d},{i}\n".encode() for i in range(1, 29))
     node = upload(client, "daily.csv", body)
@@ -2329,6 +2775,7 @@ def test_visualize_histogram_without_group_omits_series(client):
     assert "series" not in payload
 
 
+@pytest.mark.python_only
 def test_visualize_histogram_skips_series_for_a_date_column(client):
     body = b"region,day\n" + b"".join(
         f"{'east' if i % 2 else 'west'},2026-01-{i:02d}\n".encode() for i in range(1, 29)
@@ -2340,6 +2787,26 @@ def test_visualize_histogram_skips_series_for_a_date_column(client):
     }).json()
     assert payload["bins"]
     assert "series" not in payload
+
+
+@pytest.mark.rust_only
+def test_visualize_histogram_groups_date_columns_into_series(client):
+    body = b"region,day\n" + b"".join(
+        f"{'east' if i % 2 else 'west'},2026-01-{i:02d}\n".encode() for i in range(1, 29)
+    )
+    node = upload(client, "datehistseries.csv", body)
+    base = f"/api/nodes/{node['id']}/datasets/{dataset(client, node, 'datehistseries')['id']}"
+    payload = client.post(base + "/visualize", json={
+        "spec": {"chart": "histogram", "encodings": {"value": "day", "group": "region"}},
+    }).json()
+    edges = [(item["lower"], item["upper"]) for item in payload["bins"]]
+    assert sorted(series["label"] for series in payload["series"]) == ["east", "west"]
+    for series in payload["series"]:
+        assert [(item["lower"], item["upper"]) for item in series["bins"]] == edges
+    totals = [item["count"] for item in payload["bins"]]
+    summed = [sum(series["bins"][index]["count"] for series in payload["series"]) for index in range(len(edges))]
+    assert summed == totals
+    assert sum(totals) == 28
 
 
 def test_visualize_histogram_rejects_an_unknown_group(client):
