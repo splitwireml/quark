@@ -3,6 +3,7 @@ import csv
 import datetime as dt
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -1409,6 +1410,117 @@ def test_deduped_aggregate_view_keeps_the_same_rows_on_every_request(client):
         response = client.post(url, json={"sql": sql, "dedupe_columns": ["a"], "filters": filters})
         assert response.status_code == 200, response.text
         assert response.json()["rows"] == expected, filters
+
+
+def mutation_sql(source_sql, columns, index, expression, alias):
+    """`buildMutationSql` (frontend/src/lib/mutation-sql.ts): the View with a formula column at `index`."""
+    select = [f'"{column}"' for column in columns]
+    select.insert(index, f'{expression} AS "{alias}"')
+    return f"SELECT {', '.join(select)} FROM (\n{source_sql}\n) AS mutation_source"
+
+
+def replacement_sql(source_sql, columns, target, expression):
+    """`buildColumnReplacementSql`: the View with `target` replaced in place by a formula of the same name."""
+    index = columns.index(target)
+    return mutation_sql(source_sql, columns[:index] + columns[index + 1:], index, expression, target)
+
+
+def cell_edit_sql(source_sql, columns, row_number, target, value):
+    """`buildCellEditSql`: the View with one cell, found by its row number, set to `value`."""
+    select = [
+        f'CASE WHEN "__quark_row_number" = {row_number} THEN cast_to_type(\'{value}\', "{column}") '
+        f'ELSE "{column}" END AS "{column}"' if column == target else f'"{column}"'
+        for column in columns
+    ]
+    return (
+        f"SELECT {', '.join(select)} FROM (\nSELECT *, row_number() OVER () AS \"__quark_row_number\" "
+        f"FROM (\n{source_sql}\n) AS cell_edit_source\n) AS cell_edit_numbered"
+    )
+
+
+def wait_for_columnar_cache(path):
+    """On the Rust backend, waits until the upload reads its columnar cache; Python has none."""
+    if os.environ.get("QUARK_TEST_BACKEND") != "rust":
+        return
+    deadline = time.monotonic() + 60
+    while not list((path / ".quark-cache" / "columnar").glob("*.duckdb")):
+        assert time.monotonic() < deadline, "the columnar import never finished"
+        time.sleep(0.05)
+    # ponytail: the server forgets the live-file engines just after the file lands; no route says when.
+    time.sleep(0.5)
+
+
+def test_deduped_mutation_views_keep_each_groups_first_row_over_every_row(client, tmp_path):
+    # A View the user changed (a formula, a replaced column, an edited cell) keeps, per dedupe group,
+    # its first row by the sorts, then by source position, and evaluates every formula over all of
+    # the View's rows. The answer comes from DuckDB over the same CSV with the position spelled out.
+    # Formulas that read other rows (a window, a cell edit by row number) catch a projection
+    # evaluated over only the kept rows or the page; 200,000 rows run over every thread.
+    count = 200_000
+    content = "id,grp,price,label\n" + "".join(
+        f"{count - i},{i * 3 % 7},{i // 7 % 10},row{i}\n" for i in range(count)
+    )
+    csv_path = tmp_path / "expected" / "ties.csv"
+    csv_path.parent.mkdir()
+    csv_path.write_text(content)
+    node = upload(client, "ties.csv", content.encode())
+    view = next(view for view in client.get("/api/projects/default/views").json() if view["source_id"] == node["id"])
+    columns = view["columns"]
+    assert columns == ["id", "grp", "price", "label"]
+    wait_for_columnar_cache(tmp_path)
+
+    truth = duckdb.connect()
+    truth.execute(f"CREATE TABLE src AS SELECT *, {count} - id AS pos FROM read_csv(?)", [str(csv_path)])
+    formula = mutation_sql(view["sql"], columns, 4, '"price" * 2', "p2")
+    stacked = replacement_sql(formula, [*columns, "p2"], "label", 'upper("label")')
+    window = mutation_sql(view["sql"], columns, 4, '"price" - avg("price") OVER ()', "spread")
+    # Row 12 is the source's 12th row: group 5, price 1, now the group's highest price.
+    edited = cell_edit_sql(view["sql"], columns, 12, "price", "50")
+
+    def by(column, direction):
+        return {"column": column, "direction": direction}
+
+    cases = [
+        # (View SQL, request, the same View over `src` keeping `pos` last)
+        (formula, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")]},
+         'SELECT id, grp, price, label, price * 2 AS p2, pos FROM src'),
+        (formula, {"dedupe_columns": ["p2"], "sorts": [by("grp", "asc")]},
+         'SELECT id, grp, price, label, price * 2 AS p2, pos FROM src'),
+        (formula, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")],
+                   "filters": [{"column": "p2", "operator": "<", "value": 10}]},
+         'SELECT id, grp, price, label, price * 2 AS p2, pos FROM src WHERE p2 < 10'),
+        (stacked, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")]},
+         'SELECT id, grp, price, upper(label) AS label, price * 2 AS p2, pos FROM src'),
+        (window, {"dedupe_columns": ["grp"], "sorts": [by("spread", "desc")]},
+         'SELECT id, grp, price, label, price - avg(price) OVER () AS spread, pos FROM src'),
+        (window, {"dedupe_columns": ["label"], "sorts": [by("spread", "asc")], "page": 3, "page_size": 50},
+         'SELECT id, grp, price, label, price - avg(price) OVER () AS spread, pos FROM src'),
+        (edited, {"dedupe_columns": ["grp"], "sorts": [by("price", "desc")]},
+         'SELECT id, grp, CASE WHEN pos = 11 THEN 50 ELSE price END AS price, label, pos FROM src'),
+    ]
+    for sql, request, expected_view in cases:
+        key = request["dedupe_columns"][0]
+        order = ", ".join([*(f'"{s["column"]}" {s["direction"]}' for s in request["sorts"]), "pos"])
+        page, size = request.get("page", 1), request.get("page_size", 100)
+        cursor = truth.execute(
+            f"SELECT * EXCLUDE (pos) FROM ({expected_view}) "
+            f'QUALIFY row_number() OVER (PARTITION BY "{key}" ORDER BY {order}) = 1 '
+            f"ORDER BY {order} LIMIT {size} OFFSET {(page - 1) * size}"
+        )
+        names = [item[0] for item in cursor.description]
+        expected = [dict(zip(names, row)) for row in cursor.fetchall()]
+        assert expected, expected_view
+        response = client.post(f"/api/nodes/{view['node_id']}/sql", json={"sql": sql, **request})
+        assert response.status_code == 200, response.text
+        assert response.json()["rows"] == expected, (request, expected_view)
+
+    # A volatile formula has no answer to compare; it still loads.
+    volatile = mutation_sql(view["sql"], columns, 4, "random()", "r")
+    response = client.post(f"/api/nodes/{view['node_id']}/sql", json={
+        "sql": volatile, "dedupe_columns": ["grp"], "sorts": [by("price", "desc")],
+    })
+    assert response.status_code == 200, response.text
+    assert len(response.json()["rows"]) == 7
 
 
 def test_deduped_stats_keep_the_rows_the_sorted_page_shows(client):
