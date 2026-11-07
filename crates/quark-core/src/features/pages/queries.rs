@@ -60,12 +60,6 @@ pub(super) fn compute_stats(
     params: &[Value],
     source: Option<&StatsEntry>,
 ) -> duckdb::Result<StatsEntry> {
-    let total_rows = conn.query_row(
-        &format!("SELECT count(*) FROM {relation}"),
-        bind(params),
-        |row| row.get(0),
-    )?;
-
     // Selecting rows cannot introduce nulls into a source column that has none.
     let nullable: Vec<_> = columns
         .iter()
@@ -79,29 +73,28 @@ pub(super) fn compute_stats(
             })
         })
         .collect();
+    let aggregates = std::iter::once("count(*)".to_owned())
+        .chain(nullable.iter().map(|(_, meta)| {
+            format!(
+                "avg(CASE WHEN {} IS NULL THEN 1.0 ELSE 0.0 END)",
+                quote_ident(&meta.name)
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (total_rows, measured) = conn.query_row(
+        &format!("SELECT {aggregates} FROM {relation}"),
+        bind(params),
+        |row| {
+            let measured = (0..nullable.len())
+                .map(|index| Ok(row.get::<_, Option<f64>>(index + 1)?.unwrap_or(0.0)))
+                .collect::<duckdb::Result<Vec<_>>>()?;
+            Ok((row.get(0)?, measured))
+        },
+    )?;
     let mut null_fractions = vec![0.0; columns.len()];
-    if !nullable.is_empty() {
-        let averages: Vec<String> = nullable
-            .iter()
-            .map(|(_, meta)| {
-                format!(
-                    "avg(CASE WHEN {} IS NULL THEN 1.0 ELSE 0.0 END)",
-                    quote_ident(&meta.name)
-                )
-            })
-            .collect();
-        let measured: Vec<f64> = conn.query_row(
-            &format!("SELECT {} FROM {relation}", averages.join(", ")),
-            bind(params),
-            |row| {
-                (0..nullable.len())
-                    .map(|index| Ok(row.get::<_, Option<f64>>(index)?.unwrap_or(0.0)))
-                    .collect()
-            },
-        )?;
-        for ((index, _), fraction) in nullable.into_iter().zip(measured) {
-            null_fractions[index] = fraction;
-        }
+    for ((index, _), fraction) in nullable.into_iter().zip(measured) {
+        null_fractions[index] = fraction;
     }
 
     Ok(StatsEntry {
