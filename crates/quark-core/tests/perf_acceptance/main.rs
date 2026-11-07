@@ -200,10 +200,23 @@ fn two_million_row_csv_meets_the_targets() {
         import.elapsed(),
         None,
     );
-    let deep = timed_page(&state, &dataset, &filtered(10_001));
+    // The first request after the import also opens the engine on the cache, so the step is the
+    // median of 5, each with a filter no earlier request sent, so none is a response-cache hit.
+    let deep = (0..RUNS).map(|_| {
+        let mut filters = fresh_filter();
+        filters
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"column": "qty", "operator": ">", "value": 10}));
+        timed_page(
+            &state,
+            &dataset,
+            &request(10_001, json!({ "filters": filters })),
+        )
+    });
     table.add(
         "after the import: page at offset 1,000,000, qty > 10",
-        deep,
+        median(deep.collect()),
         Some(60.0),
     );
 
