@@ -2,8 +2,9 @@
 // 2M rows deduped and sorted by a number, as an 8-column source and as a 52-column one
 // (30 VARCHAR), both read from the columnar cache. Two routes are timed: the dataset route that
 // builder stats and charts use, and `/sql`, which the UI loads every page through with the
-// View's plain-scan SQL. The 52-column count and first page may take at most 1.5x the 8-column
-// ones, for a 50-value key and for a unique one; a selective filter must prune the scan.
+// View's SQL: its plain scan, or the scan wrapped by the column changes the user made
+// (`frontend/src/lib/mutation-sql.ts`). The 52-column count and first page may take at most 1.5x
+// the 8-column ones, for a 50-value key and for a unique one; a selective filter must prune the scan.
 // clippy.toml allows unwrap only inside `#[test]` fns; the helpers below are test code too.
 
 use super::routes::reads_cache;
@@ -13,6 +14,7 @@ use quark_core::features::sources::service::project_views;
 use quark_core::relation::filtered::filtered;
 use quark_core::runtime::registry::DEFAULT_PROJECT_ID;
 use quark_core::shared::sql::quote_ident;
+use std::ops::RangeInclusive;
 
 const MAX_RATIO: f64 = 1.5;
 const COUNT_CAP_MS: f64 = 100.0;
@@ -60,8 +62,43 @@ pub(super) struct Source {
     pub(super) dataset: String,
     /// The dataset's view on the node engine, quoted.
     pub(super) table: String,
-    view_node: String,
-    view_sql: String,
+    /// The project node, and the SQL and columns of the View the UI opens there.
+    pub(super) view_node: String,
+    pub(super) view_sql: String,
+    columns: Vec<String>,
+}
+
+/// `buildMutationSql` (frontend/src/lib/mutation-sql.ts): the View with a formula column at `index`.
+fn mutation_sql(
+    source: &str,
+    columns: &[String],
+    index: usize,
+    formula: &str,
+    alias: &str,
+) -> String {
+    let mut select: Vec<String> = columns.iter().map(|column| quote_ident(column)).collect();
+    select.insert(index, format!("{formula} AS {}", quote_ident(alias)));
+    format!(
+        "SELECT {} FROM (\n{source}\n) AS mutation_source",
+        select.join(", ")
+    )
+}
+
+impl Source {
+    /// The View with one formula column, `p2`, right of `price`, as the UI's formula bar adds it.
+    pub(super) fn with_formula(&self) -> String {
+        mutation_sql(&self.view_sql, &self.columns, 3, "\"price\" * 2", "p2")
+    }
+
+    /// Two stacked changes: the formula, then `qty` replaced in place
+    /// (`buildColumnReplacementSql`).
+    pub(super) fn stacked(&self) -> String {
+        let mut columns = self.columns.clone();
+        columns.insert(3, "p2".to_owned());
+        let index = columns.iter().position(|column| column == "qty").unwrap();
+        columns.remove(index);
+        mutation_sql(&self.with_formula(), &columns, index, "\"qty\" + 1", "qty")
+    }
 }
 
 pub(super) struct Sources {
@@ -105,6 +142,7 @@ pub(super) fn sources() -> &'static Sources {
                 table: format!("{}.{}", quote_ident(&info.schema), quote_ident(&info.name)),
                 view_node: view.node_id.clone(),
                 view_sql: view.sql.clone(),
+                columns: view.columns.clone(),
             }
         });
         Sources {
@@ -116,13 +154,13 @@ pub(super) fn sources() -> &'static Sources {
     })
 }
 
-/// A first-page request sorted by price and deduped on `key`, with `filters`.
-fn deduped(key: &str, filters: Value) -> Value {
+/// A first-page request sorted by `sort` descending and deduped on `key`, with `filters`.
+fn deduped(key: &str, sort: &str, filters: Value) -> Value {
     json!({
         "page": 1,
         "page_size": 100,
         "filters": filters,
-        "sorts": [{"column": "price", "direction": "desc"}],
+        "sorts": [{"column": sort, "direction": "desc"}],
         "dedupe_columns": [key],
     })
 }
@@ -194,6 +232,13 @@ fn within(narrow: Duration) -> Option<f64> {
     Some(narrow.as_secs_f64() * 1000.0 * MAX_RATIO)
 }
 
+/// Adds `step` at each width within `cap`, and the 52-column time within 1.5x of the 8-column one.
+fn add_widths(table: &mut Table, step: &str, (narrow, wide): (Duration, Duration), cap: f64) {
+    table.add(&format!("{step}, 8 columns"), narrow, Some(cap));
+    table.add(&format!("{step}, 52 columns (30 VARCHAR)"), wide, Some(cap));
+    table.add(&format!("{step}, within 1.5x"), wide, within(narrow));
+}
+
 #[test]
 #[ignore = "timings depend on the machine; run with --ignored in a release build"]
 fn deduped_view_costs_the_same_at_8_and_52_columns() {
@@ -204,107 +249,96 @@ fn deduped_view_costs_the_same_at_8_and_52_columns() {
     for source in [&sources.narrow, &sources.wide] {
         let target = Target::Dataset(source.dataset.clone());
         let count = median_of(|| {
-            let (elapsed, count) = timed_count(source.node, &target, &deduped("grp", above(0)));
+            let (elapsed, count) =
+                timed_count(source.node, &target, &deduped("grp", "price", above(0)));
             assert_eq!(count, 50, "{}", source.node);
             elapsed
         });
-        let page = median_of(|| timed_dataset_page(source, &deduped("grp", above(0))));
+        let page = median_of(|| timed_dataset_page(source, &deduped("grp", "price", above(0))));
         measured.push((count, page));
     }
     let [(narrow_count, narrow_page), (wide_count, wide_page)] = measured.try_into().unwrap();
-    table.add("deduped count, 8 columns", narrow_count, Some(COUNT_CAP_MS));
-    table.add(
-        "deduped count, 52 columns (30 VARCHAR)",
-        wide_count,
-        Some(COUNT_CAP_MS),
-    );
-    table.add(
-        "deduped count, 52 columns, within 1.5x of 8",
-        wide_count,
-        within(narrow_count),
-    );
-    table.add(
-        "deduped first page, 8 columns",
-        narrow_page,
-        Some(PAGE_CAP_MS),
-    );
-    table.add(
-        "deduped first page, 52 columns (30 VARCHAR)",
-        wide_page,
-        Some(PAGE_CAP_MS),
-    );
-    table.add(
-        "deduped first page, 52 columns, within 1.5x of 8",
-        wide_page,
-        within(narrow_page),
-    );
+    let counts = (narrow_count, wide_count);
+    add_widths(&mut table, "deduped count", counts, COUNT_CAP_MS);
+    let pages = (narrow_page, wide_page);
+    add_widths(&mut table, "deduped first page", pages, PAGE_CAP_MS);
     table.finish();
 }
 
 /// Times one first page as the UI loads it: `POST /sql` with the View's SQL, read as Arrow.
-fn timed_sql_page(runtime: &tokio::runtime::Runtime, source: &Source, body: &Value) -> Duration {
-    let mut body = body.clone();
-    body["sql"] = source.view_sql.clone().into();
-    let uri = format!("/api/nodes/{}/sql", source.view_node);
+fn timed_sql_page(
+    runtime: &tokio::runtime::Runtime,
+    node: &str,
+    sql: &str,
+    body: Value,
+) -> Duration {
+    let mut body = body;
+    body["sql"] = sql.into();
+    let uri = format!("/api/nodes/{node}/sql");
     runtime.block_on(timed(&sources().app, "POST", &uri, Some(body), ARROW))
 }
+
+/// Times the `/sql` count and first page of each source's View as `view` writes it, for requests
+/// from `body`, and adds the caps: each within its cap, 52 columns within 1.5x of 8.
+fn add_width_case(
+    table: &mut Table,
+    runtime: &tokio::runtime::Runtime,
+    case: &str,
+    view: impl Fn(&Source) -> String,
+    body: impl Fn() -> Value,
+    kept: RangeInclusive<i64>,
+) {
+    let mut measured = Vec::new();
+    for source in [&sources().narrow, &sources().wide] {
+        let sql = view(source);
+        let target = Target::Sql(sql.clone());
+        let count = median_of(|| {
+            let (elapsed, count) = timed_count(&source.view_node, &target, &body());
+            assert!(kept.contains(&count), "{case}: {count} rows");
+            elapsed
+        });
+        let page = median_of(|| timed_sql_page(runtime, &source.view_node, &sql, body()));
+        measured.push((count, page));
+    }
+    let [(narrow_count, narrow_page), (wide_count, wide_page)] = measured.try_into().unwrap();
+    let counts = (narrow_count, wide_count);
+    add_widths(table, &format!("{case}: count"), counts, COUNT_CAP_MS);
+    let pages = (narrow_page, wide_page);
+    add_widths(table, &format!("{case}: first page"), pages, PAGE_CAP_MS);
+}
+
+/// A 50-value key keeps 50 rows; a unique key keeps all of them, so its page sorts 2M rows.
+const GROUPS: RangeInclusive<i64> = 50..=50;
+const ALL: RangeInclusive<i64> = 1_990_000..=ROWS_KEPT;
 
 #[test]
 #[ignore = "timings depend on the machine; run with --ignored in a release build"]
 fn deduped_sql_route_costs_the_same_at_8_and_52_columns() {
     let _serial = SERIAL.blocking_lock();
-    let sources = sources();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut table = Table::default();
-    // A 50-value key keeps 50 rows; a unique key keeps all of them, so its page sorts 2M rows.
-    for (key, kept) in [("grp", 50..=50), ("sku", 1_990_000..=ROWS_KEPT)] {
-        let mut measured = Vec::new();
-        for source in [&sources.narrow, &sources.wide] {
-            let target = Target::Sql(source.view_sql.clone());
-            let count = median_of(|| {
-                let (elapsed, count) =
-                    timed_count(&source.view_node, &target, &deduped(key, above(0)));
-                assert!(kept.contains(&count), "{key}: {count} rows");
-                elapsed
-            });
-            let page = median_of(|| timed_sql_page(&runtime, source, &deduped(key, above(0))));
-            measured.push((count, page));
-        }
-        let [(narrow_count, narrow_page), (wide_count, wide_page)] = measured.try_into().unwrap();
-        let step = |what: &str| format!("/sql, dedupe on {key}: {what}");
-        table.add(&step("count, 8 columns"), narrow_count, Some(COUNT_CAP_MS));
-        table.add(&step("count, 52 columns"), wide_count, Some(COUNT_CAP_MS));
-        table.add(
-            &step("count, within 1.5x"),
-            wide_count,
-            within(narrow_count),
-        );
-        table.add(
-            &step("first page, 8 columns"),
-            narrow_page,
-            Some(PAGE_CAP_MS),
-        );
-        table.add(
-            &step("first page, 52 columns"),
-            wide_page,
-            Some(PAGE_CAP_MS),
-        );
-        table.add(
-            &step("first page, within 1.5x"),
-            wide_page,
-            within(narrow_page),
-        );
+    let plain = |source: &Source| source.view_sql.clone();
+    for (key, kept) in [("grp", GROUPS), ("sku", ALL)] {
+        let body = || deduped(key, "price", above(0));
+        let case = format!("/sql, dedupe on {key}");
+        add_width_case(&mut table, &runtime, &case, plain, body, kept);
     }
     // About 1,000 rows pass `id > 1999000`: numbered after the filter, the scan is pruned.
-    let wide = &sources.wide;
+    let wide = &sources().wide;
     let target = Target::Sql(wide.view_sql.clone());
     let count = median_of(|| {
-        let (elapsed, count) =
-            timed_count(&wide.view_node, &target, &deduped("grp", above(1_999_000)));
+        let (elapsed, count) = timed_count(
+            &wide.view_node,
+            &target,
+            &deduped("grp", "price", above(1_999_000)),
+        );
         assert!((1..=50).contains(&count), "{count} rows");
         elapsed
     });
-    let page = median_of(|| timed_sql_page(&runtime, wide, &deduped("grp", above(1_999_000))));
+    let page = median_of(|| {
+        let body = deduped("grp", "price", above(1_999_000));
+        timed_sql_page(&runtime, &wide.view_node, &wide.view_sql, body)
+    });
     table.add(
         "/sql, id > 1999000, dedupe on grp: count, 52 columns",
         count,
@@ -315,5 +349,39 @@ fn deduped_sql_route_costs_the_same_at_8_and_52_columns() {
         page,
         Some(SELECTIVE_CAP_MS),
     );
+    table.finish();
+}
+
+#[test]
+#[ignore = "timings depend on the machine; run with --ignored in a release build"]
+fn deduped_changed_view_costs_the_same_at_8_and_52_columns() {
+    let _serial = SERIAL.blocking_lock();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut table = Table::default();
+    // About 865,000 of the 1M prices occur among 2M rows, so keying on `p2` keeps that many.
+    let formula: fn(&Source) -> String = Source::with_formula;
+    let cases = [
+        ("formula, dedupe on grp", "grp", "price", formula, GROUPS),
+        ("formula, dedupe on sku", "sku", "price", formula, ALL),
+        (
+            "formula + replaced, by p2",
+            "grp",
+            "p2",
+            Source::stacked,
+            GROUPS,
+        ),
+        (
+            "formula, dedupe on p2",
+            "p2",
+            "price",
+            formula,
+            800_000..=900_000,
+        ),
+    ];
+    for (case, key, sort, view, kept) in cases {
+        let body = || deduped(key, sort, above(0));
+        let case = format!("/sql, {case}");
+        add_width_case(&mut table, &runtime, &case, view, body, kept);
+    }
     table.finish();
 }
