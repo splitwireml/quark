@@ -103,7 +103,7 @@ pub(crate) fn resolve_query(
                     .iter()
                     .any(|meta| meta.name.eq_ignore_ascii_case("rowid"))
             {
-                resolved.rowid_table = projection::cached(conn, parsed)?;
+                resolved.rowid_table = projection::cached(conn, parsed, &resolved.columns)?;
                 if resolved.rowid_table.is_some() {
                     resolved.lead.clear();
                 }

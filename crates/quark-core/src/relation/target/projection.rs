@@ -8,9 +8,16 @@ use serde_json::{Value, json};
 use super::{cache_table, datasets, describe, internal};
 use crate::error::ApiResult;
 use crate::relation::guard::parse_select;
+use crate::shared::columns::ColumnMeta;
 use crate::shared::sql::sql_string;
 
-pub(super) fn cached(conn: &Connection, mut parsed: Value) -> ApiResult<Option<String>> {
+mod roundtrip;
+
+pub(super) fn cached(
+    conn: &Connection,
+    mut parsed: Value,
+    visible: &[ColumnMeta],
+) -> ApiResult<Option<String>> {
     let node = &parsed["statements"][0]["node"];
     let mut functions = BTreeSet::new();
     let Some(base) = source(node, &mut functions) else {
@@ -45,14 +52,14 @@ pub(super) fn cached(conn: &Connection, mut parsed: Value) -> ApiResult<Option<S
         &mut parsed["statements"][0]["node"],
         &cached["statements"][0]["node"],
     );
-    let sql: String = conn
-        .query_row(
-            "SELECT json_deserialize_sql(?)",
-            [parsed.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(internal)?;
-    Ok(Some(format!("({sql})")))
+    let Ok(sql) = conn.query_row(
+        "SELECT json_deserialize_sql(?)",
+        [parsed.to_string()],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return Ok(None);
+    };
+    Ok(roundtrip::preserves(conn, parsed, &sql, visible).then(|| format!("({sql})")))
 }
 
 fn empty(value: &Value) -> bool {
