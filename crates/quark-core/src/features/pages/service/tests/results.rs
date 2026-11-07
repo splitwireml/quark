@@ -1,6 +1,12 @@
 //! Tests for the result cache: building, reuse, eviction and rebuilds.
 
 use super::*;
+use duckdb::core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId};
+use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
+use std::error::Error;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{self, Sender};
 
 const ROWS: &str = "CREATE TABLE t AS SELECT range AS id, range * 7 AS h FROM range(1000)";
 
@@ -220,41 +226,109 @@ fn database_node_builds_result_cache() {
     assert_eq!(names, ["t"]);
 }
 
-/// Single-threaded, so a page over it stays busy for hundreds of milliseconds in both its count and its rows.
-const SLOW_QUERY: &str =
-    "SELECT count(*) FROM range(3000) a(x), range(10000) b(y) WHERE (x + y) % 7 = 0";
+/// One pause of `paused_scan()`: where it paused, and the handle that resumes it.
+type Pause = (&'static str, Sender<()>);
 
+/// Each pause of `paused_scan()` lands here.
+static PAUSES: Mutex<Option<Sender<Pause>>> = Mutex::new(None);
+
+/// How long a paused query waits for the test before going on without it. A lock held across
+/// the query keeps the test from resuming in time; a free one is taken within microseconds.
+const GIVE_UP: Duration = Duration::from_secs(5);
+
+/// Holds the calling query until the test resumes it, or `GIVE_UP` passes.
+fn pause(kind: &'static str) {
+    let (resume, resumed) = mpsc::channel();
+    let pauses = PAUSES.lock().unwrap().clone();
+    if pauses.is_some_and(|pauses| pauses.send((kind, resume)).is_ok()) {
+        // Dropping `resumed` on return makes a late resume fail, which the test reports.
+        let _ = resumed.recv_timeout(GIVE_UP);
+    }
+}
+
+/// A one-row table function that pauses each time DuckDB binds it and each time a query scans it.
+struct PausedScan;
+
+impl VTab for PausedScan {
+    type BindData = ();
+    type InitData = AtomicBool;
+
+    fn bind(bind: &BindInfo) -> Result<(), Box<dyn Error>> {
+        bind.add_result_column("x", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        pause("bind");
+        Ok(())
+    }
+
+    fn init(_: &InitInfo) -> Result<AtomicBool, Box<dyn Error>> {
+        Ok(AtomicBool::new(false))
+    }
+
+    fn func(
+        scan: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        if scan.get_init_data().swap(true, Ordering::Relaxed) {
+            output.set_len(0);
+        } else {
+            pause("scan");
+            output.flat_vector(0).insert(0, "row");
+            output.set_len(1);
+        }
+        Ok(())
+    }
+}
+
+/// While the page sits paused inside each of its queries, the test takes all three locks before
+/// resuming it. This proves the locks are free during the queries without depending on how long
+/// the page or any sleep takes.
 #[test]
 fn cache_locks_are_free_while_a_page_runs() {
-    let engine = engine("SET threads = 1");
-    let target = Target::Sql(SLOW_QUERY.to_owned());
+    let engine = engine("");
+    let (pauses, paused) = mpsc::channel();
+    *PAUSES.lock().unwrap() = Some(pauses);
+    let target = Target::Sql("SELECT * FROM paused_scan()".to_owned());
     let request = QueryRequest::default();
 
-    let (page_time, slowest_lock, samples) = thread::scope(|scope| {
+    let (body, checks) = thread::scope(|scope| {
         let page = scope.spawn(|| {
-            let started = Instant::now();
-            let body = fetch(&engine, &target, &request, Format::Json).unwrap();
-            assert_eq!(json_body(body)["total_rows"], 1);
-            started.elapsed()
+            engine.read(None, |conn| {
+                conn.register_table_function::<PausedScan>("paused_scan")
+                    .unwrap();
+                run_page(&engine, conn, &target, &request, Format::Json)
+            })
         });
-        let mut slowest = Duration::ZERO;
-        let mut samples = 0;
-        while !page.is_finished() {
-            let waited = Instant::now();
-            drop(engine.stats());
-            drop(engine.results());
-            drop(engine.primary());
-            slowest = slowest.max(waited.elapsed());
-            samples += 1;
-            thread::sleep(Duration::from_millis(5));
+        let mut checks = Vec::new();
+        loop {
+            // Read before waiting, so no pause sent before the page finished is missed.
+            let finished = page.is_finished();
+            match paused.recv_timeout(Duration::from_millis(10)) {
+                Ok((kind, resume)) => {
+                    let waited = Instant::now();
+                    drop(engine.stats());
+                    drop(engine.results());
+                    drop(engine.primary());
+                    let waited = waited.elapsed();
+                    checks.push((kind, waited, resume.send(()).is_ok()));
+                }
+                Err(_) if finished => break,
+                Err(_) => {}
+            }
         }
-        (page.join().unwrap(), slowest, samples)
+        (page.join().unwrap(), checks)
     });
+    *PAUSES.lock().unwrap() = None;
 
-    assert!(page_time > Duration::from_millis(150), "{page_time:?}");
-    assert!(samples >= 10, "only {samples} checks ran during the page");
+    assert_eq!(json_body(body.unwrap().unwrap())["total_rows"], 1);
+    let scans = checks.iter().filter(|(kind, ..)| *kind == "scan").count();
     assert!(
-        slowest_lock < Duration::from_millis(50),
-        "a cache lock was unavailable for {slowest_lock:?} during a {page_time:?} page"
+        scans >= 2,
+        "the stats and row queries should both pause: {checks:?}"
     );
+    for (kind, waited, resumed) in &checks {
+        assert!(
+            resumed,
+            "a cache lock was held through a page query's {kind}: it took {waited:?} to lock, \
+             and the query gave up waiting first; all pauses: {checks:?}"
+        );
+    }
 }
