@@ -4,10 +4,12 @@ use duckdb::Connection;
 use serde_json::Value;
 
 use super::describe::{datasets, describe};
-use super::guard::check_select;
+use super::guard::parse_select;
 use crate::error::{ApiError, ApiResult};
 use crate::shared::columns::ColumnMeta;
 use crate::shared::sql::quote_ident;
+
+mod projection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -20,7 +22,7 @@ pub(crate) struct Resolved {
     pub(crate) table: String,
     pub(crate) display_table: String,
     pub(crate) columns: Vec<ColumnMeta>,
-    /// Physical flat-file cache table, only resolved for dedupe requests.
+    /// Flat-file cache table or row-wise projection carrying its rowid, for dedupe only.
     pub(crate) rowid_table: Option<String>,
     /// Parameters for placeholders inside `table`, bound before the filters'.
     pub(crate) lead: Vec<Value>,
@@ -83,7 +85,8 @@ pub(crate) fn resolve_query(
             })
         }
         Target::Sql(sql) => {
-            let sql = check_select(conn, sql)?;
+            let parsed = parse_select(conn, sql)?;
+            let sql = sql.trim().to_owned();
             let columns = describe(conn, "query(?)", &[&sql]).map_err(describe_error)?;
             let mut resolved = Resolved {
                 table: "query(?)".to_owned(),
@@ -100,17 +103,9 @@ pub(crate) fn resolve_query(
                     .iter()
                     .any(|meta| meta.name.eq_ignore_ascii_case("rowid"))
             {
-                for item in datasets(conn).map_err(internal)? {
-                    let table =
-                        format!("{}.{}", quote_ident(&item.schema), quote_ident(&item.name));
-                    if item.kind == "VIEW" && sql == format!("SELECT * FROM {table}") {
-                        if let Some(cache) = cache_table(conn, &item.schema, &item.name)? {
-                            resolved.table = table;
-                            resolved.rowid_table = Some(cache);
-                            resolved.lead.clear();
-                        }
-                        break;
-                    }
+                resolved.rowid_table = projection::cached(conn, parsed)?;
+                if resolved.rowid_table.is_some() {
+                    resolved.lead.clear();
                 }
             }
             Ok(resolved)

@@ -211,8 +211,14 @@ pub(crate) fn build_with_rowid(
         };
         let relation = match rowid_table {
             Some(cache) => {
-                let (relation, query) =
-                    dedupe::cached(cache, &position, &where_sql, &qualify, &orders.join(", "));
+                let (relation, query) = dedupe::cached(
+                    cache,
+                    columns,
+                    &position,
+                    &where_sql,
+                    &qualify,
+                    &orders.join(", "),
+                );
                 page = Some(query);
                 relation
             }

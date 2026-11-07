@@ -115,6 +115,7 @@ pub fn run_page(
     let stats = match cached {
         Some(stats) => stats,
         None => {
+            // Profile the projected source too: replacements can introduce nulls in any column.
             let source = if let Some(table) = &resolved.rowid_table {
                 let source_key = stats_key(table, &[]);
                 let cached = engine.stats().get(&source_key);

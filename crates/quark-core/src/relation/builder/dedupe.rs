@@ -16,14 +16,20 @@ pub(super) fn position(columns: &[ColumnMeta]) -> String {
 
 pub(super) fn cached(
     table: &str,
+    columns: &[ColumnMeta],
     position: &str,
     filters: &str,
     qualify: &str,
     order: &str,
 ) -> (String, String) {
+    let select = columns
+        .iter()
+        .map(|meta| quote_ident(&meta.name))
+        .collect::<Vec<_>>()
+        .join(", ");
     let kept = format!("SELECT rowid AS {position} FROM {table}{filters}{qualify}");
     let fetch = |rows: &str| {
-        format!("(SELECT rowid AS {position}, * FROM {table} WHERE rowid IN ({rows}))")
+        format!("(SELECT rowid AS {position}, {select} FROM {table} WHERE rowid IN ({rows}))")
     };
     // Limit the narrow rowids before fetching payloads, including when nearly every key is unique.
     let page = fetch(&format!("{kept} ORDER BY {order} LIMIT ? OFFSET ?"));
