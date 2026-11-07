@@ -1450,6 +1450,40 @@ def wait_for_columnar_cache(path):
     time.sleep(0.5)
 
 
+def cached_view_and_truth(client, tmp_path, name, content, count):
+    """Uploads the CSV `content`, whose `id` counts down from `count`, and waits for its columnar
+    cache. Returns its project View and DuckDB holding the same CSV as `src`, with `pos` its row's
+    source position."""
+    path = tmp_path / "expected" / name
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(content)
+    node = upload(client, name, content.encode())
+    view = next(view for view in client.get("/api/projects/default/views").json() if view["source_id"] == node["id"])
+    wait_for_columnar_cache(tmp_path)
+    truth = duckdb.connect()
+    truth.execute(f"CREATE TABLE src AS SELECT *, {count} - id AS pos FROM read_csv(?)", [str(path)])
+    return view, truth
+
+
+def first_rows(truth, view, request):
+    """The page of `view` (SQL over `src` that keeps `pos`) that dedupe `request` keeps: per key, the
+    first row by the sorts, then by source position, in that order."""
+    key = request["dedupe_columns"][0]
+    order = ", ".join([*(f'"{s["column"]}" {s["direction"]}' for s in request["sorts"]), "pos"])
+    page, size = request.get("page", 1), request.get("page_size", 100)
+    cursor = truth.execute(
+        f"SELECT * EXCLUDE (pos) FROM ({view}) "
+        f'QUALIFY row_number() OVER (PARTITION BY "{key}" ORDER BY {order}) = 1 '
+        f"ORDER BY {order} LIMIT {size} OFFSET {(page - 1) * size}"
+    )
+    names = [item[0] for item in cursor.description]
+    return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
+def by(column, direction):
+    return {"column": column, "direction": direction}
+
+
 def test_deduped_mutation_views_keep_each_groups_first_row_over_every_row(client, tmp_path):
     # A View the user changed (a formula, a replaced column, an edited cell) keeps, per dedupe group,
     # its first row by the sorts, then by source position, and evaluates every formula over all of
@@ -1460,26 +1494,14 @@ def test_deduped_mutation_views_keep_each_groups_first_row_over_every_row(client
     content = "id,grp,price,label\n" + "".join(
         f"{count - i},{i * 3 % 7},{i // 7 % 10},row{i}\n" for i in range(count)
     )
-    csv_path = tmp_path / "expected" / "ties.csv"
-    csv_path.parent.mkdir()
-    csv_path.write_text(content)
-    node = upload(client, "ties.csv", content.encode())
-    view = next(view for view in client.get("/api/projects/default/views").json() if view["source_id"] == node["id"])
+    view, truth = cached_view_and_truth(client, tmp_path, "ties.csv", content, count)
     columns = view["columns"]
     assert columns == ["id", "grp", "price", "label"]
-    wait_for_columnar_cache(tmp_path)
-
-    truth = duckdb.connect()
-    truth.execute(f"CREATE TABLE src AS SELECT *, {count} - id AS pos FROM read_csv(?)", [str(csv_path)])
     formula = mutation_sql(view["sql"], columns, 4, '"price" * 2', "p2")
     stacked = replacement_sql(formula, [*columns, "p2"], "label", 'upper("label")')
     window = mutation_sql(view["sql"], columns, 4, '"price" - avg("price") OVER ()', "spread")
     # Row 12 is the source's 12th row: group 5, price 1, now the group's highest price.
     edited = cell_edit_sql(view["sql"], columns, 12, "price", "50")
-
-    def by(column, direction):
-        return {"column": column, "direction": direction}
-
     cases = [
         # (View SQL, request, the same View over `src` keeping `pos` last)
         (formula, {"dedupe_columns": ["grp"], "sorts": [by("p2", "desc")]},
@@ -1499,16 +1521,7 @@ def test_deduped_mutation_views_keep_each_groups_first_row_over_every_row(client
          'SELECT id, grp, CASE WHEN pos = 11 THEN 50 ELSE price END AS price, label, pos FROM src'),
     ]
     for sql, request, expected_view in cases:
-        key = request["dedupe_columns"][0]
-        order = ", ".join([*(f'"{s["column"]}" {s["direction"]}' for s in request["sorts"]), "pos"])
-        page, size = request.get("page", 1), request.get("page_size", 100)
-        cursor = truth.execute(
-            f"SELECT * EXCLUDE (pos) FROM ({expected_view}) "
-            f'QUALIFY row_number() OVER (PARTITION BY "{key}" ORDER BY {order}) = 1 '
-            f"ORDER BY {order} LIMIT {size} OFFSET {(page - 1) * size}"
-        )
-        names = [item[0] for item in cursor.description]
-        expected = [dict(zip(names, row)) for row in cursor.fetchall()]
+        expected = first_rows(truth, expected_view, request)
         assert expected, expected_view
         response = client.post(f"/api/nodes/{view['node_id']}/sql", json={"sql": sql, **request})
         assert response.status_code == 200, response.text
@@ -1521,6 +1534,119 @@ def test_deduped_mutation_views_keep_each_groups_first_row_over_every_row(client
     })
     assert response.status_code == 200, response.text
     assert len(response.json()["rows"]) == 7
+
+
+def literal_rows(count=20_000):
+    """`count` rows: `id` counts down, 7 groups, `qty` from 0 to 99, a name and a day."""
+    return "id,grp,qty,name,d\n" + "".join(
+        f"{count - i},{i * 3 % 7},{i % 100},name{i:05d},2024-01-{i % 28 + 1:02d}\n" for i in range(count)
+    )
+
+
+def pages_on_both_paths(client, view, sql, request, accept="application/json"):
+    """The page of `sql` as sent, and of the same SQL wrapped so the server takes its generic path."""
+    responses = [
+        client.post(f"/api/nodes/{view['node_id']}/sql", json={"sql": item, **request}, headers={"Accept": accept})
+        for item in (sql, f"SELECT * FROM ({sql}) AS generic_check")
+    ]
+    for response in responses:
+        assert response.status_code == 200, response.text
+    return responses
+
+
+def picked(rows, keys):
+    return [{key: row[key] for key in keys} for row in rows]
+
+
+def test_deduped_changed_view_keeps_scientific_literals_double(client, tmp_path):
+    # `1e-3` and `1e3` are DOUBLE literals. A deduped View that reads the columnar cache must keep
+    # them DOUBLE: re-rendered as `0.001` and `1000.0` they turn the column into a DECIMAL, which the
+    # grid reads as unscaled integers (99 for 0.099). Type and values must match the generic path.
+    count = 20_000
+    view, truth = cached_view_and_truth(client, tmp_path, "literals.csv", literal_rows(count), count)
+    columns = view["columns"]
+    assert columns == ["id", "grp", "qty", "name", "d"]
+    milli = mutation_sql(view["sql"], columns, 3, '"qty" * 1e-3', "m")
+    sql = mutation_sql(milli, [*columns[:3], "m", *columns[3:]], 4, '"qty" * 1e3', "k")
+    request = {"dedupe_columns": ["grp"], "sorts": [by("qty", "desc")]}
+    keys = ["id", "grp", "qty", "m", "k"]
+    expected = first_rows(truth, "SELECT id, grp, qty, qty * 1e-3 AS m, qty * 1e3 AS k, pos FROM src", request)
+    assert len(expected) == 7 and expected[0]["m"] == 99 * 1e-3
+
+    page, generic = (response.json() for response in pages_on_both_paths(client, view, sql, request))
+    assert page["columns"] == generic["columns"]
+    assert page["rows"] == generic["rows"]
+    assert picked(page["rows"], keys) == expected
+
+    import pyarrow as pa
+
+    page, generic = (
+        pa.ipc.open_stream(response.content).read_all()
+        for response in pages_on_both_paths(client, view, sql, request, backend_app.ARROW_MEDIA_TYPE)
+    )
+    assert [(field.name, field.type) for field in page.schema] == [(field.name, field.type) for field in generic.schema]
+    assert pa.types.is_float64(page.schema.field("m").type), page.schema
+    assert pa.types.is_float64(page.schema.field("k").type), page.schema
+    assert page.select(keys).to_pylist() == expected
+
+
+def test_deduped_changed_view_filters_a_formula_alike_on_page_stats_and_export(client, tmp_path):
+    # DuckDB computes `36 * 1e-3` as the DOUBLE 0.036000000000000004, so `m = 0.036` keeps no row,
+    # while a range around it keeps one row per group. The page, the column's stats and the display
+    # SQL that export runs must keep the same rows as the generic path and DuckDB itself.
+    count = 20_000
+    view, truth = cached_view_and_truth(client, tmp_path, "filtered.csv", literal_rows(count), count)
+    sql = mutation_sql(view["sql"], view["columns"], 3, '"qty" * 1e-3', "m")
+    keys = ["id", "grp", "qty", "m"]
+
+    def m(operator, value):
+        return {"column": "m", "operator": operator, "value": value}
+
+    for filters, where, kept in [
+        ([m("=", 0.036)], "m = 0.036", 0),
+        ([m(">", 0.0355), m("<", 0.0365)], "m > 0.0355 AND m < 0.0365", 7),
+    ]:
+        request = {"dedupe_columns": ["grp"], "sorts": [by("qty", "desc")], "filters": filters}
+        expected = first_rows(truth, f"SELECT * FROM (SELECT id, grp, qty, qty * 1e-3 AS m, pos FROM src) WHERE {where}", request)
+        assert len(expected) == kept
+
+        page, generic = (response.json() for response in pages_on_both_paths(client, view, sql, request))
+        assert picked(page["rows"], keys) == picked(generic["rows"], keys) == expected, where
+        assert page["total_rows"] == generic["total_rows"] == kept, where
+
+        stats = [
+            client.post(f"/api/nodes/{view['node_id']}/sql/columns/m/stats", json={"sql": item, **request})
+            for item in (sql, f"SELECT * FROM ({sql}) AS generic_check")
+        ]
+        for response in stats:
+            assert response.status_code == 200, response.text
+        summary = [{key: response.json().get(key) for key in ("row_count", "min", "max")} for response in stats]
+        assert summary[0] == summary[1], where
+        assert summary[0]["row_count"] == kept, where
+
+        sheet = {"node_id": view["node_id"], "name": "Kept", "sql": page["sql"]}
+        export = client.post("/api/exports", json={"format": "json", "filename": "kept", "sheets": [sheet]})
+        assert export.status_code == 200, export.text
+        assert picked(json.loads(export.text), keys) == expected, where
+
+
+@pytest.mark.parametrize("expression", ['CAST("name" AS VARCHAR(3))', '"d" + INTERVAL 1 DAY'])
+def test_deduped_changed_view_keeps_unaliased_expression_names(client, tmp_path, expression):
+    # Hand-written SQL may leave an expression unaliased, and DuckDB names the column after its text.
+    # A deduped View that reads the columnar cache must keep those names and answer like the
+    # generic path, not rename `VARCHAR(3)` to `VARCHAR` or rewrite the INTERVAL and fail with 422.
+    count = 20_000
+    view, truth = cached_view_and_truth(client, tmp_path, "unaliased.csv", literal_rows(count), count)
+    request = {"dedupe_columns": ["grp"], "sorts": [by("qty", "desc")]}
+    sql = f'SELECT "id", "grp", "qty", {expression} FROM (\n{view["sql"]}\n) AS mutation_source'
+    expected = first_rows(truth, f'SELECT "id", "grp", "qty", {expression}, pos FROM src', request)
+    assert len(expected) == 7
+
+    page, generic = (response.json() for response in pages_on_both_paths(client, view, sql, request))
+    assert page["columns"] == generic["columns"]
+    assert page["rows"] == generic["rows"]
+    assert [column["name"] for column in page["columns"]] == list(expected[0])
+    assert [row["id"] for row in page["rows"]] == [row["id"] for row in expected]
 
 
 def test_deduped_stats_keep_the_rows_the_sorted_page_shows(client):
