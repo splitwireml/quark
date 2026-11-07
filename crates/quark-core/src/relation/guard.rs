@@ -10,6 +10,11 @@ const SELECT_ONLY: &str = "SQL accepts only one read-only SELECT query";
 
 /// Returns the trimmed SQL when it is a single SELECT-shaped statement.
 pub fn check_select(conn: &Connection, sql: &str) -> ApiResult<String> {
+    parse_select(conn, sql)?;
+    Ok(sql.trim().to_owned())
+}
+
+pub(super) fn parse_select(conn: &Connection, sql: &str) -> ApiResult<Value> {
     // json_serialize_sql only folds a constant argument, so a bound `?` is rejected.
     let json: String = conn
         .query_row(
@@ -33,7 +38,7 @@ pub fn check_select(conn: &Connection, sql: &str) -> ApiResult<String> {
         );
     }
     match parsed["statements"].as_array() {
-        Some(statements) if statements.len() == 1 => Ok(sql.trim().to_owned()),
+        Some(statements) if statements.len() == 1 => Ok(parsed),
         _ => Err(select_only()),
     }
 }
