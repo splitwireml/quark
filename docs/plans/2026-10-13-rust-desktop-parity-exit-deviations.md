@@ -6,11 +6,17 @@ Mark each item **accept** or **fix** in review.
 
 ## Sign-off
 
-- **Date:** (blank)
-- **Status:** awaiting sign-off
-- **Accepted:** (blank)
-- **Fix now:** (blank)
-- **Moved to sub-project 3 or later:** (blank)
+- **Date:** 2026-11-13
+- **Status:** signed off by the CTO
+- **Accepted:** #1–11, #13–36, #39, #41–44, #50, #51, #53, #54. #42, #43, #44 and #50 stay as watch items. Also accepted:
+  - #12, approved with the spec.
+  - #40, superseded. PR #9 added a Tauri download handler, and exports were saved and checked on macOS and Windows. Linux is still unproven; that check moved to SPL-26.
+  - #55, fixed in `76ad794`. Rotating the token is the CTO's own action; the token is still in git history from SP1 commit `664538f`.
+- **Fix now:** none
+- **Moved to sub-project 3 or later:**
+  - #37, #45, #46, #47 and #48 go to SPL-25, together with PR #9's lock-test watchdog (review P2).
+  - #52 also goes to SPL-25.
+  - #38 (perf caps) goes to SPL-24. See the H0 decision in `2026-10-13-rust-desktop-parity-perf.md`.
 
 ## Python-parity choices (made during the run)
 

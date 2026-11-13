@@ -42,6 +42,8 @@ Rust is faster than Python in every row (smallest speedups: workbook confirm 2.8
 
 ## Spec 9 summary
 
+**H0 decision (CTO, 2026-11-13).** The caps stay as written. A case within 5% of its cap passes. On these figures, the XLSX export passes idle (0.99x). These miss: stats (1.13x idle, 1.44x under load), CSV export (1.86x), workbook confirm (1.56x idle), XLSX export under load (1.09x), and 5 of the 9 spec 4.6 reshape steps. "Efficiency is the main game": finding and fixing the bottlenecks, including measuring on macOS and Windows, is SPL-24.
+
 One row per spec 9 case. The caps are provisional (H0). Rust idle and Rust under load are the `perf_acceptance` medians below; Python and the ratio come from the `compare.py` table above (the ratio is Rust over Python, so below 1 means Rust is faster). The verdict compares the idle `perf_acceptance` median with the cap. The three export rows (CSV, XLSX, page during export) were measured again idle on 5aa4182 (L12, streaming); every other figure is from the exit run on e8f76df. The under-load figures are all from e8f76df, so the XLSX row now passes idle and misses under load. Python was not run under load.
 
 | Case | Cap | Rust idle (ms) | Rust load (ms) | Python (ms) | Rust/Python | Verdict |
